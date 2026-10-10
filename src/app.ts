@@ -44,9 +44,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
-    const ignored = ignoreReason(event, payload)
-      ?? (!repo || !allowlist.has(repo.toLowerCase()) ? `repo ${repo} not in allowlist` : undefined);
+    const ignored = ignoreReason(event, payload);
     if (ignored) return { status: 202, ignored };
+    if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
     if (!Number.isInteger(payload.installation?.id) || !pr.head?.sha || !pr.base?.sha) return { status: 400 };
 
     store.enqueue({
