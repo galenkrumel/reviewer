@@ -22,12 +22,44 @@ function gitEnv(token: string): NodeJS.ProcessEnv {
   };
 }
 
+/** A tool-input problem the reviewer may see; any other failure is reported generically. */
+export class ToolError extends Error {}
+
+// Inputs are `unknown` because they come straight from model tool calls.
 export interface Source {
-  readFile(path: string): Promise<string>;
-  /** The PR diff, base...head. */
-  diff(): Promise<string>;
-  /** Every path the PR changes, including renames, binaries and mode-only changes. */
+  /** A file at head, optionally lines start..end (1-based, inclusive). */
+  readFile(path: unknown, start?: unknown, end?: unknown): Promise<string>;
+  /** git grep at head, optionally limited to a path glob. */
+  grep(pattern: unknown, glob?: unknown): Promise<string>;
+  /** A directory at head; the root when no path is given. */
+  listDir(path?: unknown): Promise<string>;
+  /** The PR diff, base...head, optionally for one path. */
+  diff(path?: unknown): Promise<string>;
+  /** Every path the PR changes, including renames, binaries and mode-only changes. Not a reviewer tool. */
   changedPaths(): Promise<string[]>;
+}
+
+// ponytail: fixed cap on grep output lines; make it a budget when per-agent budgets land.
+const MAX_GREP_LINES = 200;
+
+const SYMLINK_MODE = '120000';
+
+/** A repository-relative path: not absolute, no empty, "." or ".." segments. One trailing "/" is allowed, as list_dir prints. */
+function checkPath(path: unknown): string {
+  const p = typeof path === 'string' ? path.replace(/(.)\/$/, '$1') : undefined;
+  if (p === undefined || !p.split('/').every((s) => s && s !== '.' && s !== '..')) {
+    throw new ToolError('path must be repository-relative, without "." or ".." segments');
+  }
+  return p;
+}
+
+/** Models send null for omitted optional arguments. */
+const omitted = (v: unknown): v is null | undefined => v === undefined || v === null;
+
+function optionalLine(n: unknown): number | undefined {
+  if (omitted(n)) return undefined;
+  if (!(Number.isInteger(n) && (n as number) >= 1)) throw new ToolError('line numbers must be integers >= 1');
+  return n as number;
 }
 
 /** Fetch exactly the head and base SHAs into the repository's bare clone and read at the pinned head. */
@@ -51,14 +83,77 @@ export async function openSource(opts: {
   // ponytail: no retry/backoff yet; a failed fetch fails the run.
   await git('fetch', '-q', '--filter=blob:none', 'origin', headSha, baseSha);
 
+  /** The head tree's entry at path, if any. Symlinks are never followed: a tree stores only the link target. */
+  async function entry(path: string) {
+    const out = await git('--literal-pathspecs', 'ls-tree', '-z', headSha, '--', path);
+    const e = treeEntries(out)[0];
+    return e?.name === path ? e : undefined;
+  }
+
   return {
-    readFile: (path) => git('cat-file', 'blob', `${headSha}:${path}`),
-    // quotePath off keeps non-ASCII paths unquoted, so addedLines can key on them.
-    diff: () => git('-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--src-prefix=a/', '--dst-prefix=b/',
-      `${baseSha}...${headSha}`),
+    async readFile(path, start, end) {
+      const e = await entry(checkPath(path));
+      if (!e) throw new ToolError('no such file at head');
+      if (e.mode === SYMLINK_MODE) throw new ToolError('path is a symlink');
+      if (e.type !== 'blob') throw new ToolError('path is not a file');
+      const [from = 1, to] = [optionalLine(start), optionalLine(end)];
+      if (to !== undefined && to < from) throw new ToolError('end_line is before start_line');
+      const lines = (await git('cat-file', 'blob', e.oid)).replace(/\n$/, '').split('\n');
+      if (from > lines.length) throw new ToolError(`start_line is past the end of the file (${lines.length} lines)`);
+      return lines.slice(from - 1, to).join('\n');
+    },
+
+    async grep(pattern, glob) {
+      if (typeof pattern !== 'string' || !pattern) throw new ToolError('pattern must be a non-empty string');
+      if (!omitted(glob) && (typeof glob !== 'string' || !glob)) throw new ToolError('glob must be a non-empty string');
+      // Pathspec magic is parsed only at the start, so the glob text cannot add more.
+      const pathspec = omitted(glob) ? [] : [`:(glob)${glob}`];
+      let out: string;
+      try {
+        out = await git('grep', '-n', '-I', '-E', '--no-color', '-e', pattern, headSha, '--', ...pathspec);
+      } catch (err: any) {
+        if (err?.code === 1) return 'no matches';
+        throw new ToolError('grep failed: invalid pattern, or a glob outside the repository');
+      }
+      // Lines come back as "<sha>:<path>:<line>:<text>".
+      const lines = out.split('\n').filter(Boolean).map((l) => l.slice(headSha.length + 1));
+      if (lines.length <= MAX_GREP_LINES) return lines.join('\n');
+      return [...lines.slice(0, MAX_GREP_LINES), `... ${lines.length - MAX_GREP_LINES} more matches; narrow the pattern or glob`]
+        .join('\n');
+    },
+
+    async listDir(path) {
+      let tree = headSha;
+      if (!omitted(path) && path !== '') {
+        const e = await entry(checkPath(path));
+        if (e?.type !== 'tree') throw new ToolError('no such directory at head');
+        tree = e.oid;
+      }
+      return treeEntries(await git('ls-tree', '-z', tree))
+        .map((e) => (e.type === 'tree' ? `${e.name}/` : e.name)).join('\n');
+    },
+
+    async diff(path) {
+      const pathspec = omitted(path) ? [] : ['--', checkPath(path)];
+      // quotePath off keeps non-ASCII paths unquoted, so addedLines can key on them.
+      const out = await git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv',
+        '--no-color', '--src-prefix=a/', '--dst-prefix=b/', `${baseSha}...${headSha}`, ...pathspec);
+      if (!out && pathspec.length) throw new ToolError('no changes to that path between base and head');
+      return out;
+    },
+
     changedPaths: async () =>
       (await git('diff', '--no-ext-diff', '--name-only', '-z', `${baseSha}...${headSha}`)).split('\0').filter(Boolean),
   };
+}
+
+/** Parse `git ls-tree -z` output: "<mode> <type> <oid>\t<name>" entries. */
+function treeEntries(out: string) {
+  return out.split('\0').filter(Boolean).map((l) => {
+    const tab = l.indexOf('\t');
+    const [mode, type, oid] = l.slice(0, tab).split(' ') as [string, string, string];
+    return { mode, type, oid, name: l.slice(tab + 1) };
+  });
 }
 
 /** Lines added or modified on the head side of a unified diff, by path. */

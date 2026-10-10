@@ -157,7 +157,8 @@ test('reviewers are offered only repository tools and report_findings, never the
 
   assert.equal(model.requestsFor('orchestrator').length, 1);
   for (const agent of ['correctness', 'security']) {
-    assert.deepEqual(model.requestsFor(agent)[0]!.tools.map((t) => t.function.name), ['read_file', 'report_findings']);
+    assert.deepEqual(model.requestsFor(agent)[0]!.tools.map((t) => t.function.name).sort(),
+      ['diff', 'grep', 'list_dir', 'read_file', 'report_findings']);
   }
 });
 
