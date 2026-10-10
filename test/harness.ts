@@ -52,7 +52,7 @@ export function gitFixture(base: Record<string, string>, head: Record<string, st
 export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
-  reviews: { repo: string; number: number; review: NewReview; id: number }[] = [];
+  reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -86,7 +86,7 @@ export class FakeGitHub implements GitHubPort {
   async listReviews(token: string, repo: string, number: number) {
     this.checkToken(token);
     return this.reviews
-      .filter((r) => r.repo === repo && r.number === number)
+      .filter((r) => r.repo === repo && r.number === number && !r.foreign)
       .map((r) => ({ id: r.id, body: r.review.body }));
   }
 
@@ -98,11 +98,14 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
+/** A scripted turn, or a callback that can act mid-run (deliver an event, move the PR) before answering. */
+export type Turn = AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
+
 /** Replays scripted assistant turns in order and records every request. */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
-  private turns: AssistantMessage[];
-  constructor(turns: AssistantMessage[]) {
+  private turns: Turn[];
+  constructor(turns: Turn[]) {
     this.turns = turns;
   }
 
@@ -110,7 +113,7 @@ export class ScriptedModel implements ModelPort {
     this.requests.push(structuredClone(req));
     const turn = this.turns.shift();
     if (!turn) throw new Error('scripted model ran out of turns');
-    return turn;
+    return typeof turn === 'function' ? turn() : turn;
   }
 }
 
@@ -157,9 +160,10 @@ export function prPayload(action: string, repo: string, pr: PullRequest, extra: 
 
 export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opened', repo, pr);
 
-export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[] }) {
+/** Pass an earlier app's dataDir to simulate a restart on the same volume. */
+export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string }) {
   const github = opts.github ?? new FakeGitHub();
-  const dataDir = tempDir();
+  const dataDir = opts.dataDir ?? tempDir();
   const app = createApp({
     config: {
       webhookSecret: WEBHOOK_SECRET,

@@ -44,6 +44,12 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
+    if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
+      if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
+      if (!Number.isInteger(pr?.number)) return { status: 400 };
+      store.supersede(repo, pr.number);
+      return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
+    }
     const ignored = ignoreReason(event, payload);
     if (ignored) return { status: 202, ignored };
     if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
@@ -65,12 +71,18 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
   async function reviewJob(job: Job) {
     const token = await github.mintToken(job.installationId);
+    // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
+    const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
+    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
     const source = await openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
       headSha: job.headSha, baseSha: job.baseSha,
     });
+    // Superseded runs keep that status and stop: checked between steps and right before publishing.
+    if (store.superseded(job.id)) return;
     const diff = await source.diff();
     const reported = await runReviewer({ model, modelId: config.model, source, diff, title: job.title, body: job.body });
+    if (store.superseded(job.id)) return;
 
     const changed = addedLines(diff);
     const findings: RecordedFinding[] = reported.map((f) => ({
@@ -83,6 +95,12 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
     if (comments.length === 0) return store.finish(job.id, 'nothing_to_publish', { findings });
+
+    const live = await github.getPullRequest(token, job.repo, job.pr);
+    if (live.state !== 'open' || live.draft || live.headSha !== job.headSha || live.baseSha !== job.baseSha) {
+      return store.finish(job.id, 'stale', { findings });
+    }
+    if (store.superseded(job.id)) return;
     const { id } = await github.createReview(token, job.repo, job.pr, {
       commit_id: job.headSha,
       event: 'COMMENT',
@@ -133,6 +151,8 @@ function summary(job: Job, count: number): string {
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\``,
     `Focus: ${FOCUS}`,
     `${count} inline comment${count === 1 ? '' : 's'}.`,
-    `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha} -->`,
+    marker(job),
   ].join('\n\n');
 }
+
+const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha} -->`;
