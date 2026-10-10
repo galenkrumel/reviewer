@@ -5,7 +5,8 @@ services:
     runtime: node
     # Disks need a paid instance type.
     plan: starter
-    buildCommand: npm ci --omit=dev
+    # Fails the deploy early if the image lacks git, which every review needs.
+    buildCommand: git --version && npm ci --omit=dev
     startCommand: npm start
     disk:
       name: data

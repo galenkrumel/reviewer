@@ -178,7 +178,7 @@ test('with a concurrency of 2, two queued jobs run at the same time', async () =
   let most = 0;
   const overlapping = async () => {
     most = Math.max(most, ++inFlight);
-    for (let i = 0; i < 1000 && inFlight < 2; i++) await new Promise((r) => setImmediate(r));
+    for (let i = 0; i < 1000 && inFlight < 2; i++) await new Promise((r) => setTimeout(r, 5));
     inFlight--;
     return report([]);
   };
