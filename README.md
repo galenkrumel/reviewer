@@ -44,6 +44,8 @@ repositories to review. Installing alone does nothing: a repository is reviewed 
 ### 2. Deploy on Render
 
 `render.yaml` is a Blueprint for one web service, with a 10 GB disk mounted at `/var/data` and `DATA_DIR` pointing at it.
+The service is created in its own Render project, `reviewer` (environment `production`), so it stays separate from
+other projects in the workspace.
 Disks need a paid instance type, so the Blueprint uses `starter`.
 
 1. In Render, choose **New → Blueprint** and select the GitHub repository that holds this code, with `render.yaml` at
