@@ -91,7 +91,10 @@ export async function runReviewer(opts: {
       if (args === undefined) {
         content = 'error: tool arguments are not valid JSON';
       } else if (call.function.name === 'read_file' && typeof args.path === 'string') {
-        content = await opts.source.readFile(args.path).catch(() => `error: cannot read ${args.path}`);
+        content = await opts.source.readFile(args.path).then(
+          (text) => untrusted('file', text),
+          () => 'error: cannot read that path',
+        );
       } else {
         content = `error: unknown tool ${call.function.name}`;
       }
