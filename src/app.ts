@@ -149,7 +149,8 @@ function summary(job: Job, focuses: RecordedFocus[], fallbackUsed: boolean, coun
   return [
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\``,
     `Focuses${fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}:\n`
-      + focuses.map((f) => `- ${f.focus}: ${f.reason}`).join('\n'),
+      // Reasons are PR-influenced: a code span renders no links, images, mentions or markup.
+      + focuses.map((f) => `- ${f.focus}: \`${f.reason}\``).join('\n'),
     // Focus names only; error detail stays in the run record.
     ...(failed.length ? [`Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`] : []),
     `${count} inline comment${count === 1 ? '' : 's'}.`,

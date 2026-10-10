@@ -69,9 +69,11 @@ export async function runOrchestrator(opts: {
   });
 }
 
-/** Reasons are PR-influenced and land in the summary: one short line, no HTML (so no forged markers), no links, no pings. */
-const oneLine = (s: string) => s.replace(/[<>]/g, '').replace(/\b(https?:\/\/|www\.)\S*/gi, '').replace(/@/g, '@\u200b')
-  .replace(/\s+/g, ' ').trim().slice(0, 200);
+/**
+ * Reasons are PR-influenced and land in the summary inside a code span: one short line, with no backticks
+ * (so the span cannot close early) and no angle brackets (so no forged or broken marker in the raw body).
+ */
+const oneLine = (s: string) => s.replace(/[`<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
 
 export function fallbackPicks(paths: string[]): Pick[] {
   const picks: Pick[] = [{ focus: 'correctness', reason: 'fallback selection' }];
