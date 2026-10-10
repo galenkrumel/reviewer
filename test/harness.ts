@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after } from 'node:test';
-import { createApp } from '../src/app.ts';
+import { createApp, type AppConfig } from '../src/app.ts';
 import type {
   AssistantMessage, ChatRequest, GitHubPort, ModelPort, NewReview, PullRequest,
 } from '../src/ports.ts';
@@ -137,7 +137,9 @@ export function delivery(event: string, payload: unknown, secret = WEBHOOK_SECRE
   };
 }
 
-export function prPayload(action: string, repo: string, pr: PullRequest, extra: Record<string, unknown> = {}) {
+export function prPayload(
+  action: string, repo: string, pr: PullRequest, extra: Record<string, unknown> = {}, prExtra: Record<string, unknown> = {},
+) {
   return {
     action,
     ...extra,
@@ -151,26 +153,34 @@ export function prPayload(action: string, repo: string, pr: PullRequest, extra: 
       body: 'Please review',
       head: { sha: pr.headSha },
       base: { sha: pr.baseSha },
+      author_association: 'MEMBER',
+      labels: [],
+      ...prExtra,
     },
   };
 }
 
 export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opened', repo, pr);
 
-export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[] }) {
+export function testApp(opts: {
+  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; config?: Partial<AppConfig>;
+}) {
   const github = opts.github ?? new FakeGitHub();
   const dataDir = tempDir();
+  /** Settable: assign clock.time to move the app's clock. */
+  const clock = { time: new Date('2026-01-01T00:00:00Z'), now: () => clock.time };
   const app = createApp({
     config: {
       webhookSecret: WEBHOOK_SECRET,
       allowlist: opts.allowlist ?? ['acme/widgets'],
       model: 'test/model',
       dataDir,
+      ...opts.config,
     },
     github,
     model: opts.model,
-    clock: { now: () => new Date('2026-01-01T00:00:00Z') },
+    clock,
   });
   after(() => app.close());
-  return { app, github, dataDir };
+  return { app, github, dataDir, clock };
 }

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Clock } from './ports.ts';
 
-export type RunStatus = 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed';
+export type RunStatus = 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed' | 'skipped';
 export type FindingOutcome = 'published' | 'unanchorable';
 
 export interface Finding {
@@ -79,11 +79,19 @@ export function openStore(dataDir: string, clock: Clock) {
   });
 
   return {
-    enqueue(job: Omit<Job, 'id'>) {
+    /** Records a job; a `skipped` one is never claimed. */
+    enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued') {
       db.prepare(`INSERT INTO runs (delivery_id, event, repo, pr, installation_id, head_sha, base_sha, title, body,
-        status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`)
+        status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(job.deliveryId, job.event, job.repo, job.pr, job.installationId, job.headSha, job.baseSha,
-          job.title, job.body, now(), now());
+          job.title, job.body, status, now(), now());
+    },
+
+    /** Runs for a PR created after `since`, not counting skipped ones. */
+    countRuns(repo: string, pr: number, since: Date): number {
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM runs
+        WHERE repo = ? AND pr = ? AND status != 'skipped' AND created_at > ?`).get(repo, pr, since.toISOString()) as any;
+      return row.n;
     },
 
     claimNext(): Job | undefined {
