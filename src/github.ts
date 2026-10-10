@@ -30,6 +30,10 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
     return res.json();
   }
 
+  // Reviews by this app are authored by `<slug>[bot]`.
+  let botLogin: Promise<string> | undefined;
+  const ownLogin = () => (botLogin ??= api(appJwt(), 'GET', '/app').then((a) => `${a.slug}[bot]`));
+
   return {
     async mintToken(installationId) {
       return (await api(appJwt(), 'POST', `/app/installations/${installationId}/access_tokens`)).token;
@@ -41,10 +45,11 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
     },
     async listReviews(token, repo, number) {
       // Every page: the idempotency marker check must see all of the PR's reviews.
+      const login = await ownLogin();
       const out: { id: number; body: string }[] = [];
       for (let page = 1; ; page++) {
         const reviews = await api(token, 'GET', `/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`);
-        out.push(...reviews.map((r: any) => ({ id: r.id, body: r.body ?? '' })));
+        for (const r of reviews) if (r.user?.login === login) out.push({ id: r.id, body: r.body ?? '' });
         if (reviews.length < 100) return out;
       }
     },

@@ -86,8 +86,8 @@ export function openStore(dataDir: string, clock: Clock) {
   });
 
   return {
+    // ponytail: no transaction; DatabaseSync calls can't interleave in one process. Wrap in BEGIN IMMEDIATE if a second process ever writes.
     /** No-op for a duplicate (repo, PR, head, base); otherwise supersedes the PR's in-flight jobs at other SHAs. */
-    // ponytail: no transaction; DatabaseSync calls can't interleave within the one process.
     enqueue(job: Omit<Job, 'id'>) {
       const dup = db.prepare(`SELECT 1 FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
         AND status IN ('queued', 'running', 'published', 'nothing_to_publish')`)
@@ -121,7 +121,8 @@ export function openStore(dataDir: string, clock: Clock) {
     finish(id: number, status: RunStatus, opts: { reviewId?: number; error?: string; findings?: RecordedFinding[] } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
-      db.prepare('UPDATE runs SET status = ?, review_id = ?, error = ?, updated_at = ? WHERE id = ?')
+      // Only a running job finishes; a superseded one keeps that status whatever the worker ends with.
+      db.prepare(`UPDATE runs SET status = ?, review_id = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
 

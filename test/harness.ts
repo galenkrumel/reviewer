@@ -52,7 +52,7 @@ export function gitFixture(base: Record<string, string>, head: Record<string, st
 export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
-  reviews: { repo: string; number: number; review: NewReview; id: number }[] = [];
+  reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -86,7 +86,7 @@ export class FakeGitHub implements GitHubPort {
   async listReviews(token: string, repo: string, number: number) {
     this.checkToken(token);
     return this.reviews
-      .filter((r) => r.repo === repo && r.number === number)
+      .filter((r) => r.repo === repo && r.number === number && !r.foreign)
       .map((r) => ({ id: r.id, body: r.review.body }));
   }
 

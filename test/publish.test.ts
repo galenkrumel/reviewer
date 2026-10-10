@@ -54,6 +54,21 @@ test('a run whose review already carries the marker posts nothing and is recorde
   assert.equal(app.runs()[0]!.reviewId, existing.id);
 });
 
+test('a marker in a review by someone else does not stop publishing', async () => {
+  const { pr, github, marker } = setup();
+  github.reviews.push({
+    repo: REPO, number: 7, id: 99, foreign: true,
+    review: { commit_id: pr.headSha, event: 'COMMENT', body: marker, comments: [] },
+  });
+  const { app } = testApp({ model: new ScriptedModel([report()]), github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 2);
+  assert.equal(app.runs()[0]!.reviewId, github.reviews[1]!.id);
+});
+
 test('a head change mid-run publishes nothing and the run is recorded stale', async () => {
   const { pr, github, live } = setup();
   const model = new ScriptedModel([() => ((live().headSha = 'f'.repeat(40)), report())]);
@@ -97,6 +112,20 @@ for (const action of ['converted_to_draft', 'closed'] as const) {
   });
 }
 
+test('a run that fails after being superseded stays superseded', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([async () => {
+    await app.receive(delivery('pull_request', openedPayload(REPO, pr, 'closed')));
+    throw new Error('model down');
+  }]);
+  const { app } = testApp({ model, github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  assert.equal(app.runs()[0]!.status, 'superseded');
+});
+
 test('enqueuing a job for a new head supersedes the running job for the old one', async () => {
   const { fx, pr, github, live } = setup();
   const pushed = { ...pr, headSha: fx.baseSha };
@@ -138,7 +167,7 @@ test('after a restart the running job is re-queued and completes without double-
   await until(() => github.reviews.length === 1);
   assert.equal(first.app.runs()[0]!.status, 'running');
 
-  const { app } = testApp({ model: new ScriptedModel([report()]), github, dataDir: first.dataDir });
+  const { app } = testApp({ model: new ScriptedModel([]), github, dataDir: first.dataDir });
   await app.drain();
 
   assert.equal(github.reviews.length, 1);

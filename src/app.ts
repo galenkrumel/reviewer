@@ -70,6 +70,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
   async function reviewJob(job: Job) {
     const token = await github.mintToken(job.installationId);
+    // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
+    const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
+    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
     const source = await openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
       headSha: job.headSha, baseSha: job.baseSha,
@@ -92,9 +95,6 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
     if (comments.length === 0) return store.finish(job.id, 'nothing_to_publish', { findings });
 
-    // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
-    const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
-    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id, findings });
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (live.state !== 'open' || live.draft || live.headSha !== job.headSha || live.baseSha !== job.baseSha) {
       return store.finish(job.id, 'stale', { findings });
