@@ -41,7 +41,8 @@ createServer((req, res) => {
   });
   req.on('end', async () => {
     try {
-      const { status } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });
+      const { status, ignored } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });
+      if (ignored) console.log(`ignored delivery ${req.headers['x-github-delivery']}: ${ignored}`);
       res.writeHead(status).end();
       kick();
     } catch (err) {
