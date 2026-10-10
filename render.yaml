@@ -1,31 +1,36 @@
-# One web service; SQLite and the clone cache live on its persistent disk. See README.md for every option.
-services:
-  - type: web
-    name: reviewer
-    runtime: node
-    # Disks need a paid instance type.
-    plan: starter
-    # Fails the deploy early if the image lacks git, which every review needs.
-    buildCommand: git --version && npm ci --omit=dev
-    startCommand: npm start
-    disk:
-      name: data
-      mountPath: /var/data
-      sizeGB: 10
-    envVars:
-      - key: NODE_VERSION
-        value: "22"
-      - key: DATA_DIR
-        value: /var/data
-      - key: GITHUB_APP_ID
-        sync: false
-      - key: GITHUB_PRIVATE_KEY
-        sync: false
-      - key: GITHUB_WEBHOOK_SECRET
-        sync: false
-      - key: OPENROUTER_API_KEY
-        sync: false
-      - key: REPO_ALLOWLIST
-        sync: false
-      - key: REVIEW_MODEL
-        sync: false
+# One web service in its own project (`reviewer`, environment `production`), kept apart from anything else in
+# the workspace. SQLite and the clone cache live on its persistent disk. See README.md for every option.
+projects:
+  - name: reviewer
+    environments:
+      - name: production
+        services:
+          - type: web
+            name: reviewer
+            runtime: node
+            # Disks need a paid instance type.
+            plan: starter
+            # Fails the deploy early if the image lacks git, which every review needs.
+            buildCommand: git --version && npm ci --omit=dev
+            startCommand: npm start
+            disk:
+              name: data
+              mountPath: /var/data
+              sizeGB: 10
+            envVars:
+              - key: NODE_VERSION
+                value: "22"
+              - key: DATA_DIR
+                value: /var/data
+              - key: GITHUB_APP_ID
+                sync: false
+              - key: GITHUB_PRIVATE_KEY
+                sync: false
+              - key: GITHUB_WEBHOOK_SECRET
+                sync: false
+              - key: OPENROUTER_API_KEY
+                sync: false
+              - key: REPO_ALLOWLIST
+                sync: false
+              - key: REVIEW_MODEL
+                sync: false
