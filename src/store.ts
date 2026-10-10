@@ -161,6 +161,8 @@ export function openStore(dataDir: string, clock: Clock) {
 
     /** Recorded as soon as the config is read, so they survive a run that later fails or is superseded. */
     recordConfigWarnings(id: number, warnings: string[]) {
+      // A run requeued after a restart reads the config again.
+      db.prepare('DELETE FROM config_warnings WHERE run_id = ?').run(id);
       const insert = db.prepare('INSERT INTO config_warnings (run_id, warning) VALUES (?, ?)');
       for (const w of warnings) insert.run(id, w);
     },
