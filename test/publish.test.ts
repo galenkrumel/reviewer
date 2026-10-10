@@ -148,6 +148,83 @@ test('enqueuing a job for a new head supersedes the running job for the old one'
   ]);
 });
 
+// A is an older head: a real commit, or one force-pushed away that can no longer be fetched.
+for (const [kind, older] of [['fetchable', 'base'], ['unfetchable', 'a'.repeat(40)]] as const) {
+  test(`a late synchronize for an older ${kind} head does not cancel the review of the current head`, async () => {
+    const { fx, pr, github } = setup();
+    const a = { ...pr, headSha: older === 'base' ? fx.baseSha : older };
+    const { app } = testApp({ model: new ScriptedModel([report()]), github });
+
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, a)));
+    await app.drain();
+
+    assert.equal(github.reviews.length, 1);
+    assert.equal(github.reviews[0]!.review.commit_id, fx.headSha);
+    assert.deepEqual(app.runs().map((r) => [r.headSha, r.status]), [
+      [fx.headSha, 'superseded'], [a.headSha, 'stale'], [fx.headSha, 'published'],
+    ]);
+  });
+}
+
+test('a late delivery at the run cap still gets the current head reviewed', async () => {
+  const { fx, pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([report()]), github, config: { runCap: 2 } });
+
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, { ...pr, headSha: fx.baseSha })));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 1);
+  assert.equal(app.runs().at(-1)!.status, 'published');
+});
+
+test('a labeled re-review superseded by a late delivery still happens', async () => {
+  const { fx, pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([report(), report()]), github });
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+  await app.drain();
+
+  await app.receive(delivery('pull_request', prPayload('labeled', REPO, pr, { label: { name: 'ai-review' } })));
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, { ...pr, headSha: fx.baseSha })));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 2);
+  assert.deepEqual(app.runs().map((r) => [r.event, r.status]), [
+    ['pull_request.synchronize', 'published'], ['pull_request.labeled', 'superseded'],
+    ['pull_request.synchronize', 'stale'], ['pull_request.labeled', 'published'],
+  ]);
+});
+
+test('a late delivery never gets a revision reviewed that gating turned away', async () => {
+  const { fx, pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([report()]), github });
+  const outsider = (labels: { name: string }[]) => ({ author_association: 'CONTRIBUTOR', labels });
+
+  // The label was removed, then B was pushed: B is not eligible. A was delivered while the label was on.
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr, {}, outsider([]))));
+  const a = { ...pr, headSha: fx.baseSha };
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, a, {}, outsider([{ name: 'ai-review' }]))));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 0);
+  assert.deepEqual(app.runs().map((r) => [r.headSha, r.status]), [[fx.baseSha, 'stale']]);
+});
+
+test('synchronize for A then B, delivered in order, reviews only B', async () => {
+  const { fx, pr, github } = setup();
+  const a = { ...pr, headSha: fx.baseSha };
+  const { app } = testApp({ model: new ScriptedModel([report()]), github });
+
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, a)));
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 1);
+  assert.equal(github.reviews[0]!.review.commit_id, fx.headSha);
+  assert.deepEqual(app.runs().map((r) => [r.headSha, r.status]), [[fx.baseSha, 'superseded'], [fx.headSha, 'published']]);
+});
+
 /** Records the review, then never answers: the process "dies" mid-publish. */
 class CrashOnPublish extends FakeGitHub {
   crashed = false;
