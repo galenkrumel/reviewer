@@ -9,7 +9,9 @@ export type RunStatus =
   /** A newer job for the PR, or converted_to_draft/closed, replaced this one. */
   | 'superseded'
   /** The pre-publish check found the PR closed, a draft, or at other SHAs. */
-  | 'stale';
+  | 'stale'
+  /** Over the per-PR run cap: recorded, never claimed. */
+  | 'skipped';
 export type FindingOutcome = 'published' | 'unanchorable';
 
 export interface Finding {
@@ -87,19 +89,32 @@ export function openStore(dataDir: string, clock: Clock) {
 
   return {
     // ponytail: no transaction; DatabaseSync calls can't interleave in one process. Wrap in BEGIN IMMEDIATE if a second process ever writes.
-    /** No-op for a duplicate (repo, PR, head, base); otherwise supersedes the PR's in-flight jobs at other SHAs. */
-    enqueue(job: Omit<Job, 'id'>) {
-      const dup = db.prepare(`SELECT 1 FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
-        AND status IN ('queued', 'running', 'published', 'nothing_to_publish')`)
-        .get(job.repo, job.pr, job.headSha, job.baseSha);
-      if (dup) return;
-      db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
-        AND status IN ('queued', 'running') AND (head_sha != ? OR base_sha != ?)`)
-        .run(now(), job.repo, job.pr, job.headSha, job.baseSha);
+    /**
+     * No-op for a duplicate (repo, PR, head, base); otherwise supersedes the PR's in-flight jobs at other SHAs.
+     * A label re-review is never a duplicate. A `skipped` job is only recorded.
+     */
+    enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued') {
+      if (status === 'queued') {
+        const dup = job.event !== 'pull_request.labeled' && db.prepare(`SELECT 1 FROM runs
+          WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
+          AND status IN ('queued', 'running', 'published', 'nothing_to_publish')`)
+          .get(job.repo, job.pr, job.headSha, job.baseSha);
+        if (dup) return;
+        db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
+          AND status IN ('queued', 'running') AND (head_sha != ? OR base_sha != ?)`)
+          .run(now(), job.repo, job.pr, job.headSha, job.baseSha);
+      }
       db.prepare(`INSERT INTO runs (delivery_id, event, repo, pr, installation_id, head_sha, base_sha, title, body,
-        status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`)
+        status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(job.deliveryId, job.event, job.repo, job.pr, job.installationId, job.headSha, job.baseSha,
-          job.title, job.body, now(), now());
+          job.title, job.body, status, now(), now());
+    },
+
+    /** Runs for a PR created after `since`, not counting skipped ones. */
+    countRuns(repo: string, pr: number, since: Date): number {
+      const row = db.prepare(`SELECT COUNT(*) AS n FROM runs
+        WHERE repo = ? AND pr = ? AND status != 'skipped' AND created_at > ?`).get(repo, pr, since.toISOString()) as any;
+      return row.n;
     },
 
     /** Mark every queued or running job for the PR superseded. */

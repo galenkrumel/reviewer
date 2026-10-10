@@ -11,7 +11,15 @@ export interface AppConfig {
   allowlist: string[];
   model: string;
   dataDir: string;
+  /** Who else besides OWNER/MEMBER/COLLABORATOR gets reviewed. Default `label`. */
+  reviewOutsidePrs?: OutsidePolicy;
+  /** Default `ai-review`. */
+  reviewLabel?: string;
+  /** Runs per PR per rolling 24 hours. Default 10. */
+  runCap?: number;
 }
+
+export type OutsidePolicy = 'label' | 'always' | 'never';
 
 export interface Delivery {
   headers: Record<string, string | string[] | undefined>;
@@ -24,6 +32,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
   const { config, github, model } = deps;
   const store = openStore(config.dataDir, deps.clock);
   const allowlist = new Set(config.allowlist.map((r) => r.toLowerCase()));
+  const label = config.reviewLabel ?? 'ai-review';
+  const policy = config.reviewOutsidePrs ?? 'label';
+  const runCap = config.runCap ?? 10;
 
   function verified(d: Delivery): boolean {
     const sig = d.headers['x-hub-signature-256'];
@@ -50,11 +61,15 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       store.supersede(repo, pr.number);
       return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
     }
-    const ignored = ignoreReason(event, payload);
+    const ignored = ignoreReason(event, payload, label);
     if (ignored) return { status: 202, ignored };
     if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
     if (!Number.isInteger(payload.installation?.id) || !pr?.head?.sha || !pr.base?.sha) return { status: 400 };
+    const gated = authorReason(pr, policy, label);
+    if (gated) return { status: 202, ignored: gated };
 
+    // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
+    const capped = store.countRuns(repo, pr.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
     store.enqueue({
       deliveryId: String(d.headers['x-github-delivery'] ?? ''),
       event: `pull_request.${payload.action}`,
@@ -65,8 +80,8 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       baseSha: pr.base.sha,
       title: pr.title ?? '',
       body: pr.body ?? '',
-    });
-    return { status: 202 };
+    }, capped ? 'skipped' : 'queued');
+    return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
   }
 
   async function reviewJob(job: Job) {
@@ -128,16 +143,30 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
   return { receive, drain, runs: store.runs, close: store.close };
 }
 
-const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited']);
+const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
+const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const DAY_MS = 24 * 3600_000;
 
 /** Why a delivery starts no review, or undefined when it should. Drafts are never reviewed. */
-function ignoreReason(event: unknown, payload: any): string | undefined {
+function ignoreReason(event: unknown, payload: any, label: string): string | undefined {
   if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
   if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
   // changes.base holds the old base; the new one is pull_request.base.
   if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
+  if (payload.action === 'labeled' && payload.label?.name !== label) {
+    return `label ${payload.label?.name} is not the review label`;
+  }
   if (!payload.pull_request) return 'no pull_request in payload';
   if (payload.pull_request.draft) return 'pull request is a draft';
+}
+
+/** Why the PR's author isn't eligible, or undefined when they are. */
+function authorReason(pr: any, policy: OutsidePolicy, label: string): string | undefined {
+  const association = pr.author_association;
+  if (TRUSTED_AUTHORS.has(association) || policy === 'always') return;
+  if (policy === 'never') return `author ${association} is outside and review_outside_prs is never`;
+  // labels is the PR's current set, which on a labeled event already includes the new label.
+  if (!pr.labels?.some((l: any) => l?.name === label)) return `author ${association} is outside and the PR lacks label ${label}`;
 }
 
 function commentBody(f: RecordedFinding): string {
@@ -155,4 +184,6 @@ function summary(job: Job, count: number): string {
   ].join('\n\n');
 }
 
-const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha} -->`;
+// A label re-review repeats a head/base pair on purpose, so its marker also names the run.
+const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha}${
+  job.event === 'pull_request.labeled' ? `:run-${job.id}` : ''} -->`;
