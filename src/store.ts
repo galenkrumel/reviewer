@@ -51,6 +51,7 @@ export interface RunRecord extends Omit<Job, 'installationId' | 'title' | 'body'
   focuses: RecordedFocus[];
   /** Whether the orchestrator failed and the fixed fallback selection was used. */
   fallbackUsed: boolean;
+  orchestratorError: string | null;
 }
 
 export function openStore(dataDir: string, clock: Clock) {
@@ -83,8 +84,12 @@ export function openStore(dataDir: string, clock: Clock) {
     );
     CREATE TABLE IF NOT EXISTS focuses (
       run_id INTEGER NOT NULL REFERENCES runs(id),
-      fallback INTEGER NOT NULL,
       data TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS orchestrations (
+      run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+      fallback_used INTEGER NOT NULL,
+      error TEXT
     );
   `);
   const now = () => clock.now().toISOString();
@@ -108,12 +113,17 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     finish(id: number, status: RunStatus, opts: {
-      reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[]; fallbackUsed?: boolean;
+      reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
+      fallbackUsed?: boolean; orchestratorError?: string;
     } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
-      const insertFocus = db.prepare('INSERT INTO focuses (run_id, fallback, data) VALUES (?, ?, ?)');
-      for (const f of opts.focuses ?? []) insertFocus.run(id, opts.fallbackUsed ? 1 : 0, JSON.stringify(f));
+      const insertFocus = db.prepare('INSERT INTO focuses (run_id, data) VALUES (?, ?)');
+      for (const f of opts.focuses ?? []) insertFocus.run(id, JSON.stringify(f));
+      if (opts.fallbackUsed !== undefined) {
+        db.prepare('INSERT INTO orchestrations (run_id, fallback_used, error) VALUES (?, ?, ?)')
+          .run(id, opts.fallbackUsed ? 1 : 0, opts.orchestratorError ?? null);
+      }
       db.prepare('UPDATE runs SET status = ?, review_id = ?, error = ?, updated_at = ? WHERE id = ?')
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
@@ -121,18 +131,20 @@ export function openStore(dataDir: string, clock: Clock) {
     /** The run-record query interface. */
     runs(): RunRecord[] {
       const findings = db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid');
-      const focuses = db.prepare('SELECT fallback, data FROM focuses WHERE run_id = ? ORDER BY rowid');
+      const focuses = db.prepare('SELECT data FROM focuses WHERE run_id = ? ORDER BY rowid');
+      const orchestration = db.prepare('SELECT fallback_used, error FROM orchestrations WHERE run_id = ?');
       return db.prepare('SELECT * FROM runs ORDER BY id').all().map((r: any) => {
         const { installationId, title, body, ...job } = toJob(r);
-        const focusRows = focuses.all(r.id);
+        const o: any = orchestration.get(r.id);
         return {
           ...job,
           status: r.status,
           reviewId: r.review_id,
           error: r.error,
           findings: findings.all(r.id).map((f: any) => JSON.parse(f.data)),
-          focuses: focusRows.map((f: any) => JSON.parse(f.data)),
-          fallbackUsed: focusRows.some((f: any) => f.fallback === 1),
+          focuses: focuses.all(r.id).map((f: any) => JSON.parse(f.data)),
+          fallbackUsed: o?.fallback_used === 1,
+          orchestratorError: o?.error ?? null,
         };
       });
     },

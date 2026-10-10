@@ -26,6 +26,8 @@ export interface Source {
   readFile(path: string): Promise<string>;
   /** The PR diff, base...head. */
   diff(): Promise<string>;
+  /** Every path the PR changes, including renames, binaries and mode-only changes. */
+  changedPaths(): Promise<string[]>;
 }
 
 /** Fetch exactly the head and base SHAs into the repository's bare clone and read at the pinned head. */
@@ -54,6 +56,8 @@ export async function openSource(opts: {
     // quotePath off keeps non-ASCII paths unquoted, so addedLines can key on them.
     diff: () => git('-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--src-prefix=a/', '--dst-prefix=b/',
       `${baseSha}...${headSha}`),
+    changedPaths: async () =>
+      (await git('diff', '--no-ext-diff', '--name-only', '-z', `${baseSha}...${headSha}`)).split('\0').filter(Boolean),
   };
 }
 
@@ -76,11 +80,16 @@ export function addedLines(diff: string): Map<string, Set<number>> {
   return out;
 }
 
+export interface DiffStat {
+  added: number;
+  removed: number;
+}
+
 /** Added and removed line counts per changed path (the head path, or the base path for deletions). */
-// ponytail: text diffs only; binary changes carry no ---/+++ lines and are not counted.
-export function diffStats(diff: string): Map<string, { added: number; removed: number }> {
-  const out = new Map<string, { added: number; removed: number }>();
-  let cur: { added: number; removed: number } | undefined;
+// Text hunks only: binary, rename-only and mode-only changes have no ---/+++ lines (see changedPaths).
+export function diffStats(diff: string): Map<string, DiffStat> {
+  const out = new Map<string, DiffStat>();
+  let cur: DiffStat | undefined;
   let inHeader = false;
   let from = '';
   const name = (l: string) => l.slice('--- a/'.length).replace(/\t$/, '');

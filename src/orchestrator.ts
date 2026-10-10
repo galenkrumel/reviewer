@@ -1,4 +1,5 @@
 // The orchestrator suggests reviewer focuses; code decides what actually runs.
+import type { DiffStat } from './git.ts';
 import type { ModelPort, ToolDef } from './ports.ts';
 import { FOCUSES, untrusted, type Focus } from './reviewer.ts';
 
@@ -35,13 +36,13 @@ const TOOL: ToolDef = {
 };
 
 // ponytail: extension heuristics until exclusions (#9) classify files properly.
-const NON_CODE = /\.(md|mdx|markdown|txt|rst|adoc|png|jpe?g|gif|svg|ico|webp|pdf|lock)$|(^|\/)(LICENSE|NOTICE|AUTHORS|CODEOWNERS)$/i;
-const MANIFEST = /(^|\/)(package\.json|requirements[^/]*\.txt|pyproject\.toml|Pipfile|go\.mod|Cargo\.toml|Gemfile|pom\.xml|build\.gradle(\.kts)?|composer\.json)$/;
+const NON_CODE = /\.(md|mdx|markdown|txt|rst|adoc|png|jpe?g|gif|ico|webp|pdf|lock)$|(^|\/)(LICENSE|NOTICE|AUTHORS|CODEOWNERS)$/i;
+const MANIFEST = /(^|\/)(package\.json|requirements[^/]*\.txt|pyproject\.toml|Pipfile|go\.mod|Cargo\.toml|Gemfile|pom\.xml|build\.gradle(\.kts)?|composer\.json|go\.sum|package-lock\.json|pnpm-lock\.yaml|[^/]*\.lock)$/;
 const AUTH = /auth|login|session|passw|token|secret|crypt|permission|oauth|jwt/i;
 
 /** The orchestrator's picks, schema-validated. Anything off-schema throws, which triggers the fallback. */
 export async function runOrchestrator(opts: {
-  model: ModelPort; modelId: string; stats: Map<string, { added: number; removed: number }>; title: string; body: string;
+  model: ModelPort; modelId: string; stats: Map<string, DiffStat>; title: string; body: string;
 }): Promise<Pick[]> {
   const files = [...opts.stats].map(([path, s]) => `${path} (+${s.added} -${s.removed})`).join('\n');
   const reply = await opts.model.chat({
@@ -68,8 +69,9 @@ export async function runOrchestrator(opts: {
   });
 }
 
-/** Reasons are PR-influenced and land in the summary: one short line, no HTML (so no forged markers). */
-const oneLine = (s: string) => s.replace(/[<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
+/** Reasons are PR-influenced and land in the summary: one short line, no HTML (so no forged markers), no links, no pings. */
+const oneLine = (s: string) => s.replace(/[<>]/g, '').replace(/\b(https?:\/\/|www\.)\S*/gi, '').replace(/@/g, '@\u200b')
+  .replace(/\s+/g, ' ').trim().slice(0, 200);
 
 export function fallbackPicks(paths: string[]): Pick[] {
   const picks: Pick[] = [{ focus: 'correctness', reason: 'fallback selection' }];

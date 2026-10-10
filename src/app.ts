@@ -23,6 +23,8 @@ export interface Delivery {
 
 export function createApp(deps: { config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock }) {
   const { config, github, model } = deps;
+  // Below 2, the cap would drop the always-on security reviewer.
+  if (!Number.isInteger(config.maxReviewers) || config.maxReviewers < 2) throw new Error('maxReviewers must be an integer >= 2');
   const store = openStore(config.dataDir, deps.clock);
   const allowlist = new Set(config.allowlist.map((r) => r.toLowerCase()));
 
@@ -71,17 +73,19 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       headSha: job.headSha, baseSha: job.baseSha,
     });
     const diff = await source.diff();
-    const stats = diffStats(diff);
-    const paths = [...stats.keys()];
+    const paths = await source.changedPaths();
+    const counted = diffStats(diff);
+    const stats = new Map(paths.map((p) => [p, counted.get(p) ?? { added: 0, removed: 0 }]));
 
     let picks: Pick[];
-    let fallbackUsed = false;
+    let orchestratorError: string | undefined;
     try {
       picks = await runOrchestrator({ model, modelId: config.model, stats, title: job.title, body: job.body });
-    } catch {
+    } catch (err) {
       picks = fallbackPicks(paths);
-      fallbackUsed = true;
+      orchestratorError = err instanceof Error ? err.message : String(err);
     }
+    const fallbackUsed = orchestratorError !== undefined;
 
     const changed = addedLines(diff);
     const findings: RecordedFinding[] = [];
@@ -103,7 +107,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
-    const record = { findings, focuses, fallbackUsed };
+    const record = { findings, focuses, fallbackUsed, orchestratorError };
     if (comments.length === 0 && focuses.every((f) => f.status === 'succeeded')) {
       return store.finish(job.id, 'nothing_to_publish', record);
     }
