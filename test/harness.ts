@@ -6,7 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after } from 'node:test';
-import { createApp } from '../src/app.ts';
+import { createApp, type AppConfig } from '../src/app.ts';
 import type {
   AssistantMessage, ChatRequest, GitHubPort, ModelPort, NewReview, PullRequest,
 } from '../src/ports.ts';
@@ -52,7 +52,7 @@ export function gitFixture(base: Record<string, string>, head: Record<string, st
 export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
-  reviews: { repo: string; number: number; review: NewReview; id: number }[] = [];
+  reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -86,7 +86,7 @@ export class FakeGitHub implements GitHubPort {
   async listReviews(token: string, repo: string, number: number) {
     this.checkToken(token);
     return this.reviews
-      .filter((r) => r.repo === repo && r.number === number)
+      .filter((r) => r.repo === repo && r.number === number && !r.foreign)
       .map((r) => ({ id: r.id, body: r.review.body }));
   }
 
@@ -98,6 +98,9 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
+/** A scripted turn, or a callback that can act mid-run (deliver an event, move the PR) before answering. */
+export type Turn = AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
+
 /** The agent a request is for, from its system prompt ("You are the <agent> ..."). */
 export function agentOf(req: ChatRequest): string {
   const system = req.messages[0];
@@ -106,21 +109,28 @@ export function agentOf(req: ChatRequest): string {
 
 /**
  * Replays scripted assistant turns per agent and records every request.
- * An agent with no script (or no turns left) gets an error, so unexpected agents surface as failures.
+ * A scripted agent with no turns left gets an error, so unexpected agents surface as failures.
+ * A plain list scripts the correctness reviewer alone: the orchestrator then picks correctness
+ * and the always-on security reviewer finds nothing, as often as asked.
  */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
-  private turns: Record<string, AssistantMessage[]>;
-  constructor(turns: Record<string, AssistantMessage[]>) {
+  private turns: Record<string, Turn[]>;
+  private correctnessOnly: boolean;
+  constructor(turns: Turn[] | Record<string, Turn[]>) {
+    this.correctnessOnly = Array.isArray(turns);
+    turns = Array.isArray(turns) ? { correctness: turns } : turns;
     this.turns = turns;
   }
 
   async chat(req: ChatRequest) {
     this.requests.push(structuredClone(req));
     const agent = agentOf(req);
+    if (this.correctnessOnly && agent === 'orchestrator') return select('correctness');
+    if (this.correctnessOnly && agent === 'security') return noFindings();
     const turn = this.turns[agent]?.shift();
     if (!turn) throw new Error(`scripted model has no turn for ${agent}`);
-    return turn;
+    return typeof turn === 'function' ? turn() : turn;
   }
 
   /** Requests made by the given agent. */
@@ -163,9 +173,12 @@ export function delivery(event: string, payload: unknown, secret = WEBHOOK_SECRE
   };
 }
 
-export function openedPayload(repo: string, pr: PullRequest) {
+export function prPayload(
+  action: string, repo: string, pr: PullRequest, extra: Record<string, unknown> = {}, prExtra: Record<string, unknown> = {},
+) {
   return {
-    action: 'opened',
+    action,
+    ...extra,
     installation: { id: 42 },
     repository: { full_name: repo },
     pull_request: {
@@ -176,25 +189,35 @@ export function openedPayload(repo: string, pr: PullRequest) {
       body: 'Please review',
       head: { sha: pr.headSha },
       base: { sha: pr.baseSha },
+      author_association: 'MEMBER',
+      labels: [],
+      ...prExtra,
     },
   };
 }
 
-export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[]; maxReviewers?: number }) {
+export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opened', repo, pr);
+
+/** Pass an earlier app's dataDir to simulate a restart on the same volume. */
+export function testApp(opts: {
+  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>;
+}) {
   const github = opts.github ?? new FakeGitHub();
-  const dataDir = tempDir();
+  const dataDir = opts.dataDir ?? tempDir();
+  /** Settable: assign clock.time to move the app's clock. */
+  const clock = { time: new Date('2026-01-01T00:00:00Z'), now: () => clock.time };
   const app = createApp({
     config: {
       webhookSecret: WEBHOOK_SECRET,
       allowlist: opts.allowlist ?? ['acme/widgets'],
       model: 'test/model',
       dataDir,
-      maxReviewers: opts.maxReviewers ?? 3,
+      ...opts.config,
     },
     github,
     model: opts.model,
-    clock: { now: () => new Date('2026-01-01T00:00:00Z') },
+    clock,
   });
   after(() => app.close());
-  return { app, github, dataDir };
+  return { app, github, dataDir, clock };
 }

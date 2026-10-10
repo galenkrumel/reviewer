@@ -12,9 +12,17 @@ export interface AppConfig {
   allowlist: string[];
   model: string;
   dataDir: string;
-  /** At least 2, so the always-on correctness and security reviewers both fit. */
-  maxReviewers: number;
+  /** Who else besides OWNER/MEMBER/COLLABORATOR gets reviewed. Default `label`. */
+  reviewOutsidePrs?: OutsidePolicy;
+  /** Default `ai-review`. */
+  reviewLabel?: string;
+  /** Runs per PR per rolling 24 hours. Default 10. */
+  runCap?: number;
+  /** Reviewers per run. Default 3; at least 2, so the always-on correctness and security reviewers both fit. */
+  maxReviewers?: number;
 }
+
+export type OutsidePolicy = 'label' | 'always' | 'never';
 
 export interface Delivery {
   headers: Record<string, string | string[] | undefined>;
@@ -23,10 +31,14 @@ export interface Delivery {
 
 export function createApp(deps: { config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock }) {
   const { config, github, model } = deps;
+  const maxReviewers = config.maxReviewers ?? 3;
   // Below 2, the cap would drop the always-on security reviewer.
-  if (!Number.isInteger(config.maxReviewers) || config.maxReviewers < 2) throw new Error('maxReviewers must be an integer >= 2');
+  if (!Number.isInteger(maxReviewers) || maxReviewers < 2) throw new Error('maxReviewers must be an integer >= 2');
   const store = openStore(config.dataDir, deps.clock);
   const allowlist = new Set(config.allowlist.map((r) => r.toLowerCase()));
+  const label = config.reviewLabel ?? 'ai-review';
+  const policy = config.reviewOutsidePrs ?? 'label';
+  const runCap = config.runCap ?? 10;
 
   function verified(d: Delivery): boolean {
     const sig = d.headers['x-hub-signature-256'];
@@ -36,7 +48,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     return given.length === expected.length && timingSafeEqual(given, expected);
   }
 
-  async function receive(d: Delivery): Promise<{ status: number }> {
+  async function receive(d: Delivery): Promise<{ status: number; ignored?: string }> {
     if (!verified(d)) return { status: 401 };
     let payload: any;
     try {
@@ -47,11 +59,21 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
-    // ponytail: only `opened` for now; the other lifecycle actions arrive with trigger eligibility.
-    if (event !== 'pull_request' || payload.action !== 'opened' || !pr || pr.draft) return { status: 202 };
-    if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202 };
-    if (!Number.isInteger(payload.installation?.id) || !pr.head?.sha || !pr.base?.sha) return { status: 400 };
+    if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
+      if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
+      if (!Number.isInteger(pr?.number)) return { status: 400 };
+      store.supersede(repo, pr.number);
+      return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
+    }
+    const ignored = ignoreReason(event, payload, label);
+    if (ignored) return { status: 202, ignored };
+    if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
+    if (!Number.isInteger(payload.installation?.id) || !pr?.head?.sha || !pr.base?.sha) return { status: 400 };
+    const gated = authorReason(pr, policy, label);
+    if (gated) return { status: 202, ignored: gated };
 
+    // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
+    const capped = store.countRuns(repo, pr.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
     store.enqueue({
       deliveryId: String(d.headers['x-github-delivery'] ?? ''),
       event: `pull_request.${payload.action}`,
@@ -62,16 +84,21 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       baseSha: pr.base.sha,
       title: pr.title ?? '',
       body: pr.body ?? '',
-    });
-    return { status: 202 };
+    }, capped ? 'skipped' : 'queued');
+    return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
   }
 
   async function reviewJob(job: Job) {
     const token = await github.mintToken(job.installationId);
+    // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
+    const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
+    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
     const source = await openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
       headSha: job.headSha, baseSha: job.baseSha,
     });
+    // Superseded runs keep that status and stop: checked between steps and right before publishing.
+    if (store.superseded(job.id)) return;
     const diff = await source.diff();
     const paths = await source.changedPaths();
     const counted = diffStats(diff);
@@ -91,7 +118,8 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const findings: RecordedFinding[] = [];
     const focuses: RecordedFocus[] = [];
     // Sequential: one reviewer's failure never stops the others.
-    for (const { focus, reason } of selectFocuses(picks, paths, config.maxReviewers)) {
+    for (const { focus, reason } of selectFocuses(picks, paths, maxReviewers)) {
+      if (store.superseded(job.id)) return;
       const review = () => runReviewer({ focus, model, modelId: config.model, source, diff, title: job.title, body: job.body });
       try {
         const reported = await review().catch(review); // one retry
@@ -103,6 +131,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
         focuses.push({ focus, reason, status: 'failed', error: err instanceof Error ? err.message : String(err) });
       }
     }
+    if (store.superseded(job.id)) return;
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
@@ -111,6 +140,12 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     if (comments.length === 0 && focuses.every((f) => f.status === 'succeeded')) {
       return store.finish(job.id, 'nothing_to_publish', record);
     }
+
+    const live = await github.getPullRequest(token, job.repo, job.pr);
+    if (live.state !== 'open' || live.draft || live.headSha !== job.headSha || live.baseSha !== job.baseSha) {
+      return store.finish(job.id, 'stale', record);
+    }
+    if (store.superseded(job.id)) return;
     const { id } = await github.createReview(token, job.repo, job.pr, {
       commit_id: job.headSha,
       event: 'COMMENT',
@@ -138,6 +173,32 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
   return { receive, drain, runs: store.runs, close: store.close };
 }
 
+const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
+const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+const DAY_MS = 24 * 3600_000;
+
+/** Why a delivery starts no review, or undefined when it should. Drafts are never reviewed. */
+function ignoreReason(event: unknown, payload: any, label: string): string | undefined {
+  if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
+  if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
+  // changes.base holds the old base; the new one is pull_request.base.
+  if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
+  if (payload.action === 'labeled' && payload.label?.name !== label) {
+    return `label ${payload.label?.name} is not the review label`;
+  }
+  if (!payload.pull_request) return 'no pull_request in payload';
+  if (payload.pull_request.draft) return 'pull request is a draft';
+}
+
+/** Why the PR's author isn't eligible, or undefined when they are. */
+function authorReason(pr: any, policy: OutsidePolicy, label: string): string | undefined {
+  const association = pr.author_association;
+  if (TRUSTED_AUTHORS.has(association) || policy === 'always') return;
+  if (policy === 'never') return `author ${association} is outside and review_outside_prs is never`;
+  // labels is the PR's current set, which on a labeled event already includes the new label.
+  if (!pr.labels?.some((l: any) => l?.name === label)) return `author ${association} is outside and the PR lacks label ${label}`;
+}
+
 function commentBody(f: RecordedFinding): string {
   let body = `**${f.title}**\n\n\`${f.severity}\` · ${f.focus}\n\n${f.evidence}`;
   if (f.suggested_fix) body += `\n\n**Suggested fix:**\n\n${f.suggested_fix}`;
@@ -154,6 +215,10 @@ function summary(job: Job, focuses: RecordedFocus[], fallbackUsed: boolean, coun
     // Focus names only; error detail stays in the run record.
     ...(failed.length ? [`Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`] : []),
     `${count} inline comment${count === 1 ? '' : 's'}.`,
-    `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha} -->`,
+    marker(job),
   ].join('\n\n');
 }
+
+// A label re-review repeats a head/base pair on purpose, so its marker also names the run.
+const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha}${
+  job.event === 'pull_request.labeled' ? `:run-${job.id}` : ''} -->`;

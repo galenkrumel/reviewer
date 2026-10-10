@@ -28,6 +28,7 @@ export interface GitHubPort {
   /** URL the bare clone fetches from. Credentials never go in it. */
   cloneUrl(repo: string): string;
   getPullRequest(token: string, repo: string, number: number): Promise<PullRequest>;
+  /** Reviews this app posted on the PR; anyone else's are left out, so nobody can forge the marker. */
   listReviews(token: string, repo: string, number: number): Promise<{ id: number; body: string }[]>;
   createReview(token: string, repo: string, number: number, review: NewReview): Promise<{ id: number }>;
 }

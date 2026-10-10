@@ -19,7 +19,7 @@ async function review(
   const github = new FakeGitHub();
   github.addPullRequest(REPO, fx.url, pr);
   const model = new ScriptedModel(turns);
-  const { app } = testApp({ model, github, maxReviewers: opts.maxReviewers });
+  const { app } = testApp({ model, github, config: { maxReviewers: opts.maxReviewers } });
   const payload = openedPayload(REPO, pr);
   if (opts.body !== undefined) payload.pull_request.body = opts.body;
   await app.receive(delivery('pull_request', payload));
@@ -178,5 +178,5 @@ test('a PR-steered reason cannot break the summary or forge its marker', async (
 });
 
 test('a reviewer cap below 2 is refused, since it would drop the always-on security reviewer', () => {
-  assert.throws(() => testApp({ model: new ScriptedModel({}), maxReviewers: 1 }), /maxReviewers/);
+  assert.throws(() => testApp({ model: new ScriptedModel({}), config: { maxReviewers: 1 } }), /maxReviewers/);
 });
