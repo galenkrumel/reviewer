@@ -222,6 +222,14 @@ export function openStore(dataDir: string, clock: Clock) {
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
 
+    /** A run's status, review and error, with the cost summed over its invocations: what the end-of-run log line says. */
+    outcome(id: number): { status: RunStatus; reviewId: number | null; error: string | null; cost: number } {
+      const r: any = db.prepare(`SELECT status, review_id, error,
+        (SELECT COALESCE(SUM(json_extract(data, '$.cost')), 0) FROM invocations WHERE run_id = runs.id) AS cost
+        FROM runs WHERE id = ?`).get(id);
+      return { status: r.status, reviewId: r.review_id, error: r.error, cost: r.cost };
+    },
+
     /** Delete finished runs created before `before`, with everything recorded for them. Queued and running jobs stay. */
     prune(before: Date) {
       const old = `SELECT id FROM runs WHERE created_at < ? AND status NOT IN ('queued', 'running')`;

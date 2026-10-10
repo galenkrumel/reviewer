@@ -61,7 +61,8 @@ At startup the service checks every configured model against OpenRouter and refu
 lacks tool support. A failed deploy log naming a model means you need a different model ID.
 
 To confirm the deployment works, open a non-draft PR on an allowlisted repository. A review appears within minutes,
-or nothing does if the reviewers found nothing worth posting. Either way the run shows up in the logs and the run records.
+or nothing does if the reviewers found nothing worth posting. Either way the logs show a `delivery` line for the webhook and a `run finished` line
+with the outcome, and the run is in the run records.
 
 Elsewhere: any host that runs `npm start` on Node ≥ 22.18 with `git` installed and a persistent `DATA_DIR`. Run one
 instance only, because the queue lives in that instance's SQLite.
@@ -123,8 +124,13 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
 
 ## Operating
 
-- **Logs** go to stdout, one JSON object per line: `level` (`info`, `warn` or `error`) and `msg`. Failures also carry
-  `step`, `run`, `repo`, `pr` and `error`. `step` is one of:
+- **Logs** go to stdout, one JSON object per line: `level` (`info`, `warn` or `error`) and `msg`.
+  - Every webhook delivery logs `delivery` with `event`, the HTTP `status` returned, and a `reason` if it was not queued.
+    A `warn` with status 401 means the signature didn't match: `GITHUB_WEBHOOK_SECRET` differs from the App's secret.
+    No `delivery` lines at all means GitHub isn't reaching the service: check the App's webhook URL and its
+    **Advanced → Recent Deliveries**.
+  - Every run logs `run finished` with `run`, `repo`, `pr`, `status`, `reviewId`, `error` and `cost` (USD).
+  - Failures also carry `step`, `run`, `repo`, `pr` and `error`. `step` is one of:
   - `fetch`: the git fetch of the PR's commits;
   - `orchestrator`: focus selection, after which the fixed fallback is used;
   - `reviewer`: a focus reviewer's model call or budget;

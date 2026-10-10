@@ -360,6 +360,7 @@ export function createApp(deps: {
           store.finish(job.id, 'failed', { error: `run: ${errorMessage(err)}` });
         }
       }
+      log({ level: 'info', msg: 'run finished', run: job.id, repo: job.repo, pr: job.pr, ...store.outcome(job.id) });
     }
   }
 

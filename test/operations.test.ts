@@ -230,3 +230,20 @@ test('worker concurrency must be a positive integer', () => {
   assert.throws(() => testApp({ model: new ScriptedModel({}), config: { workerConcurrency: 0 } }), /workerConcurrency/);
 });
 
+
+test('every finished run logs its outcome', async () => {
+  const { pr, github } = setup();
+  const { app, logs } = testApp({ model: new ScriptedModel([report()]), github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const run = app.runs()[0]!;
+  const finished = logs.filter((l) => l.msg === 'run finished');
+  assert.equal(finished.length, 1);
+  assert.deepEqual(
+    [finished[0]!.level, finished[0]!.run, finished[0]!.repo, finished[0]!.pr, finished[0]!.status, finished[0]!.reviewId],
+    ['info', run.id, REPO, 7, 'published', run.reviewId],
+  );
+  assert.equal(typeof finished[0]!.cost, 'number');
+});
