@@ -4,7 +4,14 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Clock } from './ports.ts';
 
-export type RunStatus = 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed' | 'skipped';
+export type RunStatus =
+  | 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed'
+  /** A newer job for the PR, or converted_to_draft/closed, replaced this one. */
+  | 'superseded'
+  /** The pre-publish check found the PR closed, a draft, or at other SHAs. */
+  | 'stale'
+  /** Over the per-PR run cap: recorded, never claimed. */
+  | 'skipped';
 export type FindingOutcome = 'published' | 'unanchorable';
 
 export interface Finding {
@@ -73,14 +80,30 @@ export function openStore(dataDir: string, clock: Clock) {
     );
   `);
   const now = () => clock.now().toISOString();
+  // Restart safety: whatever was running died with the last process. The marker check prevents double-posting.
+  db.prepare(`UPDATE runs SET status = 'queued', updated_at = ? WHERE status = 'running'`).run(now());
   const toJob = (r: any): Job => ({
     id: r.id, deliveryId: r.delivery_id, event: r.event, repo: r.repo, pr: r.pr,
     installationId: r.installation_id, headSha: r.head_sha, baseSha: r.base_sha, title: r.title, body: r.body,
   });
 
   return {
-    /** Records a job; a `skipped` one is never claimed. */
+    // ponytail: no transaction; DatabaseSync calls can't interleave in one process. Wrap in BEGIN IMMEDIATE if a second process ever writes.
+    /**
+     * No-op for a duplicate (repo, PR, head, base); otherwise supersedes the PR's in-flight jobs at other SHAs.
+     * A label re-review is never a duplicate. A `skipped` job is only recorded.
+     */
     enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued') {
+      if (status === 'queued') {
+        const dup = job.event !== 'pull_request.labeled' && db.prepare(`SELECT 1 FROM runs
+          WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
+          AND status IN ('queued', 'running', 'published', 'nothing_to_publish')`)
+          .get(job.repo, job.pr, job.headSha, job.baseSha);
+        if (dup) return;
+        db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
+          AND status IN ('queued', 'running') AND (head_sha != ? OR base_sha != ?)`)
+          .run(now(), job.repo, job.pr, job.headSha, job.baseSha);
+      }
       db.prepare(`INSERT INTO runs (delivery_id, event, repo, pr, installation_id, head_sha, base_sha, title, body,
         status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(job.deliveryId, job.event, job.repo, job.pr, job.installationId, job.headSha, job.baseSha,
@@ -94,6 +117,16 @@ export function openStore(dataDir: string, clock: Clock) {
       return row.n;
     },
 
+    /** Mark every queued or running job for the PR superseded. */
+    supersede(repo: string, pr: number) {
+      db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
+        AND status IN ('queued', 'running')`).run(now(), repo, pr);
+    },
+
+    superseded(id: number): boolean {
+      return (db.prepare('SELECT status FROM runs WHERE id = ?').get(id) as any)?.status === 'superseded';
+    },
+
     claimNext(): Job | undefined {
       const row = db.prepare(`UPDATE runs SET status = 'running', updated_at = ?
         WHERE id = (SELECT id FROM runs WHERE status = 'queued' ORDER BY id LIMIT 1) RETURNING *`).get(now());
@@ -103,7 +136,8 @@ export function openStore(dataDir: string, clock: Clock) {
     finish(id: number, status: RunStatus, opts: { reviewId?: number; error?: string; findings?: RecordedFinding[] } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
-      db.prepare('UPDATE runs SET status = ?, review_id = ?, error = ?, updated_at = ? WHERE id = ?')
+      // Only a running job finishes; a superseded one keeps that status whatever the worker ends with.
+      db.prepare(`UPDATE runs SET status = ?, review_id = ?, error = ?, updated_at = ? WHERE id = ? AND status = 'running'`)
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
 

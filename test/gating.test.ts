@@ -114,8 +114,9 @@ test('the 11th eligible event within 24h is recorded and skipped; one after the 
   // An ineligible event neither counts nor gets recorded.
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr, {}, outsider)));
 
-  const statuses = app.runs().map((r) => r.status);
-  assert.deepEqual(statuses, [...Array(10).fill('queued'), 'skipped']);
+  // Each new head supersedes the last, but superseded runs still count toward the cap.
+  const skipped = app.runs().map((r) => r.status === 'skipped');
+  assert.deepEqual(skipped, [...Array(10).fill(false), true]);
 
   // Still inside the window of the first run: skipped.
   clock.time = new Date(start + 24 * 3600_000 - 1);
