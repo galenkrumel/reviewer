@@ -98,19 +98,39 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
-/** Replays scripted assistant turns in order and records every request. */
+/** The agent a request is for, from its system prompt ("You are the <agent> ..."). */
+export function agentOf(req: ChatRequest): string {
+  const system = req.messages[0];
+  return (system?.role === 'system' && /^You are the (\w+)/.exec(system.content)?.[1]) || 'unknown';
+}
+
+/**
+ * Replays scripted assistant turns per agent and records every request.
+ * An agent with no script (or no turns left) gets an error, so unexpected agents surface as failures.
+ */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
-  private turns: AssistantMessage[];
-  constructor(turns: AssistantMessage[]) {
+  private turns: Record<string, AssistantMessage[]>;
+  constructor(turns: Record<string, AssistantMessage[]>) {
     this.turns = turns;
   }
 
   async chat(req: ChatRequest) {
     this.requests.push(structuredClone(req));
-    const turn = this.turns.shift();
-    if (!turn) throw new Error('scripted model ran out of turns');
+    const agent = agentOf(req);
+    const turn = this.turns[agent]?.shift();
+    if (!turn) throw new Error(`scripted model has no turn for ${agent}`);
     return turn;
+  }
+
+  /** Requests made by the given agent. */
+  requestsFor(agent: string) {
+    return this.requests.filter((r) => agentOf(r) === agent);
+  }
+
+  /** Distinct agents that were called, in first-call order. */
+  agents() {
+    return [...new Set(this.requests.map(agentOf))];
   }
 }
 
@@ -122,6 +142,12 @@ export function toolCall(name: string, args: unknown): AssistantMessage {
     tool_calls: [{ id: `call_${++callId}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
   };
 }
+
+/** An orchestrator turn selecting the given focuses, each with a stock reason. */
+export const select = (...focuses: string[]) =>
+  toolCall('select_focuses', { focuses: focuses.map((focus) => ({ focus, reason: `${focus} matters here` })) });
+
+export const noFindings = () => toolCall('report_findings', { findings: [] });
 
 export const WEBHOOK_SECRET = 'test-webhook-secret';
 
@@ -154,7 +180,7 @@ export function openedPayload(repo: string, pr: PullRequest) {
   };
 }
 
-export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[] }) {
+export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[]; maxReviewers?: number }) {
   const github = opts.github ?? new FakeGitHub();
   const dataDir = tempDir();
   const app = createApp({
@@ -163,6 +189,7 @@ export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist
       allowlist: opts.allowlist ?? ['acme/widgets'],
       model: 'test/model',
       dataDir,
+      maxReviewers: opts.maxReviewers ?? 3,
     },
     github,
     model: opts.model,

@@ -10,12 +10,17 @@ function env(name: string): string {
   return v;
 }
 
+const maxReviewers = Number(process.env.MAX_REVIEWERS ?? 3);
+// Below 2, the cap would drop the always-on security reviewer.
+if (!Number.isInteger(maxReviewers) || maxReviewers < 2) throw new Error('MAX_REVIEWERS must be an integer >= 2');
+
 const app = createApp({
   config: {
     webhookSecret: env('GITHUB_WEBHOOK_SECRET'),
     allowlist: env('REPO_ALLOWLIST').split(',').map((r) => r.trim()).filter(Boolean),
     model: env('REVIEW_MODEL'),
     dataDir: process.env.DATA_DIR ?? './data',
+    maxReviewers,
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),

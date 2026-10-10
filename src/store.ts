@@ -23,6 +23,13 @@ export interface RecordedFinding extends Finding {
   outcome: FindingOutcome;
 }
 
+export interface RecordedFocus {
+  focus: string;
+  reason: string;
+  status: 'succeeded' | 'failed';
+  error?: string;
+}
+
 export interface Job {
   id: number;
   deliveryId: string;
@@ -41,6 +48,9 @@ export interface RunRecord extends Omit<Job, 'installationId' | 'title' | 'body'
   reviewId: number | null;
   error: string | null;
   findings: RecordedFinding[];
+  focuses: RecordedFocus[];
+  /** Whether the orchestrator failed and the fixed fallback selection was used. */
+  fallbackUsed: boolean;
 }
 
 export function openStore(dataDir: string, clock: Clock) {
@@ -71,6 +81,11 @@ export function openStore(dataDir: string, clock: Clock) {
       outcome TEXT NOT NULL,
       data TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS focuses (
+      run_id INTEGER NOT NULL REFERENCES runs(id),
+      fallback INTEGER NOT NULL,
+      data TEXT NOT NULL
+    );
   `);
   const now = () => clock.now().toISOString();
   const toJob = (r: any): Job => ({
@@ -92,9 +107,13 @@ export function openStore(dataDir: string, clock: Clock) {
       return row && toJob(row);
     },
 
-    finish(id: number, status: RunStatus, opts: { reviewId?: number; error?: string; findings?: RecordedFinding[] } = {}) {
+    finish(id: number, status: RunStatus, opts: {
+      reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[]; fallbackUsed?: boolean;
+    } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
+      const insertFocus = db.prepare('INSERT INTO focuses (run_id, fallback, data) VALUES (?, ?, ?)');
+      for (const f of opts.focuses ?? []) insertFocus.run(id, opts.fallbackUsed ? 1 : 0, JSON.stringify(f));
       db.prepare('UPDATE runs SET status = ?, review_id = ?, error = ?, updated_at = ? WHERE id = ?')
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
@@ -102,14 +121,18 @@ export function openStore(dataDir: string, clock: Clock) {
     /** The run-record query interface. */
     runs(): RunRecord[] {
       const findings = db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid');
+      const focuses = db.prepare('SELECT fallback, data FROM focuses WHERE run_id = ? ORDER BY rowid');
       return db.prepare('SELECT * FROM runs ORDER BY id').all().map((r: any) => {
         const { installationId, title, body, ...job } = toJob(r);
+        const focusRows = focuses.all(r.id);
         return {
           ...job,
           status: r.status,
           reviewId: r.review_id,
           error: r.error,
           findings: findings.all(r.id).map((f: any) => JSON.parse(f.data)),
+          focuses: focusRows.map((f: any) => JSON.parse(f.data)),
+          fallbackUsed: focusRows.some((f: any) => f.fallback === 1),
         };
       });
     },

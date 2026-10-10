@@ -21,5 +21,6 @@ npm start
 | `REPO_ALLOWLIST` | Comma-separated `owner/repo` list |
 | `OPENROUTER_API_KEY` | OpenRouter key |
 | `REVIEW_MODEL` | OpenRouter model ID for the reviewer |
+| `MAX_REVIEWERS` | Reviewer cap per run, at least 2 (default `3`) |
 | `DATA_DIR` | Persistent volume for SQLite and bare clones (default `./data`) |
 | `PORT` | HTTP port (default `3000`); point the App's webhook at `POST /` |

@@ -75,3 +75,23 @@ export function addedLines(diff: string): Map<string, Set<number>> {
   }
   return out;
 }
+
+/** Added and removed line counts per changed path (the head path, or the base path for deletions). */
+// ponytail: text diffs only; binary changes carry no ---/+++ lines and are not counted.
+export function diffStats(diff: string): Map<string, { added: number; removed: number }> {
+  const out = new Map<string, { added: number; removed: number }>();
+  let cur: { added: number; removed: number } | undefined;
+  let inHeader = false;
+  let from = '';
+  const name = (l: string) => l.slice('--- a/'.length).replace(/\t$/, '');
+  for (const l of diff.split('\n')) {
+    if (l.startsWith('diff --git ')) { cur = undefined; inHeader = true; }
+    else if (inHeader && l.startsWith('--- ')) from = name(l);
+    else if (inHeader && l.startsWith('+++ ')) out.set(l === '+++ /dev/null' ? from : name(l), (cur = { added: 0, removed: 0 }));
+    else if (l.startsWith('@@')) inHeader = false;
+    else if (inHeader || !cur) continue;
+    else if (l.startsWith('+')) cur.added++;
+    else if (l.startsWith('-')) cur.removed++;
+  }
+  return out;
+}

@@ -1,8 +1,9 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { addedLines, openSource } from './git.ts';
+import { addedLines, diffStats, openSource } from './git.ts';
+import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { runReviewer } from './reviewer.ts';
-import { openStore, type Job, type RecordedFinding } from './store.ts';
+import { openStore, type Job, type RecordedFinding, type RecordedFocus } from './store.ts';
 import type { Clock, GitHubPort, ModelPort, ReviewComment } from './ports.ts';
 
 export interface AppConfig {
@@ -11,14 +12,14 @@ export interface AppConfig {
   allowlist: string[];
   model: string;
   dataDir: string;
+  /** At least 2, so the always-on correctness and security reviewers both fit. */
+  maxReviewers: number;
 }
 
 export interface Delivery {
   headers: Record<string, string | string[] | undefined>;
   body: string | Buffer;
 }
-
-const FOCUS = 'correctness';
 
 export function createApp(deps: { config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock }) {
   const { config, github, model } = deps;
@@ -70,26 +71,49 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       headSha: job.headSha, baseSha: job.baseSha,
     });
     const diff = await source.diff();
-    const reported = await runReviewer({ model, modelId: config.model, source, diff, title: job.title, body: job.body });
+    const stats = diffStats(diff);
+    const paths = [...stats.keys()];
+
+    let picks: Pick[];
+    let fallbackUsed = false;
+    try {
+      picks = await runOrchestrator({ model, modelId: config.model, stats, title: job.title, body: job.body });
+    } catch {
+      picks = fallbackPicks(paths);
+      fallbackUsed = true;
+    }
 
     const changed = addedLines(diff);
-    const findings: RecordedFinding[] = reported.map((f) => ({
-      ...f,
-      focus: FOCUS,
-      outcome: changed.get(f.path)?.has(f.line) ? 'published' : 'unanchorable',
-    }));
+    const findings: RecordedFinding[] = [];
+    const focuses: RecordedFocus[] = [];
+    // Sequential: one reviewer's failure never stops the others.
+    for (const { focus, reason } of selectFocuses(picks, paths, config.maxReviewers)) {
+      const review = () => runReviewer({ focus, model, modelId: config.model, source, diff, title: job.title, body: job.body });
+      try {
+        const reported = await review().catch(review); // one retry
+        for (const f of reported) {
+          findings.push({ ...f, focus, outcome: changed.get(f.path)?.has(f.line) ? 'published' : 'unanchorable' });
+        }
+        focuses.push({ focus, reason, status: 'succeeded' });
+      } catch (err) {
+        focuses.push({ focus, reason, status: 'failed', error: err instanceof Error ? err.message : String(err) });
+      }
+    }
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
-    if (comments.length === 0) return store.finish(job.id, 'nothing_to_publish', { findings });
+    const record = { findings, focuses, fallbackUsed };
+    if (comments.length === 0 && focuses.every((f) => f.status === 'succeeded')) {
+      return store.finish(job.id, 'nothing_to_publish', record);
+    }
     const { id } = await github.createReview(token, job.repo, job.pr, {
       commit_id: job.headSha,
       event: 'COMMENT',
-      body: summary(job, comments.length),
+      body: summary(job, focuses, fallbackUsed, comments.length),
       comments,
     });
-    store.finish(job.id, 'published', { reviewId: id, findings });
+    store.finish(job.id, 'published', { reviewId: id, ...record });
   }
 
   let draining: Promise<void> | undefined;
@@ -116,10 +140,14 @@ function commentBody(f: RecordedFinding): string {
   return body;
 }
 
-function summary(job: Job, count: number): string {
+function summary(job: Job, focuses: RecordedFocus[], fallbackUsed: boolean, count: number): string {
+  const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
   return [
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\``,
-    `Focus: ${FOCUS}`,
+    `Focuses${fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}:\n`
+      + focuses.map((f) => `- ${f.focus}: ${f.reason}`).join('\n'),
+    // Focus names only; error detail stays in the run record.
+    ...(failed.length ? [`Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`] : []),
     `${count} inline comment${count === 1 ? '' : 's'}.`,
     `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha} -->`,
   ].join('\n\n');
