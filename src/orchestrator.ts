@@ -1,5 +1,5 @@
 // The orchestrator suggests reviewer focuses; code decides what actually runs.
-import type { DiffStat } from './git.ts';
+import type { FileChange } from './git.ts';
 import type { ModelPort, ToolDef } from './ports.ts';
 import { FOCUSES, untrusted, type Focus } from './reviewer.ts';
 
@@ -35,16 +35,17 @@ const TOOL: ToolDef = {
   },
 };
 
-// ponytail: extension heuristics until exclusions (#9) classify files properly.
+// Exclusions (lockfiles, vendored, generated) are already gone; this tells code from docs and assets.
+// ponytail: extension heuristic; a content signal can replace it if it misfires.
 const NON_CODE = /\.(md|mdx|markdown|txt|rst|adoc|png|jpe?g|gif|ico|webp|pdf|lock)$|(^|\/)(LICENSE|NOTICE|AUTHORS|CODEOWNERS)$/i;
 const MANIFEST = /(^|\/)(package\.json|requirements[^/]*\.txt|pyproject\.toml|Pipfile|go\.mod|Cargo\.toml|Gemfile|pom\.xml|build\.gradle(\.kts)?|composer\.json|go\.sum|package-lock\.json|pnpm-lock\.yaml|[^/]*\.lock)$/;
 const AUTH = /auth|login|session|passw|token|secret|crypt|permission|oauth|jwt/i;
 
 /** The orchestrator's picks, schema-validated. Anything off-schema throws, which triggers the fallback. */
 export async function runOrchestrator(opts: {
-  model: ModelPort; modelId: string; stats: Map<string, DiffStat>; title: string; body: string;
+  model: ModelPort; modelId: string; files: FileChange[]; title: string; body: string;
 }): Promise<Pick[]> {
-  const files = [...opts.stats].map(([path, s]) => `${path} (+${s.added} -${s.removed})`).join('\n');
+  const files = opts.files.map((f) => `${f.path} (+${f.added} -${f.deleted})`).join('\n');
   const reply = await opts.model.chat({
     model: opts.modelId,
     messages: [

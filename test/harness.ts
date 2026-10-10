@@ -28,14 +28,15 @@ const GIT_ENV = {
   GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com',
 };
 
-type FixtureFiles = Record<string, string | { symlink: string }>;
+type FixtureFiles = Record<string, string | null | { symlink: string }>;
 
-/** A local repo with a base commit and a head commit on top of it. */
+/** A local repo with a base commit and a head commit on top of it. A null value deletes the file. */
 export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
   const dir = tempDir();
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
   const commit = (files: FixtureFiles, msg: string) => {
     for (const [path, content] of Object.entries(files)) {
+      if (content === null) { rmSync(join(dir, path)); continue; }
       mkdirSync(dirname(join(dir, path)), { recursive: true });
       if (typeof content === 'string') writeFileSync(join(dir, path), content);
       else symlinkSync(content.symlink, join(dir, path));

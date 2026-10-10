@@ -113,13 +113,13 @@ test('the fallback adds security for a dependency manifest or auth path, and onl
   assert.deepEqual(reviewers(manifest.model), ['correctness', 'security']);
   assert.equal(manifest.run.fallbackUsed, true);
 
+  // Lockfiles and binary assets are excluded from review, but their paths still count for the fallback.
   const lockfile = await review({ correctness: [noFindings()], security: [noFindings()] },
-    [{ 'yarn.lock': 'a@1\n' }, { 'yarn.lock': 'a@2\n' }]);
+    [{ 'README.md': 'hi\n', 'yarn.lock': 'a@1\n' }, { 'README.md': 'hello\n', 'yarn.lock': 'a@2\n' }]);
   assert.deepEqual(reviewers(lockfile.model), ['correctness', 'security']);
 
-  // A binary file has no text hunk, but its path still counts.
   const binary = await review({ correctness: [noFindings()], security: [noFindings()] },
-    [{ 'README.md': 'hi\n' }, { 'docs/oauth-flow.png': '\0\x01\x02binary' }]);
+    [{ 'README.md': 'hi\n' }, { 'README.md': 'hello\n', 'docs/oauth-flow.png': '\0\x01\x02binary' }]);
   assert.deepEqual(reviewers(binary.model), ['correctness', 'security']);
 
   const docs = await review({ correctness: [noFindings()] }, [{ 'README.md': 'hi\n' }, { 'README.md': 'hello\n' }]);
