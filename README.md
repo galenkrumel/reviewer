@@ -18,11 +18,12 @@ npm start
 
 ### 1. Create the GitHub App
 
-On GitHub, go to **Settings → Developer settings → GitHub Apps → New GitHub App** (under an organization's settings
-to own it there).
+Create the App on the account (user or organization) that owns the repositories to review. A private App can only be
+installed on the account that owns it. Where this repository lives doesn't matter. On GitHub, go to that account's
+**Settings → Developer settings → GitHub Apps → New GitHub App**.
 
-- **Webhook:** active. URL is the service's root, e.g. `https://reviewer.onrender.com/`; the service accepts deliveries
-  as `POST /`. Set a long random **webhook secret**, e.g. from `openssl rand -hex 32`. You need it again in step 2.
+- **Webhook:** active. The URL is the service's root, and the service accepts deliveries as `POST /`. The service
+  doesn't exist yet, so enter a placeholder such as `https://example.com/` and replace it in step 2. Set a long random **webhook secret**, e.g. from `openssl rand -hex 32`. You need it again in step 2.
 - **Repository permissions:** exactly these three.
 
   | Permission | Access | Used for |
@@ -44,10 +45,14 @@ repositories to review. Installing alone does nothing: a repository is reviewed 
 `render.yaml` is a Blueprint for one web service, with a 10 GB disk mounted at `/var/data` and `DATA_DIR` pointing at it.
 Disks need a paid instance type, so the Blueprint uses `starter`.
 
-1. In Render, choose **New → Blueprint** and select your fork of this repository.
+1. In Render, choose **New → Blueprint** and select the GitHub repository that holds this code, with `render.yaml` at
+   its root. That's this repository if you own it. Otherwise fork it into your own account first, because Render
+   deploys only from repositories your connected GitHub account can access.
 2. Fill in the secrets it asks for: `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `OPENROUTER_API_KEY`,
    `REPO_ALLOWLIST` and `REVIEW_MODEL`. For `GITHUB_PRIVATE_KEY`, paste the whole PEM. Newlines written as `\n` work too.
-3. Once it is live, set the App's webhook URL to the service URL, if you didn't know it in step 1.
+3. Once it is live, copy the service URL from the Render dashboard (e.g. `https://reviewer.onrender.com`; Render
+   adds a suffix if the name is taken) and set it as the App's webhook URL in place of the placeholder. Deliveries
+   sent before this fail harmlessly. Redeliver one from the App's **Advanced** tab or push again to trigger a review.
 
 At startup the service checks every configured model against OpenRouter and refuses to start if one is unlisted or
 lacks tool support. A failed deploy log naming a model means you need a different model ID.
