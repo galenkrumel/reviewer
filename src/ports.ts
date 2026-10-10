@@ -80,7 +80,7 @@ export interface ChatResponse {
 
 export interface ModelInfo {
   id: string;
-  supported_parameters: string[];
+  supported_parameters?: string[];
 }
 
 export interface ModelPort {

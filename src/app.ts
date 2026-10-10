@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { addedLines, openSource } from './git.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
-import { BudgetExceeded, FOCUSES, runReviewer, type Chat, type Focus } from './reviewer.ts';
+import { BudgetExceeded, FOCUSES, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import { openStore, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation } from './store.ts';
 import type { Clock, GitHubPort, ModelPort, ReviewComment } from './ports.ts';
