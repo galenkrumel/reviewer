@@ -98,11 +98,14 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
+/** A scripted turn, or a callback that can act mid-run (deliver an event, move the PR) before answering. */
+export type Turn = AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
+
 /** Replays scripted assistant turns in order and records every request. */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
-  private turns: AssistantMessage[];
-  constructor(turns: AssistantMessage[]) {
+  private turns: Turn[];
+  constructor(turns: Turn[]) {
     this.turns = turns;
   }
 
@@ -110,7 +113,7 @@ export class ScriptedModel implements ModelPort {
     this.requests.push(structuredClone(req));
     const turn = this.turns.shift();
     if (!turn) throw new Error('scripted model ran out of turns');
-    return turn;
+    return typeof turn === 'function' ? turn() : turn;
   }
 }
 
@@ -137,9 +140,9 @@ export function delivery(event: string, payload: unknown, secret = WEBHOOK_SECRE
   };
 }
 
-export function openedPayload(repo: string, pr: PullRequest) {
+export function openedPayload(repo: string, pr: PullRequest, action = 'opened') {
   return {
-    action: 'opened',
+    action,
     installation: { id: 42 },
     repository: { full_name: repo },
     pull_request: {
@@ -154,9 +157,10 @@ export function openedPayload(repo: string, pr: PullRequest) {
   };
 }
 
-export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[] }) {
+/** Pass an earlier app's dataDir to simulate a restart on the same volume. */
+export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string }) {
   const github = opts.github ?? new FakeGitHub();
-  const dataDir = tempDir();
+  const dataDir = opts.dataDir ?? tempDir();
   const app = createApp({
     config: {
       webhookSecret: WEBHOOK_SECRET,
