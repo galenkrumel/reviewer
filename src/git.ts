@@ -37,7 +37,7 @@ export interface FileChange {
   binary?: true;
 }
 
-/** A tool-input problem the reviewer may see; any other failure is reported generically. */
+/** A problem with tool input or repository content that is safe to report; any other failure is reported generically. */
 export class ToolError extends Error {}
 
 // Inputs are `unknown` because they come straight from model tool calls.
@@ -55,12 +55,15 @@ export interface Source {
   changedFiles(): Promise<FileChange[]>;
   /** The paths marked linguist-generated or linguist-vendored by .gitattributes at the base SHA. */
   markedAtBase(paths: string[]): Promise<Set<string>>;
+  /** A regular file at the base SHA, or undefined if there is none. Throws ToolError for a symlink, directory or oversized file. */
+  fileAtBase(path: string): Promise<string | undefined>;
 }
 
 // ponytail: fixed cap on grep output lines; make it a budget when per-agent budgets land.
 const MAX_GREP_LINES = 200;
 
 const SYMLINK_MODE = '120000';
+const MAX_BASE_FILE_BYTES = 64 * 1024;
 
 /** A repository-relative path: not absolute, no empty, "." or ".." segments. One trailing "/" is allowed, as list_dir prints. */
 function checkPath(path: unknown): string {
@@ -106,9 +109,9 @@ export async function openSource(opts: {
   // ponytail: no retry/backoff yet; a failed fetch fails the run.
   await git('fetch', '-q', '--filter=blob:none', 'origin', headSha, baseSha);
 
-  /** The head tree's entry at path, if any. Symlinks are never followed: a tree stores only the link target. */
-  async function entry(path: string) {
-    const out = await git('--literal-pathspecs', 'ls-tree', '-z', headSha, '--', path);
+  /** The tree's entry at path (head by default), if any. Symlinks are never followed: a tree stores only the link target. */
+  async function entry(path: string, sha = headSha) {
+    const out = await git('--literal-pathspecs', 'ls-tree', '-z', sha, '--', path);
     const e = treeEntries(out)[0];
     return e?.name === path ? e : undefined;
   }
@@ -146,6 +149,15 @@ export async function openSource(opts: {
         if (fields[i + 2] === 'set' || fields[i + 2] === 'true') marked.add(fields[i]!);
       }
       return marked;
+    },
+
+    async fileAtBase(path) {
+      const e = await entry(path, baseSha);
+      if (!e) return undefined;
+      if (e.mode === SYMLINK_MODE) throw new ToolError(`${path} is a symlink`);
+      if (e.type !== 'blob') throw new ToolError(`${path} is not a file`);
+      if (Number(await git('cat-file', '-s', e.oid)) > MAX_BASE_FILE_BYTES) throw new ToolError(`${path} is over 64 KiB`);
+      return git('cat-file', 'blob', e.oid);
     },
 
     async readFile(path, start, end) {

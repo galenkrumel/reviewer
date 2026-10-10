@@ -1,8 +1,10 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { addedLines, openSource } from './git.ts';
+import { matchesGlob } from 'node:path';
+import { addedLines, openSource, ToolError } from './git.ts';
 import { toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
+import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation } from './store.ts';
@@ -177,10 +179,27 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     });
     // Superseded runs keep that status and stop: checked between steps and right before publishing.
     if (store.superseded(job.id)) return;
+    // Read at the base SHA only, so a PR cannot change its own review by editing the config.
+    let configText: string | undefined;
+    const configWarnings: string[] = [];
+    try {
+      configText = await source.fileAtBase(REPO_CONFIG_PATH);
+    } catch (err) {
+      if (!(err instanceof ToolError)) throw err;
+      configWarnings.push(`${err.message}; ignored`);
+    }
+    const parsed = parseRepoConfig(configText, {
+      minSeverity: config.minSeverity ?? 'medium', minConfidence: config.minConfidence ?? 0.7,
+      maxComments: config.maxComments ?? 10, maxReviewers, maxReviewableLines: config.maxReviewableLines ?? 800,
+    });
+    const settings = parsed.settings;
+    store.recordConfigWarnings(job.id, [...configWarnings, ...parsed.warnings]);
     const files = await source.changedFiles();
-    const scope = selectFiles(files, await source.markedAtBase(files.map((f) => f.path)),
-      config.reviewTokenBudget ?? 50_000);
-    const maxLines = config.maxReviewableLines ?? 800;
+    const paths = files.map((f) => f.path);
+    const excluded = await source.markedAtBase(paths);
+    for (const p of paths) if (settings.exclude.some((glob) => matchesGlob(p, glob))) excluded.add(p);
+    const scope = selectFiles(files, excluded, config.reviewTokenBudget ?? 50_000);
+    const maxLines = settings.maxReviewableLines;
 
     // Comments anchor only against the reviewed files' diff, so excluded and skipped files are never commented on.
     let diff = '';
@@ -194,6 +213,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       try {
         picks = await runOrchestrator({
           chat: meteredChat('orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
+          pathHints: settings.pathHints,
         });
       } catch (err) {
         // The fallback's path match sees every changed file, excluded ones (lockfiles) included.
@@ -202,7 +222,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       }
 
       // Sequential: one reviewer's failure never stops the others.
-      for (const { focus, reason } of selectFocuses(picks, scope.reviewed.map((f) => f.path), maxReviewers)) {
+      // Disabled focuses leave before the cap, so they take no slot. The always-on ones can't be disabled.
+      const enabled = picks.filter((p) => !settings.disabledFocuses.has(p.focus));
+      for (const { focus, reason } of selectFocuses(enabled, scope.reviewed.map((f) => f.path), settings.maxReviewers)) {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
           focus, chat: meteredChat(focus, invocations), maxTurns: agentConfig(focus).maxTurns,
@@ -225,9 +247,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const fallbackUsed = orchestratorError !== undefined;
     const changed = addedLines(diff);
     const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
-      minSeverity: config.minSeverity ?? 'medium',
-      minConfidence: config.minConfidence ?? 0.7,
-      maxComments: config.maxComments ?? 10,
+      minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
     });
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
@@ -300,9 +320,12 @@ function authorReason(pr: any, policy: OutsidePolicy, label: string): string | u
   if (!pr.labels?.some((l: any) => l?.name === label)) return `author ${association} is outside and the PR lacks label ${label}`;
 }
 
-/** Paths come from the PR: code spans keep them from mentioning anyone or breaking out, and long lists are capped. */
+/**
+ * Paths come from the PR: code spans keep them from mentioning anyone or breaking out, dropping angle brackets keeps
+ * them from forging a marker (and so skipping a later review) in the raw body, and long lists are capped.
+ */
 function pathList(paths: string[], sep: string, max: number): string {
-  const shown = paths.slice(0, max).map((p) => '`' + p.replace(/[`\r\n]/g, '') + '`');
+  const shown = paths.slice(0, max).map((p) => '`' + p.replace(/[`<>\r\n]/g, '') + '`');
   if (paths.length > max) shown.push(`…and ${paths.length - max} more`);
   return shown.join(sep);
 }

@@ -33,3 +33,23 @@ npm start
 | `MAX_REVIEWABLE_LINES` | Above this many reviewable changed lines the summary recommends a split (default `800`) |
 | `REVIEW_TOKEN_BUDGET` | Estimated diff tokens given to reviewers; files past it are skipped and listed (default `50000`) |
 | `PORT` | HTTP port (default `3000`); point the App's webhook at `POST /` |
+
+## Per-repo config (`.github/ai-review.yml`)
+
+Read from the PR's **base** SHA only, so a PR that edits it doesn't change its own review. It can only tighten the deployment's settings. Anything invalid, loosening or unknown (models, budgets, credentials, author gating) is ignored, and a warning goes in the run record.
+
+```yaml
+disable_focuses: [performance, conciseness]  # correctness and security can't be disabled
+exclude:                                     # added to the built-in exclusions; globs match the full path
+  - "legacy/"                                # a trailing slash means the whole directory
+path_hints:                                  # glob: note, given to the orchestrator for matching changed paths
+  "src/billing/**": money handling, check rounding
+thresholds:                                  # can only be raised
+  severity: high
+  confidence: 0.8
+max_reviewers: 2                             # caps can only be lowered (max_reviewers at least 2)
+max_comments: 5
+max_reviewable_lines: 400
+```
+
+The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a, b]` (no commas inside items), and one level of `- item` lists (indented or not) or indented `key: value` maps, with quotes and `#` comments. Anything else makes the file malformed, and then it is ignored entirely.

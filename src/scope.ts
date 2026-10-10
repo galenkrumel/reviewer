@@ -30,13 +30,14 @@ export interface Scope {
   directories: string[];
 }
 
-function isExcluded(path: string, markedAtBase: Set<string>): boolean {
-  return LOCKFILES.has(posix.basename(path)) || VENDORED.test(path) || GENERATED.test(path) || markedAtBase.has(path);
+function isExcluded(path: string, excludedAtBase: Set<string>): boolean {
+  return LOCKFILES.has(posix.basename(path)) || VENDORED.test(path) || GENERATED.test(path) || excludedAtBase.has(path);
 }
 
-export function selectFiles(files: FileChange[], markedAtBase: Set<string>, tokenBudget: number): Scope {
+/** excludedAtBase: paths the base SHA excludes on top of the built-ins (.gitattributes marks, repo config globs). */
+export function selectFiles(files: FileChange[], excludedAtBase: Set<string>, tokenBudget: number): Scope {
   const churn = (f: FileChange) => f.added + f.deleted;
-  const kept = files.filter((f) => !isExcluded(f.path, markedAtBase));
+  const kept = files.filter((f) => !isExcluded(f.path, excludedAtBase));
   const reviewable = kept.filter((f) => churn(f) > 0);
   const ranked = reviewable.toSorted((a, b) =>
     Number(SENSITIVE.test(b.path)) - Number(SENSITIVE.test(a.path)) || churn(b) - churn(a));
