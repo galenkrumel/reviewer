@@ -1,9 +1,10 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { addedLines, openSource } from './git.ts';
+import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { runReviewer } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
-import { openStore, type Finding, type Job, type RecordedFinding } from './store.ts';
+import { openStore, type Job, type RecordedFinding, type RecordedFocus } from './store.ts';
 import type { Clock, GitHubPort, ModelPort, ReviewComment } from './ports.ts';
 
 export interface AppConfig {
@@ -18,6 +19,8 @@ export interface AppConfig {
   reviewLabel?: string;
   /** Runs per PR per rolling 24 hours. Default 10. */
   runCap?: number;
+  /** Reviewers per run. Default 3; at least 2, so the always-on correctness and security reviewers both fit. */
+  maxReviewers?: number;
   /** Above this many reviewable changed lines the summary recommends splitting the PR. Default 800. */
   maxReviewableLines?: number;
   /** Estimated diff tokens the reviewers may be given; files past it are skipped. Default 50000. */
@@ -31,10 +34,11 @@ export interface Delivery {
   body: string | Buffer;
 }
 
-const FOCUS = 'correctness';
-
 export function createApp(deps: { config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock }) {
   const { config, github, model } = deps;
+  const maxReviewers = config.maxReviewers ?? 3;
+  // Below 2, the cap would drop the always-on security reviewer.
+  if (!Number.isInteger(maxReviewers) || maxReviewers < 2) throw new Error('maxReviewers must be an integer >= 2');
   const store = openStore(config.dataDir, deps.clock);
   const allowlist = new Set(config.allowlist.map((r) => r.toLowerCase()));
   const label = config.reviewLabel ?? 'ai-review';
@@ -107,45 +111,61 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
     // Comments anchor only against the reviewed files' diff, so excluded and skipped files are never commented on.
     let diff = '';
-    let reported: Finding[] = [];
-    let failed: string | undefined;
+    const findings: RecordedFinding[] = [];
+    const focuses: RecordedFocus[] = [];
+    let orchestratorError: string | undefined;
     if (scope.reviewed.length) {
       diff = await source.reviewDiff(scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
+      let picks: Pick[];
       try {
-        reported = await runReviewer({ model, modelId: config.model, source, diff, title: job.title, body: job.body });
+        picks = await runOrchestrator({ model, modelId: config.model, files: scope.reviewed, title: job.title, body: job.body });
       } catch (err) {
-        failed = err instanceof Error ? err.message : String(err);
+        // The fallback's path match sees every changed file, excluded ones (lockfiles) included.
+        picks = fallbackPicks(files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
+        orchestratorError = err instanceof Error ? err.message : String(err);
+      }
+
+      const changed = addedLines(diff);
+      // Sequential: one reviewer's failure never stops the others.
+      for (const { focus, reason } of selectFocuses(picks, scope.reviewed.map((f) => f.path), maxReviewers)) {
+        if (store.superseded(job.id)) return;
+        const review = () => runReviewer({ focus, model, modelId: config.model, source, diff, title: job.title, body: job.body });
+        try {
+          const reported = await review().catch(review); // one retry
+          for (const f of reported) {
+            findings.push({ ...f, focus, outcome: changed.get(f.path)?.has(f.line) ? 'published' : 'unanchorable' });
+          }
+          focuses.push({ focus, reason, status: 'succeeded' });
+        } catch (err) {
+          focuses.push({ focus, reason, status: 'failed', error: err instanceof Error ? err.message : String(err) });
+        }
       }
     }
     if (store.superseded(job.id)) return;
-
-    const changed = addedLines(diff);
-    const findings: RecordedFinding[] = reported.map((f) => ({
-      ...f,
-      focus: FOCUS,
-      outcome: changed.get(f.path)?.has(f.line) ? 'published' : 'unanchorable',
-    }));
+    const fallbackUsed = orchestratorError !== undefined;
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
+    const record = { findings, focuses, fallbackUsed, orchestratorError };
     const oversized = scope.reviewableLines > maxLines;
-    if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && failed === undefined) {
-      return store.finish(job.id, 'nothing_to_publish', { findings });
+    const anyFailed = focuses.some((f) => f.status === 'failed');
+    if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
+      return store.finish(job.id, 'nothing_to_publish', record);
     }
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (live.state !== 'open' || live.draft || live.headSha !== job.headSha || live.baseSha !== job.baseSha) {
-      return store.finish(job.id, 'stale', { findings });
+      return store.finish(job.id, 'stale', record);
     }
     if (store.superseded(job.id)) return;
     const { id } = await github.createReview(token, job.repo, job.pr, {
       commit_id: job.headSha,
       event: 'COMMENT',
-      body: summary(job, comments.length, { scope, splitAbove: oversized ? maxLines : undefined, failed: failed !== undefined }),
+      body: summary(job, comments.length, { scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed }),
       comments,
     });
-    store.finish(job.id, 'published', { reviewId: id, findings, error: failed });
+    store.finish(job.id, 'published', { reviewId: id, ...record });
   }
 
   let draining: Promise<void> | undefined;
@@ -205,15 +225,21 @@ function pathList(paths: string[], sep: string, max: number): string {
   return shown.join(sep);
 }
 
-function summary(job: Job, count: number, notes: { scope: Scope; splitAbove?: number; failed: boolean }): string {
-  const { scope } = notes;
+function summary(job: Job, count: number, notes: {
+  scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean;
+}): string {
+  const { scope, focuses } = notes;
+  const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
   return [
     notes.splitAbove !== undefined && `**This PR has ${scope.reviewableLines} reviewable changed lines, over the `
       + `${notes.splitAbove}-line limit. Consider splitting it.** Directories involved: ${
         pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\``,
-    `Focus: ${FOCUS}`,
-    notes.failed && `Failed focus: ${FOCUS}`,
+    focuses.length > 0 && `Focuses${notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}:\n`
+      // Reasons are PR-influenced: a code span renders no links, images, mentions or markup.
+      + focuses.map((f) => `- ${f.focus}: \`${f.reason}\``).join('\n'),
+    // Focus names only; error detail stays in the run record.
+    failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     `${count} inline comment${count === 1 ? '' : 's'}.`,

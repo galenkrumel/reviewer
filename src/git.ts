@@ -198,6 +198,7 @@ export async function openSource(opts: {
       if (!out && pathspec.length) throw new ToolError('no changes to that path between base and head');
       return out;
     },
+
   };
 }
 

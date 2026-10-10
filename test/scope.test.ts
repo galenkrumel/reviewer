@@ -141,5 +141,5 @@ test('a failed focus produces a summary-only review naming it', async () => {
   assert.match(body, /Failed[^\n]*correctness/i);
   const [run] = app.runs();
   assert.equal(run!.status, 'published');
-  assert.match(run!.error ?? '', /ran out of turns/);
+  assert.match(run!.focuses.find((f) => f.focus === 'correctness')!.error ?? '', /no turn for correctness/);
 });

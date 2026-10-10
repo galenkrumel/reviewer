@@ -105,19 +105,46 @@ export class FakeGitHub implements GitHubPort {
 /** A scripted turn, or a callback that can act mid-run (deliver an event, move the PR) before answering. */
 export type Turn = AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
 
-/** Replays scripted assistant turns in order and records every request. */
+/** The agent a request is for, from its system prompt ("You are the <agent> ..."). */
+export function agentOf(req: ChatRequest): string {
+  const system = req.messages[0];
+  return (system?.role === 'system' && /^You are the (\w+)/.exec(system.content)?.[1]) || 'unknown';
+}
+
+/**
+ * Replays scripted assistant turns per agent and records every request.
+ * A scripted agent with no turns left gets an error, so unexpected agents surface as failures.
+ * A plain list scripts the correctness reviewer alone: the orchestrator then picks correctness
+ * and the always-on security reviewer finds nothing, as often as asked.
+ */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
-  private turns: Turn[];
-  constructor(turns: Turn[]) {
+  private turns: Record<string, Turn[]>;
+  private correctnessOnly: boolean;
+  constructor(turns: Turn[] | Record<string, Turn[]>) {
+    this.correctnessOnly = Array.isArray(turns);
+    turns = Array.isArray(turns) ? { correctness: turns } : turns;
     this.turns = turns;
   }
 
   async chat(req: ChatRequest) {
     this.requests.push(structuredClone(req));
-    const turn = this.turns.shift();
-    if (!turn) throw new Error('scripted model ran out of turns');
+    const agent = agentOf(req);
+    if (this.correctnessOnly && agent === 'orchestrator') return select('correctness');
+    if (this.correctnessOnly && agent === 'security') return noFindings();
+    const turn = this.turns[agent]?.shift();
+    if (!turn) throw new Error(`scripted model has no turn for ${agent}`);
     return typeof turn === 'function' ? turn() : turn;
+  }
+
+  /** Requests made by the given agent. */
+  requestsFor(agent: string) {
+    return this.requests.filter((r) => agentOf(r) === agent);
+  }
+
+  /** Distinct agents that were called, in first-call order. */
+  agents() {
+    return [...new Set(this.requests.map(agentOf))];
   }
 }
 
@@ -129,6 +156,12 @@ export function toolCall(name: string, args: unknown): AssistantMessage {
     tool_calls: [{ id: `call_${++callId}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }],
   };
 }
+
+/** An orchestrator turn selecting the given focuses, each with a stock reason. */
+export const select = (...focuses: string[]) =>
+  toolCall('select_focuses', { focuses: focuses.map((focus) => ({ focus, reason: `${focus} matters here` })) });
+
+export const noFindings = () => toolCall('report_findings', { findings: [] });
 
 export const WEBHOOK_SECRET = 'test-webhook-secret';
 
