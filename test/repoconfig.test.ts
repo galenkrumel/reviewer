@@ -140,6 +140,14 @@ test('no config, or an empty one, means deployment defaults and no warnings', ()
   }
 });
 
+test('lists may sit at the key\'s indentation, empty blocks mean nothing set, and a trailing slash means the directory', () => {
+  const { settings, warnings } = parseRepoConfig('exclude:\n- legacy/\n- "gen/**"\npath_hints:\nthresholds:\ndisable_focuses:\n', DEFAULTS);
+
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(settings.exclude, ['legacy/**', 'gen/**']);
+  assert.deepEqual(settings.pathHints, []);
+});
+
 test('unsupported YAML is malformed rather than half-read', () => {
   for (const text of ['a: {b: 1}', 'exclude:\n  - x\n    - y', 'key:value', '\tmax_comments: 2', 'max_comments: 2\nmax_comments: 3', 'path_hints:\n  a:\n    b: c']) {
     const { warnings } = parseRepoConfig(text, DEFAULTS);

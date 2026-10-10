@@ -159,12 +159,16 @@ export function openStore(dataDir: string, clock: Clock) {
       return row && toJob(row);
     },
 
+    /** Recorded as soon as the config is read, so they survive a run that later fails or is superseded. */
+    recordConfigWarnings(id: number, warnings: string[]) {
+      const insert = db.prepare('INSERT INTO config_warnings (run_id, warning) VALUES (?, ?)');
+      for (const w of warnings) insert.run(id, w);
+    },
+
     finish(id: number, status: RunStatus, opts: {
       reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
-      fallbackUsed?: boolean; orchestratorError?: string; configWarnings?: string[];
+      fallbackUsed?: boolean; orchestratorError?: string;
     } = {}) {
-      const insertWarning = db.prepare('INSERT INTO config_warnings (run_id, warning) VALUES (?, ?)');
-      for (const w of opts.configWarnings ?? []) insertWarning.run(id, w);
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
       const insertFocus = db.prepare('INSERT INTO focuses (run_id, data) VALUES (?, ?)');

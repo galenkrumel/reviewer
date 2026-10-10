@@ -37,13 +37,17 @@ export function parseRepoConfig(text: string | undefined, limits: Limits): { set
     return { settings, warnings: [`${REPO_CONFIG_PATH} is malformed and was ignored: ${(err as Error).message}`] };
   }
   const warn = (key: string, why: string) => void warnings.push(`${key}: ${why}; ignored`);
-  const list = (key: string, v: Value) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v : warn(key, 'expected a list'));
-  /** A positive integer that is no higher than the deployment's. */
+  /** A positive integer no higher than the deployment's, or the deployment's when it isn't one. */
   const cap = (key: string, v: Value, deployed: number, min = 1) => {
-    if (typeof v !== 'string' || !/^\d+$/.test(v) || Number(v) < min) return warn(key, `expected an integer >= ${min}`);
-    if (Number(v) > deployed) return warn(key, `can only lower the deployment's ${deployed}`);
-    return Number(v);
+    if (typeof v !== 'string' || !/^\d+$/.test(v) || Number(v) < min) warn(key, `expected an integer >= ${min}`);
+    else if (Number(v) > deployed) warn(key, `can only lower the deployment's ${deployed}`);
+    else return Number(v);
+    return deployed;
   };
+  /** An empty block (`key:` with nothing under it) is an empty map. */
+  const isMap = (v: Value): v is Record<string, string> => typeof v === 'object' && !Array.isArray(v);
+  const list = (key: string, v: Value) => (typeof v === 'string' ? [v] : Array.isArray(v) ? v
+    : isMap(v) && !Object.keys(v).length ? [] : warn(key, 'expected a list'));
 
   for (const [key, v] of Object.entries(doc)) {
     switch (key) {
@@ -55,17 +59,18 @@ export function parseRepoConfig(text: string | undefined, limits: Limits): { set
         }
         break;
       case 'exclude':
-        settings.exclude.push(...(list(key, v) ?? []).filter(Boolean));
+        // A trailing slash means the whole directory.
+        settings.exclude.push(...(list(key, v) ?? []).filter(Boolean).map((g) => (g.endsWith('/') ? g + '**' : g)));
         break;
       case 'path_hints': {
-        if (typeof v !== 'object' || Array.isArray(v)) { warn(key, 'expected a map of glob: hint'); break; }
+        if (!isMap(v)) { warn(key, 'expected a map of glob: hint'); break; }
         const hints = Object.entries(v);
         if (hints.length > MAX_HINTS) warn(key, `only the first ${MAX_HINTS} hints are used`);
         settings.pathHints = hints.slice(0, MAX_HINTS).map(([glob, hint]) => [glob, hint.slice(0, 200)]);
         break;
       }
       case 'thresholds':
-        if (typeof v !== 'object' || Array.isArray(v)) { warn(key, 'expected a map'); break; }
+        if (!isMap(v)) { warn(key, 'expected a map'); break; }
         for (const [sub, value] of Object.entries(v)) {
           const k = `thresholds.${sub.slice(0, 50)}`;
           if (sub === 'severity') {
@@ -82,9 +87,9 @@ export function parseRepoConfig(text: string | undefined, limits: Limits): { set
         }
         break;
       // Below 2 the always-on security reviewer would be dropped.
-      case 'max_reviewers': settings.maxReviewers = cap(key, v, limits.maxReviewers, 2) ?? limits.maxReviewers; break;
-      case 'max_comments': settings.maxComments = cap(key, v, limits.maxComments) ?? limits.maxComments; break;
-      case 'max_reviewable_lines': settings.maxReviewableLines = cap(key, v, limits.maxReviewableLines) ?? limits.maxReviewableLines; break;
+      case 'max_reviewers': settings.maxReviewers = cap(key, v, limits.maxReviewers, 2); break;
+      case 'max_comments': settings.maxComments = cap(key, v, limits.maxComments); break;
+      case 'max_reviewable_lines': settings.maxReviewableLines = cap(key, v, limits.maxReviewableLines); break;
       // Models, budgets, credentials, author gating and everything else belong to the deployment.
       default: warnings.push(`"${key.slice(0, 50)}" is not a per-repo setting; ignored`);
     }
@@ -104,6 +109,8 @@ function parseYaml(text: string): Record<string, Value> {
   // Null-prototype objects, so a `__proto__` key is just a key.
   const out: Record<string, Value> = Object.create(null);
   let block: { key: string; indent?: number; items: string[] | Record<string, string> } | undefined;
+  /** An empty block becomes an empty map; a list only once it has an item. */
+  const open = (key: string) => (block = { key, items: Object.create(null) }).items;
   const set = (obj: Record<string, unknown>, key: string, v: unknown, n: number) => {
     if (Object.hasOwn(obj, key)) throw new Error(`line ${n}: duplicate key "${key.slice(0, 50)}"`);
     obj[key] = v;
@@ -115,35 +122,43 @@ function parseYaml(text: string): Record<string, Value> {
     const indent = /^ */.exec(line)![0].length;
     if (line[indent] === '\t') throw new Error(`line ${n}: tab indentation`);
     const body = line.slice(indent);
-    if (indent === 0) {
+    const item = /^-(\s|$)/.test(body);
+    // List items may sit at the key's own indentation (`key:` then `- a`).
+    if (indent === 0 && !(item && block)) {
       block = undefined;
       const [key, rest] = keyValue(body, n);
-      if (rest === '') return void set(out, key, (block = { key, items: [] }).items, n);
+      if (rest === '') return void set(out, key, open(key), n);
       set(out, key, rest.startsWith('[') ? flowList(rest, n) : scalar(rest, n), n);
       return;
     }
     if (!block || (block.indent ?? indent) !== indent) throw new Error(`line ${n}: unexpected indentation`);
     block.indent = indent;
-    if (/^-(\s|$)/.test(body)) {
-      if (!Array.isArray(block.items)) throw new Error(`line ${n}: list item inside a map`);
-      block.items.push(scalar(body.slice(1).trim(), n));
+    const items = block.items;
+    const empty = !Array.isArray(items) && Object.keys(items).length === 0;
+    if (item) {
+      if (!Array.isArray(items) && !empty) throw new Error(`line ${n}: list item inside a map`);
+      const list: string[] = Array.isArray(items) ? items : (out[block.key] = block.items = []);
+      list.push(scalar(body.slice(1).trim(), n));
     } else {
-      if (Array.isArray(block.items)) {
-        if (block.items.length) throw new Error(`line ${n}: map entry inside a list`);
-        out[block.key] = block.items = Object.create(null);
-      }
+      if (Array.isArray(items)) throw new Error(`line ${n}: map entry inside a list`);
       const [key, rest] = keyValue(body, n);
-      set(block.items as Record<string, string>, key, scalar(rest, n), n);
+      set(items, key, scalar(rest, n), n);
     }
   });
   return out;
 }
 
-const QUOTED = /^(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)')\s*(?:#.*)?$/;
+const QUOTE = `"((?:[^"\\\\]|\\\\.)*)"|'((?:[^']|'')*)'`;
+const QUOTED = new RegExp(`^(?:${QUOTE})\\s*(?:#.*)?$`);
+const KEY_VALUE = new RegExp(`^(?:${QUOTE}|([^\\s"'#\\-[{][^:#]*?))\\s*:(?:\\s+(.*))?$`);
+
+/** The text of a double- (JSON escapes) or single-quoted ('' for ') match. */
+const unquote = (double: string | undefined, single: string | undefined): string =>
+  double !== undefined ? JSON.parse(`"${double}"`) : single!.replace(/''/g, "'");
 
 function scalar(s: string, n: number): string {
   const q = QUOTED.exec(s);
-  if (q) return q[1] !== undefined ? JSON.parse(`"${q[1]}"`) : q[2]!.replace(/''/g, "'");
+  if (q) return unquote(q[1], q[2]);
   const v = s.replace(/(^|\s)#.*$/, '').trim();
   if (!v || /^[[\]{}&!|>%@`"',]/.test(v) || /:(\s|$)/.test(v)) throw new Error(`line ${n}: unsupported value`);
   return v;
@@ -157,9 +172,9 @@ function flowList(s: string, n: number): string[] {
 
 /** `key: rest` with an optionally quoted key; rest is '' when the value is a block below. */
 function keyValue(s: string, n: number): [string, string] {
-  const m = /^(?:"((?:[^"\\]|\\.)*)"|'((?:[^']|'')*)'|([^\s"'#\-[{][^:#]*?))\s*:(?:\s+(.*))?$/.exec(s);
+  const m = KEY_VALUE.exec(s);
   if (!m) throw new Error(`line ${n}: expected "key: value"`);
-  const key = m[1] !== undefined ? JSON.parse(`"${m[1]}"`) : m[2]?.replace(/''/g, "'") ?? m[3]!;
+  const key = m[3] ?? unquote(m[1], m[2]);
   const rest = (m[4] ?? '').trim();
   return [key, rest.startsWith('#') ? '' : rest];
 }

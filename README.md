@@ -37,15 +37,15 @@ Read from the PR's **base** SHA only, so a PR that edits it doesn't change its o
 ```yaml
 disable_focuses: [performance, conciseness]  # correctness and security can't be disabled
 exclude:                                     # added to the built-in exclusions; globs match the full path
-  - "legacy/**"
+  - "legacy/"                                # a trailing slash means the whole directory
 path_hints:                                  # glob: note, given to the orchestrator for matching changed paths
   "src/billing/**": money handling, check rounding
-thresholds:                                  # can only be raised
+thresholds:                                  # can only be raised (validated now; applied once finding validation, #8, lands)
   severity: high
   confidence: 0.8
 max_reviewers: 2                             # caps can only be lowered (max_reviewers at least 2)
-max_comments: 5
+max_comments: 5                              # validated now; applied with #8
 max_reviewable_lines: 400
 ```
 
-The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a, b]` (no commas inside items), and one level of indented `- item` lists or `key: value` maps, with quotes and `#` comments. Anything else makes the file malformed, and then it is ignored entirely.
+The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a, b]` (no commas inside items), and one level of `- item` lists (indented or not) or indented `key: value` maps, with quotes and `#` comments. Anything else makes the file malformed, and then it is ignored entirely.

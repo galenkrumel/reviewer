@@ -121,7 +121,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       maxReviewers, maxReviewableLines: config.maxReviewableLines ?? 800,
     });
     const settings = parsed.settings;
-    configWarnings.push(...parsed.warnings);
+    store.recordConfigWarnings(job.id, [...configWarnings, ...parsed.warnings]);
     const files = await source.changedFiles();
     const paths = files.map((f) => f.path);
     const excluded = await source.markedAtBase(paths);
@@ -171,7 +171,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
-    const record = { findings, focuses, fallbackUsed, orchestratorError, configWarnings };
+    const record = { findings, focuses, fallbackUsed, orchestratorError };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
     if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
@@ -242,9 +242,12 @@ function commentBody(f: RecordedFinding): string {
   return body;
 }
 
-/** Paths come from the PR: code spans keep them from mentioning anyone or breaking out, and long lists are capped. */
+/**
+ * Paths come from the PR: code spans keep them from mentioning anyone or breaking out, dropping angle brackets keeps
+ * them from forging a marker (and so skipping a later review) in the raw body, and long lists are capped.
+ */
 function pathList(paths: string[], sep: string, max: number): string {
-  const shown = paths.slice(0, max).map((p) => '`' + p.replace(/[`\r\n]/g, '') + '`');
+  const shown = paths.slice(0, max).map((p) => '`' + p.replace(/[`<>\r\n]/g, '') + '`');
   if (paths.length > max) shown.push(`…and ${paths.length - max} more`);
   return shown.join(sep);
 }
