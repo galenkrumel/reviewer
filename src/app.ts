@@ -5,7 +5,7 @@ import { addedLines, openSource, ToolError } from './git.ts';
 import { toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
-import { BudgetExceeded, FOCUSES, runReviewer, type Chat } from './reviewer.ts';
+import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation } from './store.ts';
 import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment } from './ports.ts';
@@ -50,6 +50,10 @@ export interface AppConfig {
   minConfidence?: number;
   /** Inline comments per review, highest severity × confidence first. Default 10. */
   maxComments?: number;
+  /** Jobs reviewed at once. Default 2. */
+  workerConcurrency?: number;
+  /** Finished run records older than this are pruned. Default 90. */
+  retentionDays?: number;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -59,12 +63,33 @@ export interface Delivery {
   body: string | Buffer;
 }
 
-export function createApp(deps: { config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock }) {
-  const { config, github, model } = deps;
+/** One structured log entry. */
+export type Log = (entry: Record<string, unknown>) => void;
+
+/** Where a run failed. `run` is anything outside the named steps (a token mint, a PR lookup, a git read). */
+type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'publish' | 'run';
+
+/** A failure already logged, its message prefixed with the step. */
+class StepError extends Error {}
+
+export function createApp(deps: {
+  config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock;
+  /** Backoff waits. Default setTimeout. */
+  sleep?: (ms: number) => Promise<void>;
+  log: Log;
+}) {
+  const { config, github, model, log } = deps;
   const maxReviewers = config.maxReviewers ?? 3;
   // Below 2, the cap would drop the always-on security reviewer.
   if (!Number.isInteger(maxReviewers) || maxReviewers < 2) throw new Error('maxReviewers must be an integer >= 2');
+  const concurrency = config.workerConcurrency ?? 2;
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('workerConcurrency must be an integer >= 1');
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const store = openStore(config.dataDir, deps.clock);
+  const retentionMs = (config.retentionDays ?? 90) * DAY_MS;
+  /** Drop finished run records past the retention period. Runs at startup; the host calls it daily. */
+  const prune = () => store.prune(new Date(deps.clock.now().getTime() - retentionMs));
+  prune();
   const allowlist = new Set(config.allowlist.map((r) => r.toLowerCase()));
   const label = config.reviewLabel ?? 'ai-review';
   const policy = config.reviewOutsidePrs ?? 'label';
@@ -106,6 +131,37 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       if (used.inputTokens + used.outputTokens > maxTokens) throw new BudgetExceeded(`over its token budget of ${maxTokens}`);
       return res.message;
     };
+  }
+
+  /** `warn` when something retries or falls back, `error` when it gives up. Messages only: they carry no credentials. */
+  function logFailure(job: Job, step: Step, err: unknown, final: boolean, extra: Record<string, unknown> = {}) {
+    log({
+      level: final ? 'error' : 'warn', msg: `${step} failed`, step, run: job.id, repo: job.repo, pr: job.pr, ...extra,
+      error: errorMessage(err),
+    });
+  }
+
+  /** Retry with backoff, logging every failure; the last one is rethrown as a StepError. */
+  // ponytail: retries every error, 4xx included (~42s wasted on a 422); classify transient errors if that hurts.
+  async function retrying<T>(job: Job, step: 'fetch' | 'publish', fn: () => Promise<T>): Promise<T> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        const final = attempt === RETRY_ATTEMPTS;
+        logFailure(job, step, err, final, { attempt });
+        if (final) throw new StepError(`${step}: ${errorMessage(err)}`);
+        await sleep(BACKOFF_MS * 4 ** (attempt - 1));
+      }
+    }
+  }
+
+  // openSource creates the clone and writes its git config, so it runs one at a time per repository.
+  const fetches = new Map<string, Promise<unknown>>();
+  function oneAtATime<T>(repo: string, fn: () => Promise<T>): Promise<T> {
+    const next = (fetches.get(repo) ?? Promise.resolve()).catch(() => {}).then(fn);
+    fetches.set(repo, next);
+    return next;
   }
 
   function verified(d: Delivery): boolean {
@@ -173,10 +229,11 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     // Before fetching: a late delivery's head may have been force-pushed away, and reviewing it would be wasted.
     const start = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(start, job)) return finishStale(job, start);
-    const source = await openSource({
+    // Fetching is idempotent, so a failed attempt is simply repeated.
+    const source = await oneAtATime(job.repo, () => retrying(job, 'fetch', () => openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
       headSha: job.headSha, baseSha: job.baseSha,
-    });
+    })));
     // Superseded runs keep that status and stop: checked between steps and right before publishing.
     if (store.superseded(job.id)) return;
     // Read at the base SHA only, so a PR cannot change its own review by editing the config.
@@ -218,7 +275,8 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       } catch (err) {
         // The fallback's path match sees every changed file, excluded ones (lockfiles) included.
         picks = fallbackPicks(files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
-        orchestratorError = err instanceof Error ? err.message : String(err);
+        orchestratorError = errorMessage(err);
+        logFailure(job, 'orchestrator', err, false);
       }
 
       // Sequential: one reviewer's failure never stops the others.
@@ -230,16 +288,20 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
           focus, chat: meteredChat(focus, invocations), maxTurns: agentConfig(focus).maxTurns,
           source, diff, title: job.title, body: job.body,
         });
+        const failed = (err: unknown, final: boolean) =>
+          logFailure(job, err instanceof InvalidReport ? 'validation' : 'reviewer', err, final, { focus });
         try {
           // One retry, for bad output (an off-schema report included); a blown budget would only be spent again.
           const found = await review().catch((err) => {
             if (err instanceof BudgetExceeded) throw err;
+            failed(err, false);
             return review();
           });
           reported.push(...found.map((finding) => ({ focus, finding })));
           focuses.push({ focus, reason, status: 'succeeded' });
         } catch (err) {
-          focuses.push({ focus, reason, status: 'failed', error: err instanceof Error ? err.message : String(err) });
+          failed(err, true);
+          focuses.push({ focus, reason, status: 'failed', error: errorMessage(err) });
         }
       }
     }
@@ -262,37 +324,69 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(live, job)) return finishStale(job, live, record);
-    if (store.superseded(job.id)) return;
-    const { id } = await github.createReview(token, job.repo, job.pr, {
+    const newReview = {
       commit_id: job.headSha,
-      event: 'COMMENT',
+      event: 'COMMENT' as const,
       body: summary(job, comments.length, { scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed }),
       comments,
-    });
-    store.finish(job.id, 'published', { reviewId: id, ...record });
+    };
+    let reviewId: number | undefined;
+    try {
+      // A failed POST may still have created the review, so every attempt checks the marker first.
+      reviewId = await retrying(job, 'publish', async () => {
+        if (store.superseded(job.id)) return;
+        const posted = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
+        if (posted) return posted.id;
+        // Another worker may have superseded this run while the list was loading.
+        if (store.superseded(job.id)) return;
+        return (await github.createReview(token, job.repo, job.pr, newReview)).id;
+      });
+    } catch (err) {
+      // Keep the findings and costs: only the post is missing.
+      return store.finish(job.id, 'failed', { ...record, error: errorMessage(err) });
+    }
+    if (reviewId !== undefined) store.finish(job.id, 'published', { reviewId, ...record });
   }
 
-  let draining: Promise<void> | undefined;
-  /** Process queued jobs until none are left, including ones enqueued meanwhile. */
-  function drain(): Promise<void> {
-    return (draining ??= (async () => {
-      for (let job = store.claimNext(); job; job = store.claimNext()) {
-        try {
-          await reviewJob(job);
-        } catch (err) {
-          // ponytail: no retries yet; errors come from git, GitHub or the model and carry no credentials.
-          store.finish(job.id, 'failed', { error: err instanceof Error ? err.message : String(err) });
+  async function worker() {
+    for (let job = store.claimNext(); job; job = store.claimNext()) {
+      try {
+        await reviewJob(job);
+      } catch (err) {
+        // Errors come from git, GitHub or the model and carry no credentials.
+        if (err instanceof StepError) store.finish(job.id, 'failed', { error: err.message });
+        else {
+          logFailure(job, 'run', err, true);
+          store.finish(job.id, 'failed', { error: `run: ${errorMessage(err)}` });
         }
       }
-    })().finally(() => (draining = undefined)));
+    }
   }
 
-  return { receive, drain, checkModels, runs: store.runs, close: store.close };
+  const workers = new Set<Promise<void>>();
+  /**
+   * Top the workers back up to `workerConcurrency` and wait for them to empty the queue, including jobs enqueued
+   * meanwhile. A worker stops when it finds the queue empty, so every enqueue must be followed by a drain.
+   */
+  function drain(): Promise<void> {
+    while (workers.size < concurrency) {
+      const w: Promise<void> = worker().finally(() => workers.delete(w));
+      workers.add(w);
+    }
+    return Promise.all(workers).then(() => {});
+  }
+
+  return { receive, drain, checkModels, prune, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
 const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 const DAY_MS = 24 * 3600_000;
+/** Fetch and publish: four attempts, 2s, 8s and 32s apart. */
+const RETRY_ATTEMPTS = 4;
+const BACKOFF_MS = 2000;
+
+export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** Whether the PR is open, ready, and at the job's head and base. */
 const isCurrent = (live: PullRequest, job: Job) =>

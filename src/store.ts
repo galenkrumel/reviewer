@@ -222,6 +222,24 @@ export function openStore(dataDir: string, clock: Clock) {
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
 
+    /** Delete finished runs created before `before`, with everything recorded for them. Queued and running jobs stay. */
+    prune(before: Date) {
+      const old = `SELECT id FROM runs WHERE created_at < ? AND status NOT IN ('queued', 'running')`;
+      const cutoff = before.toISOString();
+      // One transaction, so a crash can't leave a run with part of its record.
+      db.exec('BEGIN');
+      try {
+        for (const table of ['findings', 'focuses', 'invocations', 'orchestrations']) {
+          db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
+        }
+        db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    },
+
     /** The run-record query interface. */
     runs(): RunRecord[] {
       const findings = db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid');
