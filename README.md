@@ -23,7 +23,8 @@ installed on the account that owns it. Where this repository lives doesn't matte
 **Settings → Developer settings → GitHub Apps → New GitHub App**.
 
 - **Webhook:** active. The URL is the service's root, and the service accepts deliveries as `POST /`. The service
-  doesn't exist yet, so enter a placeholder such as `https://example.com/` and replace it in step 2. Set a long random **webhook secret**, e.g. from `openssl rand -hex 32`. You need it again in step 2.
+  doesn't exist yet, so enter a placeholder such as `https://example.com/` and replace it in step 2.
+  Set a long random **webhook secret**, e.g. from `openssl rand -hex 32`. You need it again in step 2.
 - **Repository permissions:** exactly these three.
 
   | Permission | Access | Used for |
