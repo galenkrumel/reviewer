@@ -47,13 +47,14 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     // ponytail: only `opened` for now; the other lifecycle actions arrive with trigger eligibility.
     if (event !== 'pull_request' || payload.action !== 'opened' || !pr || pr.draft) return { status: 202 };
     if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202 };
+    if (!Number.isInteger(payload.installation?.id) || !pr.head?.sha || !pr.base?.sha) return { status: 400 };
 
     store.enqueue({
       deliveryId: String(d.headers['x-github-delivery'] ?? ''),
       event: `pull_request.${payload.action}`,
       repo,
       pr: pr.number,
-      installationId: payload.installation?.id,
+      installationId: payload.installation.id,
       headSha: pr.head.sha,
       baseSha: pr.base.sha,
       title: pr.title ?? '',
@@ -62,7 +63,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     return { status: 202 };
   }
 
-  async function process(job: Job) {
+  async function reviewJob(job: Job) {
     const token = await github.mintToken(job.installationId);
     const source = await openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
@@ -97,7 +98,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     return (draining ??= (async () => {
       for (let job = store.claimNext(); job; job = store.claimNext()) {
         try {
-          await process(job);
+          await reviewJob(job);
         } catch (err) {
           // ponytail: no retries yet; errors come from git, GitHub or the model and carry no credentials.
           store.finish(job.id, 'failed', { error: err instanceof Error ? err.message : String(err) });

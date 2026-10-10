@@ -25,10 +25,20 @@ const app = createApp({
 
 const kick = () => app.drain().catch((err) => console.error('worker error', err));
 
+// GitHub caps webhook payloads at 25 MB; anything bigger is not GitHub.
+const MAX_BODY = 25 * 1024 * 1024;
+
 createServer((req, res) => {
   if (req.method !== 'POST') return res.writeHead(404).end();
   const chunks: Buffer[] = [];
-  req.on('data', (c: Buffer) => chunks.push(c));
+  let size = 0;
+  req.on('data', (c: Buffer) => {
+    size += c.length;
+    if (size > MAX_BODY) {
+      res.writeHead(413, { Connection: 'close' }).end();
+      req.destroy();
+    } else chunks.push(c);
+  });
   req.on('end', async () => {
     try {
       const { status } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });

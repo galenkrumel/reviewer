@@ -56,7 +56,9 @@ const TOOLS: ToolDef[] = [
   },
 ];
 
-const data = (label: string, text: string) => `<untrusted-data name="${label}">\n${text}\n</untrusted-data>`;
+/** Wrap PR content in a data block it cannot close early. */
+const untrusted = (label: string, text: string) =>
+  `<untrusted-data name="${label}">\n${text.replace(/<(\/?)untrusted-data/gi, '<$1untrusted_data')}\n</untrusted-data>`;
 
 export async function runReviewer(opts: {
   model: ModelPort; modelId: string; source: Source; diff: string; title: string; body: string;
@@ -65,7 +67,8 @@ export async function runReviewer(opts: {
     { role: 'system', content: CORRECTNESS },
     {
       role: 'user',
-      content: [data('pr-title', opts.title), data('pr-body', opts.body), data('diff', opts.diff)].join('\n\n'),
+      content: [untrusted('pr-title', opts.title), untrusted('pr-body', opts.body), untrusted('diff', opts.diff)]
+        .join('\n\n'),
     },
   ];
 
@@ -77,10 +80,17 @@ export async function runReviewer(opts: {
       continue;
     }
     for (const call of reply.tool_calls) {
-      const args = JSON.parse(call.function.arguments);
+      let args: any;
+      try {
+        args = JSON.parse(call.function.arguments);
+      } catch {
+        args = undefined;
+      }
       if (call.function.name === 'report_findings') return parseFindings(args);
       let content: string;
-      if (call.function.name === 'read_file' && typeof args.path === 'string') {
+      if (args === undefined) {
+        content = 'error: tool arguments are not valid JSON';
+      } else if (call.function.name === 'read_file' && typeof args.path === 'string') {
         content = await opts.source.readFile(args.path).catch(() => `error: cannot read ${args.path}`);
       } else {
         content = `error: unknown tool ${call.function.name}`;

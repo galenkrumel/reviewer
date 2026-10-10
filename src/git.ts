@@ -51,7 +51,8 @@ export async function openSource(opts: {
 
   return {
     readFile: (path) => git('cat-file', 'blob', `${headSha}:${path}`),
-    diff: () => git('diff', '--no-ext-diff', '--no-textconv', '--no-color', '--src-prefix=a/', '--dst-prefix=b/',
+    // quotePath off keeps non-ASCII paths unquoted, so addedLines can key on them.
+    diff: () => git('-c', 'core.quotePath=false', 'diff', '--no-ext-diff', '--no-textconv', '--no-color', '--src-prefix=a/', '--dst-prefix=b/',
       `${baseSha}...${headSha}`),
   };
 }
@@ -65,7 +66,8 @@ export function addedLines(diff: string): Map<string, Set<number>> {
   for (const l of diff.split('\n')) {
     if (l.startsWith('diff --git ')) { lines = undefined; inHeader = true; }
     else if (inHeader && l.startsWith('+++ ')) {
-      if (l !== '+++ /dev/null') out.set(l.slice('+++ b/'.length), (lines = new Set()));
+      // git appends a TAB after names containing spaces.
+      if (l !== '+++ /dev/null') out.set(l.slice('+++ b/'.length).replace(/\t$/, ''), (lines = new Set()));
     } else if (l.startsWith('@@')) { inHeader = false; next = Number(/\+(\d+)/.exec(l)?.[1]); }
     else if (inHeader || !lines) continue;
     else if (l.startsWith('+')) lines.add(next++);
