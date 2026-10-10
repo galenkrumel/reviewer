@@ -40,9 +40,13 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       return { number: pr.number, state: pr.state, draft: pr.draft, headSha: pr.head.sha, baseSha: pr.base.sha };
     },
     async listReviews(token, repo, number) {
-      // ponytail: first 100 reviews only; paginate if PRs ever carry more.
-      const reviews = await api(token, 'GET', `/repos/${repo}/pulls/${number}/reviews?per_page=100`);
-      return reviews.map((r: any) => ({ id: r.id, body: r.body ?? '' }));
+      // Every page: the idempotency marker check must see all of the PR's reviews.
+      const out: { id: number; body: string }[] = [];
+      for (let page = 1; ; page++) {
+        const reviews = await api(token, 'GET', `/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`);
+        out.push(...reviews.map((r: any) => ({ id: r.id, body: r.body ?? '' })));
+        if (reviews.length < 100) return out;
+      }
     },
     async createReview(token, repo, number, review: NewReview) {
       const r = await api(token, 'POST', `/repos/${repo}/pulls/${number}/reviews`, review);
