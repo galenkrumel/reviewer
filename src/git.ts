@@ -1,7 +1,8 @@
 // Source access through git objects only: a bare, blobless clone per repository,
 // never a working tree. Nothing from the repository is ever executed.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -91,8 +92,8 @@ export async function openSource(opts: {
   const dir = join(opts.dataDir, 'repos', opts.repo.replace('/', '__') + '.git');
   const env = gitEnv(opts.token);
   // Blobs are fetched lazily from the promisor remote, so reads need the same env.
-  const gitWithInput = async (input: string | undefined, args: string[]) => {
-    const p = run('git', ['-C', dir, ...args], { env, maxBuffer: 64 * 1024 * 1024 });
+  const gitWithInput = async (input: string | undefined, args: string[], extraEnv?: NodeJS.ProcessEnv) => {
+    const p = run('git', ['-C', dir, ...args], { env: { ...env, ...extraEnv }, maxBuffer: 64 * 1024 * 1024 });
     if (input !== undefined) p.child.stdin!.end(input);
     return (await p).stdout;
   };
@@ -139,9 +140,18 @@ export async function openSource(opts: {
 
     async markedAtBase(paths) {
       // -z records: "path\0attribute\0value\0". Only set or true marks a path; false and unset do not.
-      // ponytail: --source needs git >= 2.40; older hosts fail the run here.
-      const out = await gitWithInput(paths.map((p) => p + '\0').join(''),
-        ['check-attr', `--source=${baseSha}`, '-z', '--stdin', 'linguist-generated', 'linguist-vendored']);
+      // The base tree goes into a throwaway index for check-attr --cached: --source needs git 2.40, newer than some
+      // hosts ship (Render's native runtime among them).
+      const tmp = mkdtempSync(join(tmpdir(), 'reviewer-attr-'));
+      let out: string;
+      try {
+        const index = { GIT_INDEX_FILE: join(tmp, 'index') };
+        await gitWithInput(undefined, ['read-tree', baseSha], index);
+        out = await gitWithInput(paths.map((p) => p + '\0').join(''),
+          ['check-attr', '--cached', '-z', '--stdin', 'linguist-generated', 'linguist-vendored'], index);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
       const fields = out.split('\0');
       const marked = new Set<string>();
       for (let i = 0; i + 2 < fields.length; i += 3) {
