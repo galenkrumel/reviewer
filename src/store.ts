@@ -8,7 +8,7 @@ export type RunStatus =
   | 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed'
   /** A newer job for the PR, or converted_to_draft/closed, replaced this one. */
   | 'superseded'
-  /** The pre-publish check found the PR closed, a draft, or at other SHAs. */
+  /** The start or pre-publish check found the PR closed, a draft, or at other SHAs (whose revision is then requeued). */
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';

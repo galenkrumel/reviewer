@@ -148,6 +148,39 @@ test('enqueuing a job for a new head supersedes the running job for the old one'
   ]);
 });
 
+// A is an older head: a real commit, or one force-pushed away that can no longer be fetched.
+for (const [kind, older] of [['fetchable', 'base'], ['unfetchable', 'a'.repeat(40)]] as const) {
+  test(`a late synchronize for an older ${kind} head does not cancel the review of the current head`, async () => {
+    const { fx, pr, github } = setup();
+    const a = { ...pr, headSha: older === 'base' ? fx.baseSha : older };
+    const { app } = testApp({ model: new ScriptedModel([report()]), github });
+
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, a)));
+    await app.drain();
+
+    assert.equal(github.reviews.length, 1);
+    assert.equal(github.reviews[0]!.review.commit_id, fx.headSha);
+    assert.deepEqual(app.runs().map((r) => [r.headSha, r.status]), [
+      [fx.headSha, 'superseded'], [a.headSha, 'stale'], [fx.headSha, 'published'],
+    ]);
+  });
+}
+
+test('synchronize for A then B, delivered in order, reviews only B', async () => {
+  const { fx, pr, github } = setup();
+  const a = { ...pr, headSha: fx.baseSha };
+  const { app } = testApp({ model: new ScriptedModel([report()]), github });
+
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, a)));
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 1);
+  assert.equal(github.reviews[0]!.review.commit_id, fx.headSha);
+  assert.deepEqual(app.runs().map((r) => [r.headSha, r.status]), [[fx.baseSha, 'superseded'], [fx.headSha, 'published']]);
+});
+
 /** Records the review, then never answers: the process "dies" mid-publish. */
 class CrashOnPublish extends FakeGitHub {
   crashed = false;
