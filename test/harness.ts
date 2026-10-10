@@ -50,7 +50,9 @@ export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
   git('config', 'uploadpack.allowAnySHA1InWant', 'true');
   const baseSha = commit(base, 'base');
   const headSha = commit(head, 'head');
-  return { url: `file://${dir}`, baseSha, headSha };
+  /** Commit on top of the current head, returning the new head SHA. */
+  const push = (files: FixtureFiles) => commit(files, 'push');
+  return { url: `file://${dir}`, baseSha, headSha, push };
 }
 
 export class FakeGitHub implements GitHubPort {

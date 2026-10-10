@@ -1,0 +1,88 @@
+// Deterministic finding validation and comment formatting. Nothing here trusts the model.
+import type { ReviewComment } from './ports.ts';
+import type { Finding, RecordedFinding } from './store.ts';
+
+export type Severity = Finding['severity'];
+const RANK: Record<Severity, number> = { low: 1, medium: 2, high: 3, critical: 4 };
+const MERGE_WINDOW = 3;
+
+export interface Thresholds {
+  minSeverity: Severity;
+  minConfidence: number;
+  maxComments: number;
+}
+
+const score = (f: Finding) => RANK[f.severity] * f.confidence;
+export const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+/**
+ * Give every reported finding exactly one outcome, in reporting order: anchor, threshold, cross-reviewer
+ * merge, cross-push dedup against `posted` (path + title of findings published at earlier heads), then cap.
+ * A published finding names every focus merged into it.
+ */
+export function validate(
+  reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
+  posted: { path: string; title: string }[], t: Thresholds,
+): RecordedFinding[] {
+  const out: RecordedFinding[] = reported.map(({ focus, finding }) => {
+    const added = changed.get(finding.path);
+    const f: RecordedFinding = { ...finding, focus, outcome: 'published' };
+    if (!added?.has(f.line)) f.outcome = 'unanchorable';
+    else if (RANK[f.severity] < RANK[t.minSeverity] || f.confidence < t.minConfidence) f.outcome = 'below_threshold';
+    return f;
+  });
+
+  const ranked = out.filter((f) => f.outcome === 'published').sort((a, b) => score(b) - score(a));
+  const kept: RecordedFinding[] = [];
+  for (const f of ranked) {
+    const into = kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus));
+    if (into) { f.outcome = 'merged'; into.focuses!.push(f.focus); continue; }
+    f.focuses = [f.focus];
+    kept.push(f);
+  }
+
+  const seen = new Set(posted.map((p) => `${p.path}\0${normalizeTitle(p.title)}`));
+  let published = 0;
+  for (const f of kept) {
+    if (seen.has(`${f.path}\0${normalizeTitle(f.title)}`)) f.outcome = 'duplicate';
+    else if (published++ >= t.maxComments) f.outcome = 'over_cap';
+  }
+  return out;
+}
+
+/** The inline comment for a published finding. A multi-line range anchors only if every line in it was added. */
+export function toComment(f: RecordedFinding, changed: Map<string, Set<number>>, repo: string): ReviewComment {
+  const added = changed.get(f.path)!;
+  const range = f.start_line !== undefined && f.start_line < f.line
+    && Array.from({ length: f.line - f.start_line + 1 }, (_, i) => f.start_line! + i).every((l) => added.has(l));
+  const clean = (s: string) => sanitize(s, repo);
+  let body = `**${clean(f.title.replace(/\s+/g, ' '))}**\n\n\`${f.severity}\` · ${(f.focuses ?? [f.focus]).join(' · ')}\n\n${clean(f.evidence)}`;
+  if (f.suggested_fix) {
+    // The fix is code for exactly the anchored lines only when the reviewer says so and its range was kept.
+    if (f.fix_replaces_anchor && (range || f.start_line === undefined || f.start_line === f.line)) {
+      // Inside a fence nothing renders as a mention or link; a longer fence keeps the fix from closing it.
+      const fence = '`'.repeat(Math.max(3, ...(f.suggested_fix.match(/`+/g) ?? []).map((m) => m.length + 1)));
+      body += `\n\n${fence}suggestion\n${f.suggested_fix.replace(/\n$/, '')}\n${fence}`;
+    } else {
+      body += `\n\n**Suggested fix:**\n\n${clean(f.suggested_fix)}`;
+    }
+  }
+  return { path: f.path, line: f.line, side: 'RIGHT', ...(range && { start_line: f.start_line, start_side: 'RIGHT' as const }), body };
+}
+
+/** Neutralize @-mentions and HTML tags, and drop links that don't point into the reviewed repo on github.com. */
+export function sanitize(text: string, repo: string): string {
+  const prefix = `https://github.com/${repo}`.toLowerCase();
+  const allowed = (url: string) => {
+    const u = url.toLowerCase();
+    return u.startsWith(prefix) && /^(?:[/?#]|$)/.test(u.slice(prefix.length)) && !/\.\.|\\|%2e|%2f|%5c/.test(u);
+  };
+  return text
+    // Markdown links and images keep their text (alt text) when the target isn't allowed.
+    .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (m, label: string, url: string) => (allowed(url) ? m : label))
+    // Bare URLs GitHub would autolink.
+    .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>()[\]"'`]*/gi, (url) => (allowed(url) ? url : '(link removed)'))
+    // A zero-width space stops @user and @org/team from mentioning, and <tag from being HTML.
+    .replace(/@(?=[\w-])/g, '@​')
+    .replace(/<(?=[a-z/!?])/gi, '<​');
+}

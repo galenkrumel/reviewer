@@ -12,7 +12,7 @@ export type RunStatus =
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
-export type FindingOutcome = 'published' | 'unanchorable';
+export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap';
 
 export interface Finding {
   title: string;
@@ -23,11 +23,15 @@ export interface Finding {
   start_line?: number;
   evidence: string;
   suggested_fix?: string;
+  /** The reviewer's claim that suggested_fix is replacement code for exactly start_line..line. */
+  fix_replaces_anchor?: boolean;
 }
 
 export interface RecordedFinding extends Finding {
   focus: string;
   outcome: FindingOutcome;
+  /** On a kept finding: every focus that flagged it, its own first. */
+  focuses?: string[];
 }
 
 export interface RecordedFocus {
@@ -141,6 +145,13 @@ export function openStore(dataDir: string, clock: Clock) {
     supersede(repo: string, pr: number) {
       db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
         AND status IN ('queued', 'running')`).run(now(), repo, pr);
+    },
+
+    /** Path and title of findings published on this PR at heads other than `headSha`. */
+    postedFindings(repo: string, pr: number, headSha: string): { path: string; title: string }[] {
+      return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
+        WHERE r.repo = ? AND r.pr = ? AND r.head_sha != ? AND r.status = 'published' AND f.outcome = 'published'`)
+        .all(repo, pr, headSha).map((row: any) => JSON.parse(row.data));
     },
 
     superseded(id: number): boolean {
