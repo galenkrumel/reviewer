@@ -87,6 +87,25 @@ test('a finding already posted on an earlier head is not posted again after a pu
   assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'duplicate'], [30, 'published']]);
 });
 
+test('a finding is posted again when the line of its earlier comment no longer exists', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')],
+    correctness: [report(f(30, { title: 'leaky handle' })), report(f(5, { title: 'leaky handle' }))],
+    security: [noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(10) }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+
+  assert.deepEqual(github.reviews[1]!.review.comments.map((c) => c.line), [5]);
+});
+
 test('a review never has more than max_comments comments, keeping the highest ranked', async () => {
   // Lines 2, 7, ..., 57, ranked by confidence: the first two lose.
   const proposed = Array.from({ length: 12 }, (_, i) => f(2 + 5 * i, { confidence: 0.7 + i * 0.02 }));
@@ -144,12 +163,16 @@ test('a suggestion block appears only when the fix covers exactly the anchored l
 test('mentions and links outside the repo are sanitized out of comments', async () => {
   const evidence = 'Ping @octocat and @acme/security. See [docs](https://evil.example/phish), https://evil.example/x, '
     + 'www.evil.example/y, ![t](https://evil.example/p.png), <a href="https://evil.example">here</a>, '
-    + '[up](https://github.com/acme/widgets/../../evil/repo) and https://github.com/acme/widgets/blob/main/src/app.ts#L3.';
+    + '[up](https://github.com/acme/widgets/../../evil/repo) and https://github.com/acme/widgets/blob/main/src/app.ts#L3. '
+    + 'Entities: &#64;mona [e](https://github.com/acme/widgets/&#46;&#46;/&#46;&#46;/evil/entity). '
+    + 'Refs: [a][1] [b][2] [c][3]\n\n[1]: //evil.example/a\n[2]:\n  //evil.example/b\n[3]: javascript:alert(1)\n';
   const { comments } = await run([report(f(5, {
     title: 'Tell @admin', evidence, suggested_fix: 'Read [this](https://github.com/acme/widgets.evil.com/x) first.',
   }))]);
   const body = comments[0]!.body;
   assert.doesNotMatch(body, /@(octocat|acme|admin)/);
+  assert.ok(!body.includes('&#64;mona') && !body.includes('&#46;'), body);
+  assert.ok(!body.includes('javascript:'), body);
   assert.ok(!body.includes('evil.example'), body);
   assert.ok(!body.includes('widgets.evil.com'), body);
   assert.ok(!body.includes('evil/repo'), body);

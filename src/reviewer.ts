@@ -1,6 +1,7 @@
 // One focused reviewer: a tool-use loop that ends with a report_findings call.
 import type { ChatMessage, ModelPort, ToolDef } from './ports.ts';
 import { ToolError, type Source } from './git.ts';
+import { SEVERITIES } from './findings.ts';
 import type { Finding } from './store.ts';
 
 // ponytail: fixed turn cap; per-agent turn and token budgets land with deployment config.
@@ -57,7 +58,7 @@ const TOOLS: ToolDef[] = [
               type: 'object',
               properties: {
                 title: { type: 'string' },
-                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+                severity: { type: 'string', enum: [...SEVERITIES].reverse() },
                 confidence: { type: 'number', minimum: 0, maximum: 1 },
                 path: { type: 'string' },
                 line: { type: 'integer' },
@@ -137,7 +138,7 @@ function parseFindings(args: any): Finding[] {
     const ok = typeof f?.title === 'string' && f.title.trim() !== '' && typeof f.path === 'string'
       && Number.isInteger(f.line) && f.line >= 1 && typeof f.evidence === 'string'
       && typeof f.confidence === 'number' && f.confidence >= 0 && f.confidence <= 1
-      && ['critical', 'high', 'medium', 'low'].includes(f.severity)
+      && SEVERITIES.includes(f.severity)
       && (f.start_line === undefined || (Number.isInteger(f.start_line) && f.start_line >= 1 && f.start_line <= f.line))
       && optional(f.suggested_fix, 'string') && optional(f.fix_replaces_anchor, 'boolean');
     if (!ok) throw new Error('report_findings: malformed finding');

@@ -147,8 +147,8 @@ export function openStore(dataDir: string, clock: Clock) {
         AND status IN ('queued', 'running')`).run(now(), repo, pr);
     },
 
-    /** Path and title of findings published on this PR at heads other than `headSha`. */
-    postedFindings(repo: string, pr: number, headSha: string): { path: string; title: string }[] {
+    /** Findings published on this PR at heads other than `headSha`. */
+    postedFindings(repo: string, pr: number, headSha: string): RecordedFinding[] {
       return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
         WHERE r.repo = ? AND r.pr = ? AND r.head_sha != ? AND r.status = 'published' AND f.outcome = 'published'`)
         .all(repo, pr, headSha).map((row: any) => JSON.parse(row.data));
