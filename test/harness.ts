@@ -28,12 +28,13 @@ const GIT_ENV = {
   GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com',
 };
 
-/** A local repo with a base commit and a head commit on top of it. */
-export function gitFixture(base: Record<string, string>, head: Record<string, string>) {
+/** A local repo with a base commit and a head commit on top of it. A null head value deletes the file. */
+export function gitFixture(base: Record<string, string>, head: Record<string, string | null>) {
   const dir = tempDir();
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
-  const commit = (files: Record<string, string>, msg: string) => {
+  const commit = (files: Record<string, string | null>, msg: string) => {
     for (const [path, content] of Object.entries(files)) {
+      if (content === null) { rmSync(join(dir, path)); continue; }
       mkdirSync(dirname(join(dir, path)), { recursive: true });
       writeFileSync(join(dir, path), content);
     }
@@ -154,7 +155,9 @@ export function openedPayload(repo: string, pr: PullRequest) {
   };
 }
 
-export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[] }) {
+export function testApp(opts: {
+  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; maxReviewableLines?: number; reviewTokenBudget?: number;
+}) {
   const github = opts.github ?? new FakeGitHub();
   const dataDir = tempDir();
   const app = createApp({
@@ -163,6 +166,8 @@ export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist
       allowlist: opts.allowlist ?? ['acme/widgets'],
       model: 'test/model',
       dataDir,
+      maxReviewableLines: opts.maxReviewableLines,
+      reviewTokenBudget: opts.reviewTokenBudget,
     },
     github,
     model: opts.model,

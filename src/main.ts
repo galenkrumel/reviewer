@@ -16,6 +16,8 @@ const app = createApp({
     allowlist: env('REPO_ALLOWLIST').split(',').map((r) => r.trim()).filter(Boolean),
     model: env('REVIEW_MODEL'),
     dataDir: process.env.DATA_DIR ?? './data',
+    maxReviewableLines: Number(process.env.MAX_REVIEWABLE_LINES) || undefined,
+    reviewTokenBudget: Number(process.env.REVIEW_TOKEN_BUDGET) || undefined,
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),

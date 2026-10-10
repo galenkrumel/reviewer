@@ -22,4 +22,6 @@ npm start
 | `OPENROUTER_API_KEY` | OpenRouter key |
 | `REVIEW_MODEL` | OpenRouter model ID for the reviewer |
 | `DATA_DIR` | Persistent volume for SQLite and bare clones (default `./data`) |
+| `MAX_REVIEWABLE_LINES` | Above this many reviewable changed lines the summary recommends a split (default `800`) |
+| `REVIEW_TOKEN_BUDGET` | Estimated diff tokens given to reviewers; files past it are skipped and listed (default `50000`) |
 | `PORT` | HTTP port (default `3000`); point the App's webhook at `POST /` |
