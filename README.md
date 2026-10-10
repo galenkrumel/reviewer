@@ -93,19 +93,25 @@ Optional:
 | `DATA_DIR` | `./data` | Persistent volume for SQLite and bare clones |
 | `PORT` | `3000` | HTTP port; Render sets it |
 
-## Per-repo config
+## Per-repo config (`.github/ai-review.yml`)
 
-Not read yet; tracked in #10. Once it lands, maintainers can add `.github/ai-review.yml`. The service will read it from
-the PR's **base** SHA only, so a PR that edits it has no effect on its own review. It will only tighten the
-deployment's settings:
+Read from the PR's **base** SHA only, so a PR that edits it doesn't change its own review. It can only tighten the deployment's settings. Anything invalid, loosening or unknown (models, budgets, credentials, author gating) is ignored, and a warning goes in the run record.
 
-- disable focuses other than the always-on correctness and security;
-- add exclusions, or path hints that bias focus selection;
-- raise thresholds;
-- lower caps.
+```yaml
+disable_focuses: [performance, conciseness]  # correctness and security can't be disabled
+exclude:                                     # added to the built-in exclusions; globs match the full path
+  - "legacy/"                                # a trailing slash means the whole directory
+path_hints:                                  # glob: note, given to the orchestrator for matching changed paths
+  "src/billing/**": money handling, check rounding
+thresholds:                                  # can only be raised
+  severity: high
+  confidence: 0.8
+max_reviewers: 2                             # caps can only be lowered (max_reviewers at least 2)
+max_comments: 5
+max_reviewable_lines: 400
+```
 
-It can never set models, budgets, credentials or author gating. Invalid config will be ignored with a recorded warning,
-and the deployment defaults will apply. The key names will be documented here when #10 lands.
+The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a, b]` (no commas inside items), and one level of `- item` lists (indented or not) or indented `key: value` maps, with quotes and `#` comments. Anything else makes the file malformed, and then it is ignored entirely.
 
 ## Operating
 

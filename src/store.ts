@@ -74,6 +74,8 @@ export interface RunRecord extends Omit<Job, 'installationId' | 'title' | 'body'
   /** Whether the orchestrator failed and the fixed fallback selection was used. */
   fallbackUsed: boolean;
   orchestratorError: string | null;
+  /** Per-repo config settings that were ignored, and why. */
+  configWarnings: string[];
 }
 
 export function openStore(dataDir: string, clock: Clock) {
@@ -107,6 +109,10 @@ export function openStore(dataDir: string, clock: Clock) {
     CREATE TABLE IF NOT EXISTS focuses (
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS config_warnings (
+      run_id INTEGER NOT NULL REFERENCES runs(id),
+      warning TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS invocations (
       run_id INTEGER NOT NULL REFERENCES runs(id),
@@ -189,6 +195,14 @@ export function openStore(dataDir: string, clock: Clock) {
       return row && toJob(row);
     },
 
+    /** Recorded as soon as the config is read, so they survive a run that later fails or is superseded. */
+    recordConfigWarnings(id: number, warnings: string[]) {
+      // A run requeued after a restart reads the config again.
+      db.prepare('DELETE FROM config_warnings WHERE run_id = ?').run(id);
+      const insert = db.prepare('INSERT INTO config_warnings (run_id, warning) VALUES (?, ?)');
+      for (const w of warnings) insert.run(id, w);
+    },
+
     finish(id: number, status: RunStatus, opts: {
       reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
       invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string;
@@ -224,6 +238,7 @@ export function openStore(dataDir: string, clock: Clock) {
       const focuses = db.prepare('SELECT data FROM focuses WHERE run_id = ? ORDER BY rowid');
       const invocations = db.prepare('SELECT data FROM invocations WHERE run_id = ? ORDER BY rowid');
       const orchestration = db.prepare('SELECT fallback_used, error FROM orchestrations WHERE run_id = ?');
+      const warnings = db.prepare('SELECT warning FROM config_warnings WHERE run_id = ? ORDER BY rowid');
       return db.prepare('SELECT * FROM runs ORDER BY id').all().map((r: any) => {
         const { installationId, title, body, ...job } = toJob(r);
         const o: any = orchestration.get(r.id);
@@ -237,6 +252,7 @@ export function openStore(dataDir: string, clock: Clock) {
           invocations: invocations.all(r.id).map((i: any) => JSON.parse(i.data)),
           fallbackUsed: o?.fallback_used === 1,
           orchestratorError: o?.error ?? null,
+          configWarnings: warnings.all(r.id).map((w: any) => w.warning),
         };
       });
     },
