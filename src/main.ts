@@ -111,7 +111,12 @@ createServer((req, res) => {
   req.on('end', async () => {
     try {
       const { status, ignored } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });
-      if (ignored) log({ level: 'info', msg: 'ignored delivery', delivery: req.headers['x-github-delivery'], reason: ignored });
+      // Every delivery, so the logs show whether GitHub is reaching the service at all.
+      const reason = status === 401 ? 'invalid signature: check GITHUB_WEBHOOK_SECRET' : ignored;
+      log({
+        level: status >= 400 ? 'warn' : 'info', msg: 'delivery', delivery: req.headers['x-github-delivery'],
+        event: req.headers['x-github-event'], status, ...(reason && { reason }),
+      });
       res.writeHead(status).end();
       kick();
     } catch (err) {
