@@ -32,6 +32,8 @@ const app = createApp({
     reviewOutsidePrs: outsidePolicy(),
     reviewLabel: process.env.REVIEW_LABEL || undefined,
     runCap: runCap(),
+    maxReviewableLines: Number(process.env.MAX_REVIEWABLE_LINES) || undefined,
+    reviewTokenBudget: Number(process.env.REVIEW_TOKEN_BUDGET) || undefined,
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),

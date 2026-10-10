@@ -25,4 +25,6 @@ npm start
 | `REVIEW_LABEL` | Label that opts a PR in and triggers a (re-)review (default `ai-review`) |
 | `RUN_CAP` | Max runs per PR per rolling 24 hours (default `10`) |
 | `DATA_DIR` | Persistent volume for SQLite and bare clones (default `./data`) |
+| `MAX_REVIEWABLE_LINES` | Above this many reviewable changed lines the summary recommends a split (default `800`) |
+| `REVIEW_TOKEN_BUDGET` | Estimated diff tokens given to reviewers; files past it are skipped and listed (default `50000`) |
 | `PORT` | HTTP port (default `3000`); point the App's webhook at `POST /` |

@@ -16,10 +16,25 @@ function gitEnv(token: string): NodeJS.ProcessEnv {
     GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',
-    GIT_CONFIG_COUNT: '1',
+    // Host attribute files must not sway exclusions or diffs.
+    GIT_ATTR_NOSYSTEM: '1',
+    GIT_CONFIG_COUNT: '2',
     GIT_CONFIG_KEY_0: 'http.extraHeader',
     GIT_CONFIG_VALUE_0: `Authorization: basic ${basic}`,
+    GIT_CONFIG_KEY_1: 'core.attributesFile',
+    GIT_CONFIG_VALUE_1: '/dev/null',
   };
+}
+
+/** One changed file. Rename detection is on, so a pure rename or move has no added or deleted lines. */
+export interface FileChange {
+  path: string;
+  /** Set when the file was renamed or moved. */
+  oldPath?: string;
+  added: number;
+  deleted: number;
+  /** Git saw binary content, so there are no line counts. */
+  binary?: true;
 }
 
 /** A tool-input problem the reviewer may see; any other failure is reported generically. */
@@ -35,6 +50,11 @@ export interface Source {
   listDir(path?: unknown): Promise<string>;
   /** The PR diff, base...head, optionally for one path. */
   diff(path?: unknown): Promise<string>;
+  /** The PR diff limited to the given paths: what the reviewers are given and what comments anchor against. */
+  reviewDiff(paths: string[]): Promise<string>;
+  changedFiles(): Promise<FileChange[]>;
+  /** The paths marked linguist-generated or linguist-vendored by .gitattributes at the base SHA. */
+  markedAtBase(paths: string[]): Promise<Set<string>>;
 }
 
 // ponytail: fixed cap on grep output lines; make it a budget when per-agent budgets land.
@@ -68,8 +88,13 @@ export async function openSource(opts: {
   const dir = join(opts.dataDir, 'repos', opts.repo.replace('/', '__') + '.git');
   const env = gitEnv(opts.token);
   // Blobs are fetched lazily from the promisor remote, so reads need the same env.
-  const git = async (...args: string[]) =>
-    (await run('git', ['-C', dir, ...args], { env, maxBuffer: 64 * 1024 * 1024 })).stdout;
+  const gitWithInput = async (input: string | undefined, args: string[]) => {
+    const p = run('git', ['-C', dir, ...args], { env, maxBuffer: 64 * 1024 * 1024 });
+    if (input !== undefined) p.child.stdin!.end(input);
+    return (await p).stdout;
+  };
+  const git = (...args: string[]) => gitWithInput(undefined, args);
+  const range = `${baseSha}...${headSha}`;
 
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
@@ -89,6 +114,40 @@ export async function openSource(opts: {
   }
 
   return {
+    // ponytail: pathspecs ride in argv; tens of thousands of reviewed files would hit ARG_MAX.
+    // quotePath off keeps non-ASCII paths unquoted, so addedLines can key on them. Literal pathspecs keep
+    // names like `[id].ts` from acting as globs; callers pass both sides of a rename so -M still pairs them.
+    reviewDiff: (paths) => git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '-M', '--no-ext-diff', '--no-textconv',
+      '--no-color', '--src-prefix=a/', '--dst-prefix=b/', range, '--', ...paths),
+
+    async changedFiles() {
+      // -z records: "added\tdeleted\tpath\0", or for a rename "added\tdeleted\t\0old\0new\0". Binary files show "-".
+      const fields = (await git('diff', '-M', '--numstat', '-z', '--no-ext-diff', '--no-textconv', range)).split('\0');
+      const out: FileChange[] = [];
+      for (let i = 0; i < fields.length - 1;) {
+        // Paths may themselves contain tabs, so only the first two split.
+        const [, added = '', deleted = '', path = ''] = /^([^\t]*)\t([^\t]*)\t(.*)$/s.exec(fields[i++]!) ?? [];
+        const change: FileChange = { path, added: Number(added) || 0, deleted: Number(deleted) || 0 };
+        if (added === '-') change.binary = true;
+        if (path === '') { change.oldPath = fields[i++]; change.path = fields[i++]!; }
+        out.push(change);
+      }
+      return out;
+    },
+
+    async markedAtBase(paths) {
+      // -z records: "path\0attribute\0value\0". Only set or true marks a path; false and unset do not.
+      // ponytail: --source needs git >= 2.40; older hosts fail the run here.
+      const out = await gitWithInput(paths.map((p) => p + '\0').join(''),
+        ['check-attr', `--source=${baseSha}`, '-z', '--stdin', 'linguist-generated', 'linguist-vendored']);
+      const fields = out.split('\0');
+      const marked = new Set<string>();
+      for (let i = 0; i + 2 < fields.length; i += 3) {
+        if (fields[i + 2] === 'set' || fields[i + 2] === 'true') marked.add(fields[i]!);
+      }
+      return marked;
+    },
+
     async readFile(path, start, end) {
       const e = await entry(checkPath(path));
       if (!e) throw new ToolError('no such file at head');
