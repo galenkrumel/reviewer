@@ -33,7 +33,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     return given.length === expected.length && timingSafeEqual(given, expected);
   }
 
-  async function receive(d: Delivery): Promise<{ status: number }> {
+  async function receive(d: Delivery): Promise<{ status: number; ignored?: string }> {
     if (!verified(d)) return { status: 401 };
     let payload: any;
     try {
@@ -44,15 +44,16 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
-    if (event !== 'pull_request' || !pr || !repo || !allowlist.has(repo.toLowerCase())) return { status: 202 };
-    if (payload.action === 'converted_to_draft' || payload.action === 'closed') {
-      if (!Number.isInteger(pr.number)) return { status: 400 };
+    if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
+      if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
+      if (!Number.isInteger(pr?.number)) return { status: 400 };
       store.supersede(repo, pr.number);
-      return { status: 202 };
+      return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
     }
-    // ponytail: only `opened` reviews for now; the other lifecycle actions arrive with trigger eligibility.
-    if (payload.action !== 'opened' || pr.draft) return { status: 202 };
-    if (!Number.isInteger(payload.installation?.id) || !pr.head?.sha || !pr.base?.sha) return { status: 400 };
+    const ignored = ignoreReason(event, payload);
+    if (ignored) return { status: 202, ignored };
+    if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
+    if (!Number.isInteger(payload.installation?.id) || !pr?.head?.sha || !pr.base?.sha) return { status: 400 };
 
     store.enqueue({
       deliveryId: String(d.headers['x-github-delivery'] ?? ''),
@@ -125,6 +126,18 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
   }
 
   return { receive, drain, runs: store.runs, close: store.close };
+}
+
+const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited']);
+
+/** Why a delivery starts no review, or undefined when it should. Drafts are never reviewed. */
+function ignoreReason(event: unknown, payload: any): string | undefined {
+  if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
+  if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
+  // changes.base holds the old base; the new one is pull_request.base.
+  if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
+  if (!payload.pull_request) return 'no pull_request in payload';
+  if (payload.pull_request.draft) return 'pull request is a draft';
 }
 
 function commentBody(f: RecordedFinding): string {

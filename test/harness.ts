@@ -140,9 +140,10 @@ export function delivery(event: string, payload: unknown, secret = WEBHOOK_SECRE
   };
 }
 
-export function openedPayload(repo: string, pr: PullRequest, action = 'opened') {
+export function prPayload(action: string, repo: string, pr: PullRequest, extra: Record<string, unknown> = {}) {
   return {
     action,
+    ...extra,
     installation: { id: 42 },
     repository: { full_name: repo },
     pull_request: {
@@ -156,6 +157,8 @@ export function openedPayload(repo: string, pr: PullRequest, action = 'opened') 
     },
   };
 }
+
+export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opened', repo, pr);
 
 /** Pass an earlier app's dataDir to simulate a restart on the same volume. */
 export function testApp(opts: { model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string }) {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { NewReview } from '../src/ports.ts';
-import { delivery, FakeGitHub, gitFixture, openedPayload, ScriptedModel, testApp, toolCall } from './harness.ts';
+import { delivery, FakeGitHub, gitFixture, openedPayload, prPayload, ScriptedModel, testApp, toolCall } from './harness.ts';
 
 const REPO = 'acme/widgets';
 
@@ -99,7 +99,7 @@ for (const action of ['converted_to_draft', 'closed'] as const) {
     const moved = action === 'closed' ? { ...pr, state: 'closed' as const } : { ...pr, draft: true };
     const model = new ScriptedModel([async () => {
       Object.assign(live(), moved);
-      await app.receive(delivery('pull_request', openedPayload(REPO, moved, action)));
+      await app.receive(delivery('pull_request', prPayload(action, REPO, moved)));
       return report();
     }]);
     const { app } = testApp({ model, github });
@@ -115,7 +115,7 @@ for (const action of ['converted_to_draft', 'closed'] as const) {
 test('a run that fails after being superseded stays superseded', async () => {
   const { pr, github } = setup();
   const model = new ScriptedModel([async () => {
-    await app.receive(delivery('pull_request', openedPayload(REPO, pr, 'closed')));
+    await app.receive(delivery('pull_request', prPayload('closed', REPO, pr)));
     throw new Error('model down');
   }]);
   const { app } = testApp({ model, github });
