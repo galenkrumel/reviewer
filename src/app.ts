@@ -1,10 +1,11 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { addedLines, openSource } from './git.ts';
+import { toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { BudgetExceeded, FOCUSES, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
-import { openStore, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation } from './store.ts';
+import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation } from './store.ts';
 import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment } from './ports.ts';
 
 export const AGENTS = ['orchestrator', ...FOCUSES] as const;
@@ -42,6 +43,11 @@ export interface AppConfig {
   maxReviewableLines?: number;
   /** Estimated diff tokens the reviewers may be given; files past it are skipped. Default 50000. */
   reviewTokenBudget?: number;
+  /** Findings below either threshold are not posted. Defaults `medium` and 0.7. */
+  minSeverity?: Severity;
+  minConfidence?: number;
+  /** Inline comments per review, highest severity × confidence first. Default 10. */
+  maxComments?: number;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -178,7 +184,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
     // Comments anchor only against the reviewed files' diff, so excluded and skipped files are never commented on.
     let diff = '';
-    const findings: RecordedFinding[] = [];
+    const reported: { focus: string; finding: Finding }[] = [];
     const focuses: RecordedFocus[] = [];
     const invocations: RecordedInvocation[] = [];
     let orchestratorError: string | undefined;
@@ -195,7 +201,6 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
         orchestratorError = err instanceof Error ? err.message : String(err);
       }
 
-      const changed = addedLines(diff);
       // Sequential: one reviewer's failure never stops the others.
       for (const { focus, reason } of selectFocuses(picks, scope.reviewed.map((f) => f.path), maxReviewers)) {
         if (store.superseded(job.id)) return;
@@ -204,14 +209,12 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
           source, diff, title: job.title, body: job.body,
         });
         try {
-          // One retry, for bad output; a blown budget would only be spent again.
-          const reported = await review().catch((err) => {
+          // One retry, for bad output (an off-schema report included); a blown budget would only be spent again.
+          const found = await review().catch((err) => {
             if (err instanceof BudgetExceeded) throw err;
             return review();
           });
-          for (const f of reported) {
-            findings.push({ ...f, focus, outcome: changed.get(f.path)?.has(f.line) ? 'published' : 'unanchorable' });
-          }
+          reported.push(...found.map((finding) => ({ focus, finding })));
           focuses.push({ focus, reason, status: 'succeeded' });
         } catch (err) {
           focuses.push({ focus, reason, status: 'failed', error: err instanceof Error ? err.message : String(err) });
@@ -220,9 +223,15 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     }
     if (store.superseded(job.id)) return;
     const fallbackUsed = orchestratorError !== undefined;
+    const changed = addedLines(diff);
+    const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
+      minSeverity: config.minSeverity ?? 'medium',
+      minConfidence: config.minConfidence ?? 0.7,
+      maxComments: config.maxComments ?? 10,
+    });
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
-      .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
+      .map((f) => toComment(f, changed, job.repo));
 
     const record = { findings, focuses, invocations, fallbackUsed, orchestratorError };
     const oversized = scope.reviewableLines > maxLines;
@@ -289,12 +298,6 @@ function authorReason(pr: any, policy: OutsidePolicy, label: string): string | u
   if (policy === 'never') return `author ${association} is outside and review_outside_prs is never`;
   // labels is the PR's current set, which on a labeled event already includes the new label.
   if (!pr.labels?.some((l: any) => l?.name === label)) return `author ${association} is outside and the PR lacks label ${label}`;
-}
-
-function commentBody(f: RecordedFinding): string {
-  let body = `**${f.title}**\n\n\`${f.severity}\` · ${f.focus}\n\n${f.evidence}`;
-  if (f.suggested_fix) body += `\n\n**Suggested fix:**\n\n${f.suggested_fix}`;
-  return body;
 }
 
 /** Paths come from the PR: code spans keep them from mentioning anyone or breaking out, and long lists are capped. */

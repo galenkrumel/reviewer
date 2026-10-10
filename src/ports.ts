@@ -13,6 +13,9 @@ export interface ReviewComment {
   path: string;
   line: number;
   side: 'RIGHT';
+  /** A multi-line comment's first line. */
+  start_line?: number;
+  start_side?: 'RIGHT';
   body: string;
 }
 
