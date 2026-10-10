@@ -8,7 +8,7 @@ export type RunStatus =
   | 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed'
   /** A newer job for the PR, or converted_to_draft/closed, replaced this one. */
   | 'superseded'
-  /** The pre-publish check found the PR closed, a draft, or at other SHAs. */
+  /** The start or pre-publish check found the PR closed, a draft, or at other SHAs (a superseded job there is revived). */
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
@@ -156,6 +156,16 @@ export function openStore(dataDir: string, clock: Clock) {
     supersede(repo: string, pr: number) {
       db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
         AND status IN ('queued', 'running')`).run(now(), repo, pr);
+    },
+
+    /**
+     * Re-queue a copy of the PR's latest job at these SHAs if that job was superseded: it passed gating and the cap
+     * at delivery but never finished. Once copied it is no longer the latest, so each is revived at most once.
+     */
+    revive(repo: string, pr: number, headSha: string, baseSha: string) {
+      const row = db.prepare(`SELECT * FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
+        ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha, baseSha) as any;
+      if (row?.status === 'superseded') this.enqueue(toJob(row));
     },
 
     superseded(id: number): boolean {

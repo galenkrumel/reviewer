@@ -5,7 +5,7 @@ import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orch
 import { BudgetExceeded, FOCUSES, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import { openStore, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation } from './store.ts';
-import type { Clock, GitHubPort, ModelPort, ReviewComment } from './ports.ts';
+import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment } from './ports.ts';
 
 export const AGENTS = ['orchestrator', ...FOCUSES] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -148,11 +148,23 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
   }
 
+  /**
+   * Record the run stale. Deliveries can arrive out of order, so a late one for an old revision may have superseded
+   * the job for the PR's current one: revive that job. Only a job that was enqueued is revived, so gating still holds.
+   */
+  function finishStale(job: Job, live: PullRequest, record?: Parameters<typeof store.finish>[2]) {
+    store.finish(job.id, 'stale', record); // before reviving, which would otherwise mark this run superseded
+    if (live.state === 'open' && !live.draft) store.revive(job.repo, job.pr, live.headSha, live.baseSha);
+  }
+
   async function reviewJob(job: Job) {
     const token = await github.mintToken(job.installationId);
     // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
     const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
     if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
+    // Before fetching: a late delivery's head may have been force-pushed away, and reviewing it would be wasted.
+    const start = await github.getPullRequest(token, job.repo, job.pr);
+    if (!isCurrent(start, job)) return finishStale(job, start);
     const source = await openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
       headSha: job.headSha, baseSha: job.baseSha,
@@ -220,9 +232,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     }
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
-    if (live.state !== 'open' || live.draft || live.headSha !== job.headSha || live.baseSha !== job.baseSha) {
-      return store.finish(job.id, 'stale', record);
-    }
+    if (!isCurrent(live, job)) return finishStale(job, live, record);
     if (store.superseded(job.id)) return;
     const { id } = await github.createReview(token, job.repo, job.pr, {
       commit_id: job.headSha,
@@ -254,6 +264,10 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
 const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 const DAY_MS = 24 * 3600_000;
+
+/** Whether the PR is open, ready, and at the job's head and base. */
+const isCurrent = (live: PullRequest, job: Job) =>
+  live.state === 'open' && !live.draft && live.headSha === job.headSha && live.baseSha === job.baseSha;
 
 /** Why a delivery starts no review, or undefined when it should. Drafts are never reviewed. */
 function ignoreReason(event: unknown, payload: any, label: string): string | undefined {
