@@ -2,7 +2,7 @@
 // and real SQLite, send it signed deliveries, drain, and inspect the outputs.
 import { createHmac } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after } from 'node:test';
@@ -28,14 +28,17 @@ const GIT_ENV = {
   GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com',
 };
 
+type FixtureFiles = Record<string, string | { symlink: string }>;
+
 /** A local repo with a base commit and a head commit on top of it. */
-export function gitFixture(base: Record<string, string>, head: Record<string, string>) {
+export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
   const dir = tempDir();
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
-  const commit = (files: Record<string, string>, msg: string) => {
+  const commit = (files: FixtureFiles, msg: string) => {
     for (const [path, content] of Object.entries(files)) {
       mkdirSync(dirname(join(dir, path)), { recursive: true });
-      writeFileSync(join(dir, path), content);
+      if (typeof content === 'string') writeFileSync(join(dir, path), content);
+      else symlinkSync(content.symlink, join(dir, path));
     }
     git('add', '-A');
     git('commit', '-q', '-m', msg);
