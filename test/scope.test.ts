@@ -41,7 +41,19 @@ test('lockfiles, vendored and generated files are excluded from the diff and nev
   assert.match(diffSent, /src\/a\.ts/);
   assert.doesNotMatch(diffSent, /package-lock|vendor\/lib|app\.min/);
   assert.deepEqual(reviews[0]!.review.comments.map((c) => c.path), ['src/a.ts']);
-  assert.deepEqual(app.runs()[0]!.findings.filter((f) => f.outcome === 'unanchorable').length, 3);
+  assert.equal(app.runs()[0]!.findings.filter((f) => f.outcome === 'unanchorable').length, 3);
+});
+
+test('a source file git sees as binary is named in the summary; image assets are not', async () => {
+  const s = prFor({ 'README.md': 'hi\n' }, { 'src/sneaky.ts': 'run();\0\n', 'img/logo.png': '\0PNG\n' });
+  const model = new ScriptedModel([]);
+  const { reviews } = await review(s, model);
+
+  assert.equal(model.requests.length, 0);
+  const { body, comments } = reviews[0]!.review;
+  assert.equal(comments.length, 0);
+  assert.match(body, /binary content[^]*`src\/sneaky\.ts`/);
+  assert.ok(!body.includes('logo.png'));
 });
 
 test('a clean run whose only other changes are excluded files posts nothing', async () => {
@@ -101,7 +113,7 @@ test('a PR above max_reviewable_lines gets a summary that opens with a split rec
   const opening = body.split('\n\n')[0]!;
   assert.match(opening, /split/i);
   assert.match(opening, /14 reviewable changed lines/);
-  assert.ok(opening.includes('`src/api`') && opening.includes('`lib`') && opening.includes('`.`'), opening);
+  assert.ok(opening.includes('`src/api`') && opening.includes('`lib`') && opening.includes('(repo root)'), opening);
   assert.ok(body.includes(`<!-- ai-review:${REPO}#9:${s.pr.headSha}:${s.pr.baseSha} -->`));
   assert.equal(app.runs()[0]!.status, 'published');
 });

@@ -103,7 +103,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
     const oversized = scope.reviewableLines > maxLines;
-    if (comments.length === 0 && !oversized && !scope.skipped.length && failed === undefined) {
+    if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && failed === undefined) {
       return store.finish(job.id, 'nothing_to_publish', { findings });
     }
     const { id } = await github.createReview(token, job.repo, job.pr, {
@@ -150,11 +150,13 @@ function summary(job: Job, count: number, notes: { scope: Scope; splitAbove?: nu
   const { scope } = notes;
   return [
     notes.splitAbove !== undefined && `**This PR has ${scope.reviewableLines} reviewable changed lines, over the `
-      + `${notes.splitAbove}-line limit. Consider splitting it.** Directories involved: ${pathList(scope.directories, ', ', 20)}.`,
+      + `${notes.splitAbove}-line limit. Consider splitting it.** Directories involved: ${
+        pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\``,
     `Focus: ${FOCUS}`,
     notes.failed && `Failed focus: ${FOCUS}`,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
+    scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     `${count} inline comment${count === 1 ? '' : 's'}.`,
     `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha} -->`,
   ].filter(Boolean).join('\n\n');

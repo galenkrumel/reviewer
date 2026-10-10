@@ -8,7 +8,10 @@ const LOCKFILES = new Set([
   'mix.lock', 'pubspec.lock', 'Podfile.lock', 'packages.lock.json', 'flake.lock', 'gradle.lockfile',
 ]);
 const VENDORED = /(^|\/)(vendor|vendors|third_party|third-party|node_modules|bower_components)\//;
-const GENERATED = /\.min\.(js|css|mjs)$|\.map$|\.pb\.go$|_pb2(_grpc)?\.pyi?$|\.g\.dart$|[._-]generated\.[^/]+$|(^|\/)__generated__\//;
+const GENERATED = /\.min\.(js|css|mjs)$|\.(js|css)\.map$|\.pb\.go$|_pb2(_grpc)?\.pyi?$|\.g\.dart$|[._]generated\.[^/]+$|(^|\/)__generated__\//;
+// Binary formats nobody reviews as text. Other binary-looking changes are surfaced, since a stray NUL byte
+// would otherwise hide a source file from review.
+const BINARY_ASSET = /\.(png|jpe?g|gif|webp|avif|ico|bmp|tiff?|psd|pdf|woff2?|ttf|otf|eot|mp[34]|wav|ogg|webm|mov|zip|gz|tgz|jar|wasm)$/i;
 // ponytail: path-name heuristic for "security-sensitive"; a content signal can replace it if ranking misfires.
 const SENSITIVE = /auth|login|passw|secret|token|session|crypt|permission|oauth|jwt|acl|credential|security|\.env/i;
 // ponytail: tokens estimated from changed lines; measure the per-file diff if the estimate proves too coarse.
@@ -19,19 +22,22 @@ export interface Scope {
   reviewed: FileChange[];
   /** Reviewable files that did not fit the budget. */
   skipped: string[];
+  /** Non-excluded files git sees as binary, which reviewers cannot read. */
+  binary: string[];
   /** Changed lines across every non-excluded file. */
   reviewableLines: number;
   /** Directories holding those lines. */
   directories: string[];
 }
 
-export function isExcluded(path: string, markedAtBase: Set<string>): boolean {
+function isExcluded(path: string, markedAtBase: Set<string>): boolean {
   return LOCKFILES.has(posix.basename(path)) || VENDORED.test(path) || GENERATED.test(path) || markedAtBase.has(path);
 }
 
 export function selectFiles(files: FileChange[], markedAtBase: Set<string>, tokenBudget: number): Scope {
   const churn = (f: FileChange) => f.added + f.deleted;
-  const reviewable = files.filter((f) => churn(f) > 0 && !isExcluded(f.path, markedAtBase));
+  const kept = files.filter((f) => !isExcluded(f.path, markedAtBase));
+  const reviewable = kept.filter((f) => churn(f) > 0);
   const ranked = reviewable.toSorted((a, b) =>
     Number(SENSITIVE.test(b.path)) - Number(SENSITIVE.test(a.path)) || churn(b) - churn(a));
 
@@ -45,6 +51,7 @@ export function selectFiles(files: FileChange[], markedAtBase: Set<string>, toke
   return {
     reviewed,
     skipped,
+    binary: kept.filter((f) => f.binary && !BINARY_ASSET.test(f.path)).map((f) => f.path),
     reviewableLines: reviewable.reduce((n, f) => n + churn(f), 0),
     directories: [...new Set(reviewable.map((f) => posix.dirname(f.path)))].sort(),
   };
