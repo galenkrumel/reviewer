@@ -2,11 +2,11 @@
 // and real SQLite, send it signed deliveries, drain, and inspect the outputs.
 import { createHmac } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after } from 'node:test';
-import { createApp } from '../src/app.ts';
+import { createApp, type AppConfig } from '../src/app.ts';
 import type {
   AssistantMessage, ChatRequest, GitHubPort, ModelPort, NewReview, PullRequest,
 } from '../src/ports.ts';
@@ -28,15 +28,18 @@ const GIT_ENV = {
   GIT_COMMITTER_NAME: 'Fixture', GIT_COMMITTER_EMAIL: 'fixture@example.com',
 };
 
-/** A local repo with a base commit and a head commit on top of it. A null head value deletes the file. */
-export function gitFixture(base: Record<string, string>, head: Record<string, string | null>) {
+type FixtureFiles = Record<string, string | null | { symlink: string }>;
+
+/** A local repo with a base commit and a head commit on top of it. A null value deletes the file. */
+export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
   const dir = tempDir();
   const git = (...args: string[]) => execFileSync('git', args, { cwd: dir, env: GIT_ENV, encoding: 'utf8' }).trim();
-  const commit = (files: Record<string, string | null>, msg: string) => {
+  const commit = (files: FixtureFiles, msg: string) => {
     for (const [path, content] of Object.entries(files)) {
       if (content === null) { rmSync(join(dir, path)); continue; }
       mkdirSync(dirname(join(dir, path)), { recursive: true });
-      writeFileSync(join(dir, path), content);
+      if (typeof content === 'string') writeFileSync(join(dir, path), content);
+      else symlinkSync(content.symlink, join(dir, path));
     }
     git('add', '-A');
     git('commit', '-q', '-m', msg);
@@ -53,7 +56,7 @@ export function gitFixture(base: Record<string, string>, head: Record<string, st
 export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
-  reviews: { repo: string; number: number; review: NewReview; id: number }[] = [];
+  reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -87,7 +90,7 @@ export class FakeGitHub implements GitHubPort {
   async listReviews(token: string, repo: string, number: number) {
     this.checkToken(token);
     return this.reviews
-      .filter((r) => r.repo === repo && r.number === number)
+      .filter((r) => r.repo === repo && r.number === number && !r.foreign)
       .map((r) => ({ id: r.id, body: r.review.body }));
   }
 
@@ -99,11 +102,14 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
+/** A scripted turn, or a callback that can act mid-run (deliver an event, move the PR) before answering. */
+export type Turn = AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
+
 /** Replays scripted assistant turns in order and records every request. */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
-  private turns: AssistantMessage[];
-  constructor(turns: AssistantMessage[]) {
+  private turns: Turn[];
+  constructor(turns: Turn[]) {
     this.turns = turns;
   }
 
@@ -111,7 +117,7 @@ export class ScriptedModel implements ModelPort {
     this.requests.push(structuredClone(req));
     const turn = this.turns.shift();
     if (!turn) throw new Error('scripted model ran out of turns');
-    return turn;
+    return typeof turn === 'function' ? turn() : turn;
   }
 }
 
@@ -138,9 +144,12 @@ export function delivery(event: string, payload: unknown, secret = WEBHOOK_SECRE
   };
 }
 
-export function openedPayload(repo: string, pr: PullRequest) {
+export function prPayload(
+  action: string, repo: string, pr: PullRequest, extra: Record<string, unknown> = {}, prExtra: Record<string, unknown> = {},
+) {
   return {
-    action: 'opened',
+    action,
+    ...extra,
     installation: { id: 42 },
     repository: { full_name: repo },
     pull_request: {
@@ -151,28 +160,35 @@ export function openedPayload(repo: string, pr: PullRequest) {
       body: 'Please review',
       head: { sha: pr.headSha },
       base: { sha: pr.baseSha },
+      author_association: 'MEMBER',
+      labels: [],
+      ...prExtra,
     },
   };
 }
 
+export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opened', repo, pr);
+
+/** Pass an earlier app's dataDir to simulate a restart on the same volume. */
 export function testApp(opts: {
-  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; maxReviewableLines?: number; reviewTokenBudget?: number;
+  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>;
 }) {
   const github = opts.github ?? new FakeGitHub();
-  const dataDir = tempDir();
+  const dataDir = opts.dataDir ?? tempDir();
+  /** Settable: assign clock.time to move the app's clock. */
+  const clock = { time: new Date('2026-01-01T00:00:00Z'), now: () => clock.time };
   const app = createApp({
     config: {
       webhookSecret: WEBHOOK_SECRET,
       allowlist: opts.allowlist ?? ['acme/widgets'],
       model: 'test/model',
       dataDir,
-      maxReviewableLines: opts.maxReviewableLines,
-      reviewTokenBudget: opts.reviewTokenBudget,
+      ...opts.config,
     },
     github,
     model: opts.model,
-    clock: { now: () => new Date('2026-01-01T00:00:00Z') },
+    clock,
   });
   after(() => app.close());
-  return { app, github, dataDir };
+  return { app, github, dataDir, clock };
 }

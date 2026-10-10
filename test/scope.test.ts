@@ -15,7 +15,7 @@ function prFor(base: Record<string, string>, head: Record<string, string | null>
 async function review(
   setup: ReturnType<typeof prFor>, model: ScriptedModel, opts: { maxReviewableLines?: number; reviewTokenBudget?: number } = {},
 ) {
-  const { app } = testApp({ model, github: setup.github, ...opts });
+  const { app } = testApp({ model, github: setup.github, config: opts });
   await app.receive(delivery('pull_request', openedPayload(REPO, setup.pr)));
   await app.drain();
   return { app, reviews: setup.github.reviews, diffSent: model.requests[0]?.messages[1]?.content ?? '' };

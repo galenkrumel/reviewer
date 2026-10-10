@@ -1,6 +1,6 @@
 // Entry point: deployment config from env, real adapters, HTTP webhook endpoint, in-process worker.
 import { createServer } from 'node:http';
-import { createApp } from './app.ts';
+import { createApp, type OutsidePolicy } from './app.ts';
 import { gitHubApp } from './github.ts';
 import { openRouter } from './openrouter.ts';
 
@@ -10,12 +10,28 @@ function env(name: string): string {
   return v;
 }
 
+function outsidePolicy(): OutsidePolicy | undefined {
+  const v = process.env.REVIEW_OUTSIDE_PRS;
+  if (v === undefined || v === 'label' || v === 'always' || v === 'never') return v;
+  throw new Error(`REVIEW_OUTSIDE_PRS must be label, always or never, not ${v}`);
+}
+
+function runCap(): number | undefined {
+  const v = process.env.RUN_CAP;
+  if (v === undefined) return undefined;
+  if (!/^[1-9]\d*$/.test(v)) throw new Error(`RUN_CAP must be a positive integer, not ${v}`);
+  return Number(v);
+}
+
 const app = createApp({
   config: {
     webhookSecret: env('GITHUB_WEBHOOK_SECRET'),
     allowlist: env('REPO_ALLOWLIST').split(',').map((r) => r.trim()).filter(Boolean),
     model: env('REVIEW_MODEL'),
     dataDir: process.env.DATA_DIR ?? './data',
+    reviewOutsidePrs: outsidePolicy(),
+    reviewLabel: process.env.REVIEW_LABEL || undefined,
+    runCap: runCap(),
     maxReviewableLines: Number(process.env.MAX_REVIEWABLE_LINES) || undefined,
     reviewTokenBudget: Number(process.env.REVIEW_TOKEN_BUDGET) || undefined,
   },
@@ -43,7 +59,8 @@ createServer((req, res) => {
   });
   req.on('end', async () => {
     try {
-      const { status } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });
+      const { status, ignored } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });
+      if (ignored) console.log(`ignored delivery ${req.headers['x-github-delivery']}: ${ignored}`);
       res.writeHead(status).end();
       kick();
     } catch (err) {
