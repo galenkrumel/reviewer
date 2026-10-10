@@ -2,16 +2,33 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { addedLines, openSource } from './git.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
-import { runReviewer } from './reviewer.ts';
+import { BudgetExceeded, FOCUSES, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
-import { openStore, type Job, type RecordedFinding, type RecordedFocus } from './store.ts';
+import { openStore, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation } from './store.ts';
 import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment } from './ports.ts';
+
+export const AGENTS = ['orchestrator', ...FOCUSES] as const;
+export type Agent = (typeof AGENTS)[number];
+
+/** Overrides for one agent; anything unset takes the deployment-wide default. */
+export interface AgentConfig {
+  model?: string;
+  fallbackModel?: string;
+  /** Model calls per reviewer invocation. Default 20. The orchestrator makes one. */
+  maxTurns?: number;
+  /** Input plus output tokens per invocation, summed over its calls. Default 500000. */
+  maxTokens?: number;
+}
 
 export interface AppConfig {
   webhookSecret: string;
   /** "owner/repo" names the service acts on. */
   allowlist: string[];
+  /** Default OpenRouter model ID for every agent. */
   model: string;
+  /** Default OpenRouter fallback model for every agent. */
+  fallbackModel?: string;
+  agents?: Partial<Record<Agent, AgentConfig>>;
   dataDir: string;
   /** Who else besides OWNER/MEMBER/COLLABORATOR gets reviewed. Default `label`. */
   reviewOutsidePrs?: OutsidePolicy;
@@ -44,6 +61,44 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
   const label = config.reviewLabel ?? 'ai-review';
   const policy = config.reviewOutsidePrs ?? 'label';
   const runCap = config.runCap ?? 10;
+
+  const agentConfig = (name: Agent) => {
+    const c = config.agents?.[name];
+    return {
+      model: c?.model ?? config.model,
+      fallbackModel: c?.fallbackModel ?? config.fallbackModel,
+      maxTurns: c?.maxTurns ?? 20,
+      maxTokens: c?.maxTokens ?? 500_000,
+    };
+  };
+
+  /** Startup check: every configured model must exist on OpenRouter and support tools. */
+  async function checkModels() {
+    const tools = new Map((await model.listModels()).map((m) => [m.id, !!m.supported_parameters?.includes('tools')]));
+    const problems = AGENTS.flatMap((name) => {
+      const { model: primary, fallbackModel } = agentConfig(name);
+      return [primary, fallbackModel].filter((id) => id && !tools.get(id)).map((id) =>
+        `agent ${name}: model ${id} ${tools.has(id!) ? 'does not support tools' : 'is not listed'} on OpenRouter`);
+    });
+    if (problems.length) throw new Error(problems.join('\n'));
+  }
+
+  /** A chat for one agent invocation: its model and fallback, usage tallied into `invocations`, tokens budgeted. */
+  function meteredChat(name: Agent, invocations: RecordedInvocation[]): Chat {
+    const { model: primary, fallbackModel, maxTokens } = agentConfig(name);
+    const used: RecordedInvocation = { agent: name, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
+    invocations.push(used);
+    return async (messages, tools) => {
+      const res = await model.chat({ model: primary, models: fallbackModel ? [primary, fallbackModel] : undefined, messages, tools });
+      if (!used.models.includes(res.model)) used.models.push(res.model);
+      used.inputTokens += res.usage.inputTokens;
+      used.outputTokens += res.usage.outputTokens;
+      used.cost += res.usage.cost;
+      // ponytail: checked after each call, so spend can overshoot by one call; pass max_tokens if that matters.
+      if (used.inputTokens + used.outputTokens > maxTokens) throw new BudgetExceeded(`over its token budget of ${maxTokens}`);
+      return res.message;
+    };
+  }
 
   function verified(d: Delivery): boolean {
     const sig = d.headers['x-hub-signature-256'];
@@ -125,12 +180,15 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     let diff = '';
     const findings: RecordedFinding[] = [];
     const focuses: RecordedFocus[] = [];
+    const invocations: RecordedInvocation[] = [];
     let orchestratorError: string | undefined;
     if (scope.reviewed.length) {
       diff = await source.reviewDiff(scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
       let picks: Pick[];
       try {
-        picks = await runOrchestrator({ model, modelId: config.model, files: scope.reviewed, title: job.title, body: job.body });
+        picks = await runOrchestrator({
+          chat: meteredChat('orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
+        });
       } catch (err) {
         // The fallback's path match sees every changed file, excluded ones (lockfiles) included.
         picks = fallbackPicks(files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
@@ -141,9 +199,16 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       // Sequential: one reviewer's failure never stops the others.
       for (const { focus, reason } of selectFocuses(picks, scope.reviewed.map((f) => f.path), maxReviewers)) {
         if (store.superseded(job.id)) return;
-        const review = () => runReviewer({ focus, model, modelId: config.model, source, diff, title: job.title, body: job.body });
+        const review = () => runReviewer({
+          focus, chat: meteredChat(focus, invocations), maxTurns: agentConfig(focus).maxTurns,
+          source, diff, title: job.title, body: job.body,
+        });
         try {
-          const reported = await review().catch(review); // one retry
+          // One retry, for bad output; a blown budget would only be spent again.
+          const reported = await review().catch((err) => {
+            if (err instanceof BudgetExceeded) throw err;
+            return review();
+          });
           for (const f of reported) {
             findings.push({ ...f, focus, outcome: changed.get(f.path)?.has(f.line) ? 'published' : 'unanchorable' });
           }
@@ -159,7 +224,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
-    const record = { findings, focuses, fallbackUsed, orchestratorError };
+    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
     if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
@@ -193,7 +258,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     })().finally(() => (draining = undefined)));
   }
 
-  return { receive, drain, runs: store.runs, close: store.close };
+  return { receive, drain, checkModels, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
