@@ -85,18 +85,24 @@ function sanitize(text: string, repo: string): string {
     const u = url.toLowerCase();
     return u.startsWith(prefix) && /^(?:[/?#]|$)/.test(u.slice(prefix.length)) && !/\.\.|\\|%2e|%2f|%5c/.test(u);
   };
-  return text
-    // An entity could spell `@` or `..` after the checks below; a zero-width space leaves it as literal text.
-    .replace(/&(?=#|[a-z][a-z0-9]*;)/gi, '&\u200b')
-    // Reference definitions, whose destination may sit on the next line.
-    .replace(/^ {0,3}\[[^\]]+\]:\s*<?([^\s>]*)>?.*$/gm, (m, url: string) => (allowed(url) ? m : ''))
-    // Markdown links and images keep their text (alt text) when the target isn't allowed.
-    .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (m, label: string, url: string) => (allowed(url) ? m : label))
-    // Bare URLs GitHub would autolink.
-    .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>()[\]"'`]*/gi, (url) => (allowed(url) ? url : '(link removed)'))
-    // Protocol-relative and javascript: targets left in any other link syntax.
-    .replace(/(?<=^|[\s(<])\/\/[\w-]+\.[^\s<>()[\]"'`]*|\bjavascript:/gim, '(link removed)')
-    // A zero-width space stops @user and @org/team from mentioning, and <tag from being HTML.
-    .replace(/@(?=[\w-])/g, '@​')
-    .replace(/<(?=[a-z/!?])/gi, '<​');
+  // Removing a link can join its neighbours into new markup (`&[](x)#64;` becomes `&#64;`), so repeat to a fixed point.
+  // Each pass only removes text or adds idempotent zero-width spaces, so this ends.
+  for (let prev = ''; prev !== text;) {
+    prev = text;
+    text = text
+      // An entity could spell `@` or `..` past the checks below; a zero-width space leaves it as literal text.
+      .replace(/&(?=#|[a-z][a-z0-9]*;)/gi, '&​')
+      // Reference definitions, whose destination may sit on the next line.
+      .replace(/^ {0,3}\[[^\]]+\]:\s*<?([^\s>]*)>?.*$/gm, (m, url: string) => (allowed(url) ? m : ''))
+      // Markdown links and images keep their text (alt text) when the target isn't allowed.
+      .replace(/!?\[([^\]]*)\]\(\s*<?([^)\s>]*)>?[^)]*\)/g, (m, label: string, url: string) => (allowed(url) ? m : label))
+      // Bare URLs GitHub would autolink.
+      .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)[^\s<>()[\]"'`]*/gi, (url) => (allowed(url) ? url : '(link removed)'))
+      // Protocol-relative and javascript: targets left in any other link syntax.
+      .replace(/(?<=^|[\s(<])\/\/[\w-]+\.[^\s<>()[\]"'`]*|\bjavascript:/gim, '(link removed)')
+      // A zero-width space stops @user and @org/team from mentioning, and <tag from being HTML.
+      .replace(/@(?=[\w-])/g, '@​')
+      .replace(/<(?=[a-z/!?])/gi, '<​');
+  }
+  return text;
 }

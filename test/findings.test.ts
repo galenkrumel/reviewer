@@ -164,7 +164,8 @@ test('mentions and links outside the repo are sanitized out of comments', async 
   const evidence = 'Ping @octocat and @acme/security. See [docs](https://evil.example/phish), https://evil.example/x, '
     + 'www.evil.example/y, ![t](https://evil.example/p.png), <a href="https://evil.example">here</a>, '
     + '[up](https://github.com/acme/widgets/../../evil/repo) and https://github.com/acme/widgets/blob/main/src/app.ts#L3. '
-    + 'Entities: &#64;mona [e](https://github.com/acme/widgets/&#46;&#46;/&#46;&#46;/evil/entity). '
+    + 'Joins: &[](https://evil.example)#64;mona <[](//evil.example)a href="x">j</a> '
+    + 'Entities: &#64;mona[e](https://github.com/acme/widgets/&#46;&#46;/&#46;&#46;/evil/entity). '
     + 'Refs: [a][1] [b][2] [c][3]\n\n[1]: //evil.example/a\n[2]:\n  //evil.example/b\n[3]: javascript:alert(1)\n';
   const { comments } = await run([report(f(5, {
     title: 'Tell @admin', evidence, suggested_fix: 'Read [this](https://github.com/acme/widgets.evil.com/x) first.',
