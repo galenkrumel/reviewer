@@ -20,7 +20,11 @@ npm start
 | `GITHUB_WEBHOOK_SECRET` | Webhook secret |
 | `REPO_ALLOWLIST` | Comma-separated `owner/repo` list |
 | `OPENROUTER_API_KEY` | OpenRouter key |
-| `REVIEW_MODEL` | OpenRouter model ID for the reviewer |
+| `REVIEW_MODEL` | Default OpenRouter model ID for every agent |
+| `REVIEW_FALLBACK_MODEL` | Default fallback model, passed in OpenRouter's `models` array (optional) |
+| `<AGENT>_MODEL`, `<AGENT>_FALLBACK_MODEL` | Per-agent overrides; `<AGENT>` is `ORCHESTRATOR`, `CORRECTNESS`, `SECURITY`, `PERFORMANCE`, `ARCHITECTURE` or `CONCISENESS`. Startup fails if any configured model lacks tool support on OpenRouter |
+| `<AGENT>_MAX_TURNS` | Model calls per reviewer invocation (default `20`); over it, the reviewer fails |
+| `<AGENT>_MAX_TOKENS` | Input plus output tokens per invocation (default `500000`); over it, the agent fails |
 | `MAX_REVIEWERS` | Reviewer cap per run, at least 2 (default `3`) |
 | `REVIEW_OUTSIDE_PRS` | PRs from authors other than OWNER/MEMBER/COLLABORATOR: `label` (only while labelled, default), `always`, `never` |
 | `REVIEW_LABEL` | Label that opts a PR in and triggers a (re-)review (default `ai-review`) |

@@ -1,6 +1,6 @@
 // Entry point: deployment config from env, real adapters, HTTP webhook endpoint, in-process worker.
 import { createServer } from 'node:http';
-import { createApp, type OutsidePolicy } from './app.ts';
+import { AGENTS, createApp, type OutsidePolicy } from './app.ts';
 import { gitHubApp } from './github.ts';
 import { openRouter } from './openrouter.ts';
 
@@ -16,22 +16,35 @@ function outsidePolicy(): OutsidePolicy | undefined {
   throw new Error(`REVIEW_OUTSIDE_PRS must be label, always or never, not ${v}`);
 }
 
-function runCap(): number | undefined {
-  const v = process.env.RUN_CAP;
+function positiveInt(name: string): number | undefined {
+  const v = process.env[name];
   if (v === undefined) return undefined;
-  if (!/^[1-9]\d*$/.test(v)) throw new Error(`RUN_CAP must be a positive integer, not ${v}`);
+  if (!/^[1-9]\d*$/.test(v)) throw new Error(`${name} must be a positive integer, not ${v}`);
   return Number(v);
 }
+
+/** Per agent: ORCHESTRATOR_MODEL, SECURITY_FALLBACK_MODEL, CORRECTNESS_MAX_TURNS, PERFORMANCE_MAX_TOKENS, ... */
+const agents = Object.fromEntries(AGENTS.map((agent) => {
+  const prefix = agent.toUpperCase();
+  return [agent, {
+    model: process.env[`${prefix}_MODEL`] || undefined,
+    fallbackModel: process.env[`${prefix}_FALLBACK_MODEL`] || undefined,
+    maxTurns: positiveInt(`${prefix}_MAX_TURNS`),
+    maxTokens: positiveInt(`${prefix}_MAX_TOKENS`),
+  }];
+}));
 
 const app = createApp({
   config: {
     webhookSecret: env('GITHUB_WEBHOOK_SECRET'),
     allowlist: env('REPO_ALLOWLIST').split(',').map((r) => r.trim()).filter(Boolean),
     model: env('REVIEW_MODEL'),
+    fallbackModel: process.env.REVIEW_FALLBACK_MODEL || undefined,
+    agents,
     dataDir: process.env.DATA_DIR ?? './data',
     reviewOutsidePrs: outsidePolicy(),
     reviewLabel: process.env.REVIEW_LABEL || undefined,
-    runCap: runCap(),
+    runCap: positiveInt('RUN_CAP'),
     maxReviewableLines: Number(process.env.MAX_REVIEWABLE_LINES) || undefined,
     reviewTokenBudget: Number(process.env.REVIEW_TOKEN_BUDGET) || undefined,
     maxReviewers: process.env.MAX_REVIEWERS ? Number(process.env.MAX_REVIEWERS) : undefined,
@@ -41,6 +54,9 @@ const app = createApp({
   model: openRouter(env('OPENROUTER_API_KEY')),
   clock: { now: () => new Date() },
 });
+
+// Refuse to start on a model that can't call tools.
+await app.checkModels();
 
 const kick = () => app.drain().catch((err) => console.error('worker error', err));
 

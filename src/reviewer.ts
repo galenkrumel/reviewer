@@ -1,10 +1,13 @@
 // One focused reviewer: a tool-use loop that ends with a report_findings call.
-import type { ChatMessage, ModelPort, ToolDef } from './ports.ts';
+import type { AssistantMessage, ChatMessage, ToolDef } from './ports.ts';
 import { ToolError, type Source } from './git.ts';
 import type { Finding } from './store.ts';
 
-// ponytail: fixed turn cap; per-agent turn and token budgets land with deployment config.
-const MAX_TURNS = 20;
+/** One model call for an agent; the caller picks the model and meters it. */
+export type Chat = (messages: ChatMessage[], tools: ToolDef[]) => Promise<AssistantMessage>;
+
+/** An agent ran out of turns or tokens. A failure, but not one worth a retry. */
+export class BudgetExceeded extends Error {}
 
 export const FOCUSES = ['correctness', 'security', 'performance', 'architecture', 'conciseness'] as const;
 export type Focus = (typeof FOCUSES)[number];
@@ -80,7 +83,7 @@ export const untrusted = (label: string, text: string) =>
   `<untrusted-data name="${label}">\n${text.replace(/<(\/?)untrusted-data/gi, '<$1untrusted_data')}\n</untrusted-data>`;
 
 export async function runReviewer(opts: {
-  focus: Focus; model: ModelPort; modelId: string; source: Source; diff: string; title: string; body: string;
+  focus: Focus; chat: Chat; maxTurns: number; source: Source; diff: string; title: string; body: string;
 }): Promise<Finding[]> {
   const messages: ChatMessage[] = [
     { role: 'system', content: prompt(opts.focus) },
@@ -91,8 +94,8 @@ export async function runReviewer(opts: {
     },
   ];
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const reply = await opts.model.chat({ model: opts.modelId, messages, tools: TOOLS });
+  for (let turn = 0; turn < opts.maxTurns; turn++) {
+    const reply = await opts.chat(messages, TOOLS);
     messages.push(reply);
     if (!reply.tool_calls?.length) {
       messages.push({ role: 'user', content: 'Call report_findings to finish.' });
@@ -122,7 +125,7 @@ export async function runReviewer(opts: {
       messages.push({ role: 'tool', tool_call_id: call.id, content });
     }
   }
-  throw new Error(`reviewer exceeded ${MAX_TURNS} turns`);
+  throw new BudgetExceeded(`over its turn budget of ${opts.maxTurns}`);
 }
 
 // ponytail: shape check only; full schema validation comes with finding validation. The caller retries once.
