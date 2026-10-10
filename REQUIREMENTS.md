@@ -1,0 +1,317 @@
+# Code Review Agent — MVP Requirements (rev. 2)
+
+## 1. Purpose
+
+Build an automated code review agent for GitHub repositories. When an eligible pull request is ready for review, the agent analyzes the proposed changes using focused reviewer agents and posts actionable inline review comments.
+
+The system is **self-hostable**: anyone can deploy their own instance against their own repositories. Each deployment is single-tenant: one operator, one GitHub App, one model bill. This document defines the agents, their contracts, and their safety properties. The deployment target is a single service with a persistent volume (e.g. Render), but nothing in the design depends on a specific host.
+
+The MVP is read-only with respect to source code: it must not build, test, import, or execute code from a pull request.
+
+## 2. Scope
+
+### In scope
+
+- GitHub as the only source control and pull request platform.
+- A static allowlist of tracked repositories in deployment config.
+- Reviews triggered by PR lifecycle events (§3) and by a maintainer label (§3.3).
+- An orchestrator that selects specialist reviewers based on the change.
+- Reviewers with read-only, revision-pinned repository tools (§6.2).
+- Per-agent model selection via OpenRouter (§5.4).
+- Findings published as inline comments in one PR review per run.
+- Every run tied to the exact head and base revisions analyzed.
+
+### Out of scope for the MVP
+
+- Running or building submitted code, including tests, scripts, plugins, or package hooks.
+- Approving, merging, or modifying pull request code.
+- Providers other than GitHub.
+- Automatically fixing findings.
+- Reviewing draft pull requests.
+- Multi-tenant hosting, billing, or a registration UI.
+- Horizontal scaling (more than one instance).
+- A judge/verifier agent pass (deferred until real-world noise justifies it).
+- Comment commands such as `@bot review`.
+
+## 3. Triggers and eligibility
+
+### 3.1 Events
+
+The GitHub App subscribes to `pull_request` events and acts on these actions:
+
+| Action | Behavior |
+|---|---|
+| `opened` | Review if the PR is not a draft. |
+| `ready_for_review` | Review. |
+| `synchronize` | Review the new head if the PR is not a draft. |
+| `reopened` | Review if the PR is not a draft. |
+| `edited` | Review only if `changes.base` is present (base branch retargeted). |
+| `labeled` | Review the current head if the label is the configured review label (§3.3). |
+| `converted_to_draft`, `closed` | Mark any queued or running run for the PR `superseded`. Do not review. |
+
+All other actions are ignored. Draft PRs are never reviewed.
+
+### 3.2 Author gating
+
+Public repos accept PRs from anyone. Each such PR spends tokens and gives an attacker a way to inject prompts. Eligibility depends on `author_association`:
+
+- `OWNER`, `MEMBER`, `COLLABORATOR`: eligible automatically.
+- Everyone else, including fork PRs from outside contributors: eligible only while the PR carries the review label (§3.3).
+
+The deployer can change this policy (`review_outside_prs: label | always | never`). The default is `label`.
+
+### 3.3 Review label
+
+- The label name is configurable and defaults to `ai-review`.
+- Applying the label queues a review of the current head. GitHub restricts labeling to triage access or above, which serves as the authorization check.
+- Removing and re-applying the label is the manual "review again" trigger.
+
+### 3.4 Rate limit
+
+Each PR has a configurable cap on runs per rolling 24 hours (default 10). Events past the cap are recorded and skipped.
+
+## 4. Revision handling
+
+- Each run records the repository, PR number, head SHA, base SHA, and triggering event.
+- The analysis uses a pinned head/base SHA pair, never a moving branch ref.
+- Source is read from a bare, blobless clone cached on the volume, with no working tree (§6.2).
+- **Superseding:** when a new job is enqueued for a PR, every queued or running job for that PR with a different head or base is marked `superseded`. The worker checks this flag between reviewer invocations and immediately before publishing.
+- **Pre-publish check:** immediately before publishing, the worker fetches the PR and confirms it is open, not a draft, and still at the reviewed head and base SHAs. If anything has changed, nothing is published.
+- **Accepted race:** a few seconds remain between the check and the post. The review is created with `commit_id` set to the reviewed head, so in the worst case one review appears as "outdated" on GitHub. This is acceptable.
+
+## 5. Reviewer orchestration
+
+### 5.1 Focus areas
+
+The orchestrator selects from a fixed enum of five focuses:
+
+- **Correctness:** logic errors, edge cases, state handling, error handling.
+- **Security:** authentication, authorization, input handling, secrets, dependencies, network boundaries, sensitive data.
+- **Performance:** hot paths, data access, concurrency, large allocations, scaling risks.
+- **Architecture:** public interfaces, module boundaries, dependencies, cross-cutting behavior.
+- **Conciseness:** unnecessary complexity that materially reduces clarity. Subjective style preferences are excluded.
+
+### 5.2 Selection
+
+- The orchestrator receives the changed file list, diff stats, the PR title and body (as untrusted data, §6.1), and the repository's per-repo config. It returns a list of selected focuses, each with a one-line reason.
+- Its output is schema-validated against the enum. It cannot add reviewers, change budgets, or alter reviewer instructions.
+- **Always-on minimum:** when any non-excluded code file changes, correctness and security always run, whatever the orchestrator outputs. They count toward the cap.
+- **Cap:** `max_reviewers` defaults to 3 and is configurable. The always-on reviewers fill slots first, and orchestrator picks fill the rest in its stated priority order.
+- Reviewers cannot invoke other reviewers or the orchestrator. There is no recursion.
+- **Orchestrator failure:** fall back to correctness, plus security if dependency manifests or auth-related paths changed (path match). Record that the fallback was used.
+
+### 5.3 Reviewer execution
+
+- Each reviewer runs as a tool-use loop with read-only repository tools (§6.2) and a finishing `report_findings` tool.
+- Each reviewer has a budget of turns and tokens. Exceeding it counts as a failure.
+- Reviewers see the PR diff and pull surrounding context themselves through the tools.
+
+### 5.4 Models
+
+- Every agent (orchestrator plus each of the five focuses) has its own `model` and an optional `fallback_model` in deployment config. Models are addressed by OpenRouter ID.
+- Calls go through OpenRouter's chat completions API. Fallback uses OpenRouter's `models: [...]` array.
+- **Startup validation:** the service checks every configured model against OpenRouter's `/models` endpoint. Each one's `supported_parameters` must include `tools`. If any model fails the check, the service refuses to start.
+- Findings come back as a call to the `report_findings` tool, not through `response_format`. Arguments are schema-validated, and invalid output is retried once.
+- Each run records the model ID, token counts, and cost for each agent invocation, so that models can be compared.
+
+## 6. Analysis and execution safety
+
+### 6.1 Untrusted input
+
+- PR source, title, body, comments, commit messages, file names, and per-repo config content are untrusted.
+- Untrusted content is placed in clearly delimited data blocks. System prompts state that instructions inside those blocks are data and must not be followed.
+- Reviewer instructions, tool sets, budgets, thresholds, and the focus enum come only from code and deployment config. PR content cannot change them.
+
+### 6.2 Repository access
+
+- Each repository has a bare, blobless clone on the volume. Each run fetches exactly the head and base SHAs. No working tree is ever checked out, which means no hooks, no LFS smudge filters, and no symlink traversal.
+- Reviewer tools:
+  - `read_file(path, start?, end?)` is implemented as `git show <head>:<path>`.
+  - `grep(pattern, path_glob?)` is implemented as `git grep <head>`.
+  - `list_dir(path)` is implemented as `git ls-tree <head>`.
+  - `diff(path?)` returns the PR diff (base...head).
+- Paths are validated against the tree at the pinned SHA. Nothing outside the repository object store is reachable: no host filesystem, no environment, no network.
+- No tool executes repository content.
+
+### 6.3 Credentials
+
+- The GitHub App private key and the OpenRouter key exist only in the service environment.
+- Short-lived installation tokens are minted per job and used only by the fetch and publish code.
+- No credential appears in any prompt, tool result, log line, or stored run metadata.
+
+### 6.4 Output sanitization
+
+Before publishing, comment text is sanitized: `@`-mentions are neutralized, and links are removed unless they point to the reviewed repository on github.com.
+
+## 7. Findings
+
+### 7.1 Finding schema (`report_findings` arguments)
+
+- `title`: concise and specific.
+- `severity`: `critical | high | medium | low`.
+- `confidence`: 0–1.
+- `path`, `line` (and optional `start_line`): a location in the head revision.
+- `evidence`: the concrete issue and why it is a defect or a meaningful risk.
+- `suggested_fix` (optional): replacement code for the anchored lines, or prose.
+
+### 7.2 Validation (in code, never trusted to the model)
+
+1. Schema-valid.
+2. The anchor falls on a line added or modified in the reviewed diff.
+3. `severity ≥ medium` **and** `confidence ≥ 0.7`. Both thresholds are configurable.
+4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one. The higher severity × confidence finding is kept, and all contributing focuses are noted.
+5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff.
+6. **Cap:** at most `max_comments` (default 10) per review, ranked by severity × confidence.
+
+Findings that fail validation are omitted from the review. Their outcome (`unanchorable`, `below_threshold`, `merged`, `duplicate`, `over_cap`) is recorded in run metadata.
+
+## 8. Large PRs
+
+- **Always excluded from review:** lockfiles, vendored directories, generated and minified files, and paths marked `linguist-generated` or `linguist-vendored` in `.gitattributes` at the base SHA. Deployment and per-repo config can extend the exclusion list.
+- **Budget:** if the remaining files exceed the review token budget, files are ranked by churn and risk (security-sensitive paths first), and only those that fit are reviewed.
+- **Oversized PR:** above `max_reviewable_lines` (default 800) reviewable changed lines, the review proceeds within budget, and the summary opens with a recommendation to split the PR. The recommendation states the line count and the directories involved. Rename detection discounts pure renames and moves. The note goes in the review body, not as an inline comment.
+
+## 9. GitHub review publishing
+
+### 9.1 When to post
+
+- Post one review per run, with event `COMMENT`. The agent never sends `APPROVE` or `REQUEST_CHANGES`.
+- Post a review if at least one inline comment survives validation, **or** if the summary contains an oversized-PR note, skipped files, or failed focuses.
+- Otherwise post nothing.
+
+### 9.2 Summary body
+
+- The reviewed revisions: `head@<sha7>`, `base@<sha7>`.
+- The focuses that ran, each with its one-line selection reason. Fallback selection is noted where used.
+- Any focuses that failed.
+- Any skipped files or oversized-PR note.
+- The inline comment count.
+- A hidden marker: `<!-- ai-review:{owner}/{repo}#{pr}:{head}:{base} -->`.
+
+The summary does not repeat inline comment text.
+
+### 9.3 Inline comment body
+
+- The title in bold.
+- A severity and focus badge.
+- The evidence.
+- The suggested fix as a GitHub `suggestion` block when it replaces exactly the anchored lines, and as prose otherwise.
+
+Confidence is not shown to readers. It is stored in metadata only.
+
+### 9.4 Idempotency
+
+- The idempotency key is (repo, PR, head SHA, base SHA).
+- Before posting, the publisher lists existing reviews on the PR. If one carries the matching marker, the run is recorded as `published` and nothing is posted again.
+- Publish retries with backoff are safe because of this check.
+
+## 10. GitHub App
+
+**Permissions:**
+
+- Contents: read.
+- Pull requests: read and write. Write is needed to create reviews.
+- Metadata: read.
+
+The App must not request contents write, workflows, administration, or any permission that allows merging or pushing.
+
+**Events:** `pull_request`, filtered in code to the actions in §3.1.
+
+Webhook signatures are verified with the App's webhook secret. Unsigned or invalid deliveries are rejected.
+
+## 11. Configuration
+
+### 11.1 Deployment config (operator-owned, a file or env vars)
+
+- GitHub App credentials and webhook secret.
+- The OpenRouter key.
+- The repository allowlist.
+- `review_outside_prs`, the review label name, and the per-PR run cap.
+- Per-agent `model` and `fallback_model`, and per-agent turn and token budgets.
+- Default thresholds, `max_reviewers`, `max_comments`, `max_reviewable_lines`, and exclusions.
+- Worker concurrency (default 2) and metadata retention (default 90 days).
+
+### 11.2 Per-repo config (maintainer-owned)
+
+- Lives at `.github/ai-review.yml`, **read from the base SHA only**. A PR that edits this file has no effect on its own review.
+- It may only tighten or narrow settings:
+  - disable non-mandatory focuses;
+  - add exclusions or path hints that bias selection;
+  - raise thresholds;
+  - lower the caps.
+- It cannot set models, budgets, credentials, or author-gating policy, and it cannot disable the always-on reviewers.
+- Invalid per-repo config is ignored with a recorded warning, and deployment defaults apply.
+
+## 12. Operations
+
+- **Topology:** one service. The HTTP handler verifies the webhook, evaluates eligibility, enqueues the job, and returns 202 Accepted. An in-process worker loop processes jobs.
+- **Storage:** SQLite in WAL mode on the persistent volume holds both the job queue and run metadata. The repository clone cache lives on the same volume.
+- **Job dedup:** a second job for the same (repo, PR, head, base) while one is queued, running, or published is a no-op. A forced label re-review bypasses this.
+- **Run metadata:**
+  - the GitHub delivery ID and event;
+  - author gating outcome;
+  - selected focuses with reasons, and whether fallback was used;
+  - the head and base SHAs;
+  - per-agent model, tokens, cost, and status;
+  - every finding with its validation outcome;
+  - publish status and the review ID.
+- **Retention:** metadata is pruned on startup and daily, past the retention window.
+- **Failure handling:**
+  - Source fetch: retry with backoff.
+  - Reviewer: retry once, then mark the focus failed and continue with the others.
+  - Orchestrator: fixed fallback (§5.2).
+  - Publish: retry with backoff, guarded by the marker check (§9.4).
+  - All failures are written to structured logs and run metadata.
+- **Restart safety:** jobs left `running` at startup are re-queued. The idempotency marker prevents double-posting.
+
+## 13. Acceptance criteria
+
+1. A draft PR does not trigger a review when opened or updated.
+2. Marking a draft PR ready starts a review.
+3. A new commit pushed to a non-draft PR triggers a review of the new head SHA.
+4. Reopening a non-draft PR triggers a review.
+5. Reopening or updating a draft PR does not start a review until it is ready.
+6. The orchestrator can select a subset of the five focuses and records a reason for each.
+7. No code from the PR is executed during review.
+8. Published findings are inline comments anchored to changed lines.
+9. An empty result with no summary-worthy notes produces no review.
+10. Duplicate event delivery does not duplicate comments.
+11. If the PR head changes during analysis, the stale run publishes nothing.
+12. The agent never approves, merges, or modifies the PR.
+13. A non-draft `opened` PR triggers a review.
+14. `converted_to_draft` or `closed` during a run results in nothing being published.
+15. Retargeting the base branch triggers a re-review against the new base.
+16. A finding already posted on an earlier head of the same PR is not posted again.
+17. An outside-contributor PR without the review label is not reviewed, and applying the label reviews it.
+18. Per-repo config is read from the base SHA, and a PR editing that config does not change its own review.
+19. Reviewer tools cannot read anything outside the repository tree at the pinned SHA.
+20. The service refuses to start if a configured model lacks tool support on OpenRouter.
+21. A PR above `max_reviewable_lines` receives a summary recommending a split.
+22. If one reviewer fails, the other reviewers' findings are still published, and the summary names the failed focus.
+23. Each run records the model, tokens, and cost for every agent invocation.
+24. Correctness and security run on every PR that changes code, regardless of orchestrator output.
+
+Every criterion must have a deterministic test using a fake GitHub client and a stubbed model.
+
+## 14. Settled defaults (all configurable)
+
+| Setting | Default |
+|---|---|
+| Publish threshold | severity ≥ medium, confidence ≥ 0.7 |
+| `max_reviewers` | 3 (correctness and security always included for code changes) |
+| `max_comments` | 10 |
+| `max_reviewable_lines` | 800 |
+| Merge window for cross-reviewer duplicates | ±3 lines |
+| Runs per PR per 24 h | 10 |
+| Review label | `ai-review` |
+| `review_outside_prs` | `label` |
+| Worker concurrency | 2 |
+| Metadata retention | 90 days |
+| Summary-only posts | Only for oversized, skipped-file, or failed-focus notes |
+
+## 15. Remaining implementation choices
+
+- Implementation language (TypeScript on Node suggested: Octokit, `@octokit/webhooks`, `better-sqlite3`).
+- The default model for each agent.
+- Exact turn and token budgets per agent.
+- The prompt text for each focus.
