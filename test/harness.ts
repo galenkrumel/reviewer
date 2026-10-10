@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { after } from 'node:test';
 import { createApp, type AppConfig } from '../src/app.ts';
 import type {
-  AssistantMessage, ChatRequest, GitHubPort, ModelPort, NewReview, PullRequest,
+  AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest,
 } from '../src/ports.ts';
 
 const tmpRoots: string[] = [];
@@ -50,7 +50,9 @@ export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
   git('config', 'uploadpack.allowAnySHA1InWant', 'true');
   const baseSha = commit(base, 'base');
   const headSha = commit(head, 'head');
-  return { url: `file://${dir}`, baseSha, headSha };
+  /** Commit on top of the current head, returning the new head SHA. */
+  const push = (files: FixtureFiles) => commit(files, 'push');
+  return { url: `file://${dir}`, baseSha, headSha, push };
 }
 
 export class FakeGitHub implements GitHubPort {
@@ -119,6 +121,10 @@ export function agentOf(req: ChatRequest): string {
  */
 export class ScriptedModel implements ModelPort {
   requests: ChatRequest[] = [];
+  /** The model OpenRouter reports serving each call; defaults to the requested one. */
+  served?: string;
+  /** What listModels returns. */
+  catalog: ModelInfo[] = [];
   private turns: Record<string, Turn[]>;
   private correctnessOnly: boolean;
   constructor(turns: Turn[] | Record<string, Turn[]>) {
@@ -127,8 +133,18 @@ export class ScriptedModel implements ModelPort {
     this.turns = turns;
   }
 
+  /** Every call costs 100 input and 20 output tokens and $0.001. */
   async chat(req: ChatRequest) {
     this.requests.push(structuredClone(req));
+    const message = await this.next(req);
+    return { message, model: this.served ?? req.model, usage: { inputTokens: 100, outputTokens: 20, cost: 0.001 } };
+  }
+
+  async listModels() {
+    return this.catalog;
+  }
+
+  private async next(req: ChatRequest) {
     const agent = agentOf(req);
     if (this.correctnessOnly && agent === 'orchestrator') return select('correctness');
     if (this.correctnessOnly && agent === 'security') return noFindings();

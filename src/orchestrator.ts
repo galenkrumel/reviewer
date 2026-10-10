@@ -1,8 +1,8 @@
 // The orchestrator suggests reviewer focuses; code decides what actually runs.
 import { matchesGlob } from 'node:path';
 import type { FileChange } from './git.ts';
-import type { ModelPort, ToolDef } from './ports.ts';
-import { FOCUSES, untrusted, type Focus } from './reviewer.ts';
+import type { ToolDef } from './ports.ts';
+import { FOCUSES, untrusted, type Chat, type Focus } from './reviewer.ts';
 
 export interface Pick {
   focus: Focus;
@@ -45,25 +45,21 @@ const AUTH = /auth|login|session|passw|token|secret|crypt|permission|oauth|jwt/i
 
 /** The orchestrator's picks, schema-validated. Anything off-schema throws, which triggers the fallback. */
 export async function runOrchestrator(opts: {
-  model: ModelPort; modelId: string; files: FileChange[]; title: string; body: string; pathHints: [string, string][];
+  chat: Chat; files: FileChange[]; title: string; body: string; pathHints: [string, string][];
 }): Promise<Pick[]> {
   const files = opts.files.map((f) => `${f.path} (+${f.added} -${f.deleted})`).join('\n');
   // Only hints for paths this PR touches.
   const hints = opts.pathHints.filter(([glob]) => opts.files.some((f) => matchesGlob(f.path, glob)));
-  const reply = await opts.model.chat({
-    model: opts.modelId,
-    messages: [
-      { role: 'system', content: PROMPT },
-      {
-        role: 'user',
-        content: [
-          untrusted('pr-title', opts.title), untrusted('pr-body', opts.body), untrusted('changed-files', files),
-          ...(hints.length ? [untrusted('repo-path-hints', hints.map(([glob, hint]) => `${glob}: ${hint}`).join('\n'))] : []),
-        ].join('\n\n'),
-      },
-    ],
-    tools: [TOOL],
-  });
+  const reply = await opts.chat([
+    { role: 'system', content: PROMPT },
+    {
+      role: 'user',
+      content: [
+        untrusted('pr-title', opts.title), untrusted('pr-body', opts.body), untrusted('changed-files', files),
+        ...(hints.length ? [untrusted('repo-path-hints', hints.map(([glob, hint]) => `${glob}: ${hint}`).join('\n'))] : []),
+      ].join('\n\n'),
+    },
+  ], [TOOL]);
   const calls = reply.tool_calls ?? [];
   if (calls.length !== 1 || calls[0]!.function.name !== 'select_focuses') {
     throw new Error('orchestrator: expected exactly one select_focuses call');

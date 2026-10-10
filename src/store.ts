@@ -8,11 +8,11 @@ export type RunStatus =
   | 'queued' | 'running' | 'published' | 'nothing_to_publish' | 'failed'
   /** A newer job for the PR, or converted_to_draft/closed, replaced this one. */
   | 'superseded'
-  /** The pre-publish check found the PR closed, a draft, or at other SHAs. */
+  /** The start or pre-publish check found the PR closed, a draft, or at other SHAs (a superseded job there is revived). */
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
-export type FindingOutcome = 'published' | 'unanchorable';
+export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap';
 
 export interface Finding {
   title: string;
@@ -23,11 +23,15 @@ export interface Finding {
   start_line?: number;
   evidence: string;
   suggested_fix?: string;
+  /** The reviewer's claim that suggested_fix is replacement code for exactly start_line..line. */
+  fix_replaces_anchor?: boolean;
 }
 
 export interface RecordedFinding extends Finding {
   focus: string;
   outcome: FindingOutcome;
+  /** On a kept finding: every focus that flagged it, its own first. */
+  focuses?: string[];
 }
 
 export interface RecordedFocus {
@@ -35,6 +39,16 @@ export interface RecordedFocus {
   reason: string;
   status: 'succeeded' | 'failed';
   error?: string;
+}
+
+/** One agent invocation (a retry is another), summed over its model calls, failed ones included. */
+export interface RecordedInvocation {
+  agent: string;
+  /** The models that actually served its calls, in order of first use; more than one only after a fallback. */
+  models: string[];
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
 }
 
 export interface Job {
@@ -56,6 +70,7 @@ export interface RunRecord extends Omit<Job, 'installationId' | 'title' | 'body'
   error: string | null;
   findings: RecordedFinding[];
   focuses: RecordedFocus[];
+  invocations: RecordedInvocation[];
   /** Whether the orchestrator failed and the fixed fallback selection was used. */
   fallbackUsed: boolean;
   orchestratorError: string | null;
@@ -98,6 +113,10 @@ export function openStore(dataDir: string, clock: Clock) {
     CREATE TABLE IF NOT EXISTS config_warnings (
       run_id INTEGER NOT NULL REFERENCES runs(id),
       warning TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS invocations (
+      run_id INTEGER NOT NULL REFERENCES runs(id),
+      data TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS orchestrations (
       run_id INTEGER PRIMARY KEY REFERENCES runs(id),
@@ -149,6 +168,23 @@ export function openStore(dataDir: string, clock: Clock) {
         AND status IN ('queued', 'running')`).run(now(), repo, pr);
     },
 
+    /** Findings published on this PR at heads other than `headSha`. */
+    postedFindings(repo: string, pr: number, headSha: string): RecordedFinding[] {
+      return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
+        WHERE r.repo = ? AND r.pr = ? AND r.head_sha != ? AND r.status = 'published' AND f.outcome = 'published'`)
+        .all(repo, pr, headSha).map((row: any) => JSON.parse(row.data));
+    },
+
+    /**
+     * Re-queue a copy of the PR's latest job at these SHAs if that job was superseded: it passed gating and the cap
+     * at delivery but never finished. Once copied it is no longer the latest, so each is revived at most once.
+     */
+    revive(repo: string, pr: number, headSha: string, baseSha: string) {
+      const row = db.prepare(`SELECT * FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
+        ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha, baseSha) as any;
+      if (row?.status === 'superseded') this.enqueue(toJob(row));
+    },
+
     superseded(id: number): boolean {
       return (db.prepare('SELECT status FROM runs WHERE id = ?').get(id) as any)?.status === 'superseded';
     },
@@ -169,12 +205,14 @@ export function openStore(dataDir: string, clock: Clock) {
 
     finish(id: number, status: RunStatus, opts: {
       reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
-      fallbackUsed?: boolean; orchestratorError?: string;
+      invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string;
     } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
       const insertFocus = db.prepare('INSERT INTO focuses (run_id, data) VALUES (?, ?)');
       for (const f of opts.focuses ?? []) insertFocus.run(id, JSON.stringify(f));
+      const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
+      for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
       if (opts.fallbackUsed !== undefined) {
         db.prepare('INSERT INTO orchestrations (run_id, fallback_used, error) VALUES (?, ?, ?)')
           .run(id, opts.fallbackUsed ? 1 : 0, opts.orchestratorError ?? null);
@@ -188,6 +226,7 @@ export function openStore(dataDir: string, clock: Clock) {
     runs(): RunRecord[] {
       const findings = db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid');
       const focuses = db.prepare('SELECT data FROM focuses WHERE run_id = ? ORDER BY rowid');
+      const invocations = db.prepare('SELECT data FROM invocations WHERE run_id = ? ORDER BY rowid');
       const orchestration = db.prepare('SELECT fallback_used, error FROM orchestrations WHERE run_id = ?');
       const warnings = db.prepare('SELECT warning FROM config_warnings WHERE run_id = ? ORDER BY rowid');
       return db.prepare('SELECT * FROM runs ORDER BY id').all().map((r: any) => {
@@ -200,6 +239,7 @@ export function openStore(dataDir: string, clock: Clock) {
           error: r.error,
           findings: findings.all(r.id).map((f: any) => JSON.parse(f.data)),
           focuses: focuses.all(r.id).map((f: any) => JSON.parse(f.data)),
+          invocations: invocations.all(r.id).map((i: any) => JSON.parse(i.data)),
           fallbackUsed: o?.fallback_used === 1,
           orchestratorError: o?.error ?? null,
           configWarnings: warnings.all(r.id).map((w: any) => w.warning),

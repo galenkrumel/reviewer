@@ -13,6 +13,9 @@ export interface ReviewComment {
   path: string;
   line: number;
   side: 'RIGHT';
+  /** A multi-line comment's first line. */
+  start_line?: number;
+  start_side?: 'RIGHT';
   body: string;
 }
 
@@ -58,12 +61,34 @@ export interface ToolDef {
 
 export interface ChatRequest {
   model: string;
+  /** OpenRouter's fallback list, primary first. */
+  models?: string[];
   messages: ChatMessage[];
   tools: ToolDef[];
 }
 
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  /** USD, as OpenRouter bills it. */
+  cost: number;
+}
+
+export interface ChatResponse {
+  message: AssistantMessage;
+  /** The model that actually served the call, which may be the fallback. */
+  model: string;
+  usage: Usage;
+}
+
+export interface ModelInfo {
+  id: string;
+  supported_parameters?: string[];
+}
+
 export interface ModelPort {
-  chat(req: ChatRequest): Promise<AssistantMessage>;
+  chat(req: ChatRequest): Promise<ChatResponse>;
+  listModels(): Promise<ModelInfo[]>;
 }
 
 export interface Clock {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseRepoConfig } from '../src/repoconfig.ts';
-import { delivery, FakeGitHub, gitFixture, noFindings, openedPayload, ScriptedModel, select, testApp, type Turn } from './harness.ts';
+import { delivery, FakeGitHub, gitFixture, noFindings, openedPayload, ScriptedModel, select, testApp, toolCall, type Turn } from './harness.ts';
 
 const REPO = 'acme/widgets';
 const CONFIG = '.github/ai-review.yml';
@@ -105,7 +105,24 @@ test('path hints for changed paths reach the orchestrator as untrusted data', as
   assert.doesNotMatch(content, /prose only/);
 });
 
-const DEFAULTS = { minSeverity: 'medium', minConfidence: 0.7, maxReviewers: 3, maxComments: 10, maxReviewableLines: 800 } as const;
+test('raised thresholds and a lowered comment cap from the base config apply to findings', async () => {
+  const base = Array.from({ length: 10 }, (_, i) => `const v${i} = ${i};\n`).join('');
+  const head = base.replace('v0 = 0', 'v0 = 1').replace('v9 = 9', 'v9 = 10');
+  const at = (line: number, severity: string) =>
+    ({ title: `bad ${line}`, severity, confidence: 0.9, path: 'src/v.ts', line, evidence: 'wrong' });
+  const { run } = await review(
+    { 'src/v.ts': base, [CONFIG]: 'thresholds:\n  severity: high\nmax_comments: 1\n' }, { 'src/v.ts': head },
+    { orchestrator: [select('correctness')], ...quiet(),
+      correctness: [toolCall('report_findings', { findings: [at(1, 'critical'), at(10, 'high'), at(10, 'medium')] })] },
+  );
+
+  assert.deepEqual(run.configWarnings, []);
+  assert.deepEqual(run.findings.map((f) => [f.line, f.severity, f.outcome]).sort(), [
+    [1, 'critical', 'published'], [10, 'high', 'over_cap'], [10, 'medium', 'below_threshold'],
+  ]);
+});
+
+const DEFAULTS ={ minSeverity: 'medium', minConfidence: 0.7, maxReviewers: 3, maxComments: 10, maxReviewableLines: 800 } as const;
 
 test('the YAML subset: comments, quotes, block and flow lists, maps, document marker, CRLF', () => {
   const { settings, warnings } = parseRepoConfig([

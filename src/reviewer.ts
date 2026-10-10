@@ -1,10 +1,14 @@
 // One focused reviewer: a tool-use loop that ends with a report_findings call.
-import type { ChatMessage, ModelPort, ToolDef } from './ports.ts';
+import type { AssistantMessage, ChatMessage, ToolDef } from './ports.ts';
 import { ToolError, type Source } from './git.ts';
+import { SEVERITIES } from './findings.ts';
 import type { Finding } from './store.ts';
 
-// ponytail: fixed turn cap; per-agent turn and token budgets land with deployment config.
-const MAX_TURNS = 20;
+/** One model call for an agent; the caller picks the model and meters it. */
+export type Chat = (messages: ChatMessage[], tools: ToolDef[]) => Promise<AssistantMessage>;
+
+/** An agent ran out of turns or tokens. A failure, but not one worth a retry. */
+export class BudgetExceeded extends Error {}
 
 export const FOCUSES = ['correctness', 'security', 'performance', 'architecture', 'conciseness'] as const;
 export type Focus = (typeof FOCUSES)[number];
@@ -57,13 +61,17 @@ const TOOLS: ToolDef[] = [
               type: 'object',
               properties: {
                 title: { type: 'string' },
-                severity: { type: 'string', enum: ['critical', 'high', 'medium', 'low'] },
+                severity: { type: 'string', enum: [...SEVERITIES].reverse() },
                 confidence: { type: 'number', minimum: 0, maximum: 1 },
                 path: { type: 'string' },
                 line: { type: 'integer' },
                 start_line: { type: 'integer' },
                 evidence: { type: 'string' },
-                suggested_fix: { type: 'string' },
+                suggested_fix: { type: 'string', description: 'Replacement code for the anchored lines, or prose' },
+                fix_replaces_anchor: {
+                  type: 'boolean',
+                  description: 'True only when suggested_fix is the exact replacement for lines start_line..line (or line)',
+                },
               },
               required: ['title', 'severity', 'confidence', 'path', 'line', 'evidence'],
             },
@@ -80,7 +88,7 @@ export const untrusted = (label: string, text: string) =>
   `<untrusted-data name="${label}">\n${text.replace(/<(\/?)untrusted-data/gi, '<$1untrusted_data')}\n</untrusted-data>`;
 
 export async function runReviewer(opts: {
-  focus: Focus; model: ModelPort; modelId: string; source: Source; diff: string; title: string; body: string;
+  focus: Focus; chat: Chat; maxTurns: number; source: Source; diff: string; title: string; body: string;
 }): Promise<Finding[]> {
   const messages: ChatMessage[] = [
     { role: 'system', content: prompt(opts.focus) },
@@ -91,8 +99,8 @@ export async function runReviewer(opts: {
     },
   ];
 
-  for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const reply = await opts.model.chat({ model: opts.modelId, messages, tools: TOOLS });
+  for (let turn = 0; turn < opts.maxTurns; turn++) {
+    const reply = await opts.chat(messages, TOOLS);
     messages.push(reply);
     if (!reply.tool_calls?.length) {
       messages.push({ role: 'user', content: 'Call report_findings to finish.' });
@@ -122,17 +130,25 @@ export async function runReviewer(opts: {
       messages.push({ role: 'tool', tool_call_id: call.id, content });
     }
   }
-  throw new Error(`reviewer exceeded ${MAX_TURNS} turns`);
+  throw new BudgetExceeded(`over its turn budget of ${opts.maxTurns}`);
 }
 
-// ponytail: shape check only; full schema validation comes with finding validation. The caller retries once.
+/** Schema check; a throw makes the caller retry the reviewer once. */
 function parseFindings(args: any): Finding[] {
   if (!Array.isArray(args?.findings)) throw new Error('report_findings: findings must be an array');
+  const optional = (v: unknown, type: string) => v === undefined || typeof v === type;
   for (const f of args.findings) {
-    const ok = typeof f?.title === 'string' && typeof f.path === 'string' && Number.isInteger(f.line)
-      && typeof f.evidence === 'string' && typeof f.confidence === 'number'
-      && ['critical', 'high', 'medium', 'low'].includes(f.severity);
+    const ok = typeof f?.title === 'string' && f.title.trim() !== '' && typeof f.path === 'string'
+      && Number.isInteger(f.line) && f.line >= 1 && typeof f.evidence === 'string'
+      && typeof f.confidence === 'number' && f.confidence >= 0 && f.confidence <= 1
+      && SEVERITIES.includes(f.severity)
+      && (f.start_line === undefined || (Number.isInteger(f.start_line) && f.start_line >= 1 && f.start_line <= f.line))
+      && optional(f.suggested_fix, 'string') && optional(f.fix_replaces_anchor, 'boolean');
     if (!ok) throw new Error('report_findings: malformed finding');
   }
-  return args.findings;
+  // Only schema fields go on: nothing else the model sends is stored or rendered.
+  return args.findings.map((f: any): Finding => ({
+    title: f.title, severity: f.severity, confidence: f.confidence, path: f.path, line: f.line,
+    start_line: f.start_line, evidence: f.evidence, suggested_fix: f.suggested_fix, fix_replaces_anchor: f.fix_replaces_anchor,
+  }));
 }

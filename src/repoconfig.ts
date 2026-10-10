@@ -1,10 +1,9 @@
 // Per-repo config (.github/ai-review.yml, read at the base SHA): maintainers may only tighten the deployment's settings.
+import { SEVERITIES, type Severity } from './findings.ts';
 import { FOCUSES, type Focus } from './reviewer.ts';
 
 export const REPO_CONFIG_PATH = '.github/ai-review.yml';
 
-const SEVERITIES = ['low', 'medium', 'high', 'critical'] as const;
-export type Severity = (typeof SEVERITIES)[number];
 const ALWAYS_ON: readonly Focus[] = ['correctness', 'security'];
 const MAX_HINTS = 20;
 

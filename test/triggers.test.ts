@@ -11,7 +11,7 @@ function setup(draft = false) {
   github.addPullRequest(REPO, fx.url, pr);
   const model = new ScriptedModel([
     toolCall('report_findings', {
-      findings: [{ title: 'b', severity: 'low', confidence: 0.9, path: 'a.ts', line: 2, evidence: 'b' }],
+      findings: [{ title: 'b', severity: 'high', confidence: 0.9, path: 'a.ts', line: 2, evidence: 'b' }],
     }),
   ]);
   return { fx, pr, ...testApp({ model, github }) };
