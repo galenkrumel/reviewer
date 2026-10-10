@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict';
+import { generateKeyPairSync } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
+import { inspect } from 'node:util';
+import { gitHubApp } from '../src/github.ts';
+import { openRouter } from '../src/openrouter.ts';
 import { delivery, FakeGitHub, gitFixture, openedPayload, ScriptedModel, tempDir, testApp, toolCall } from './harness.ts';
 
 const REPO = 'acme/widgets';
@@ -36,11 +40,12 @@ async function callTools(calls: [string, unknown][]) {
   await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
   await app.drain();
   assert.equal(app.runs()[0]!.status, 'nothing_to_publish');
-  return model.requests.at(-1)!.messages.filter((m) => m.role === 'tool').map((m) => m.content!);
+  const results = model.requests.at(-1)!.messages.filter((m) => m.role === 'tool').map((m) => m.content!);
+  return { results, model };
 }
 
 test('read_file rejects traversal, absolute, missing and non-file paths', async () => {
-  const results = await callTools([
+  const { results } = await callTools([
     ['read_file', { path: '../secret.txt' }],
     ['read_file', { path: 'src/../../secret.txt' }],
     ['read_file', { path: '/etc/passwd' }],
@@ -53,7 +58,7 @@ test('read_file rejects traversal, absolute, missing and non-file paths', async 
 });
 
 test('symlinks do not expose content outside the repo', async () => {
-  const results = await callTools([
+  const { results } = await callTools([
     ['read_file', { path: 'escape' }],
     ['read_file', { path: 'up/secret.txt' }],
     ['list_dir', { path: 'up' }],
@@ -63,23 +68,31 @@ test('symlinks do not expose content outside the repo', async () => {
   assert.ok(!results.join().includes(SECRET));
 });
 
-test('read_file returns a line range at head', async () => {
-  const [range, whole] = await callTools([
+test('read_file returns a line range at head and rejects empty ranges', async () => {
+  const { results: [range, whole, nulls, backwards, pastEnd] } = await callTools([
     ['read_file', { path: 'src/a.ts', start_line: 2, end_line: 3 }],
     ['read_file', { path: 'src/a.ts' }],
+    ['read_file', { path: 'src/a.ts', start_line: null, end_line: null }],
+    ['read_file', { path: 'src/a.ts', start_line: 3, end_line: 1 }],
+    ['read_file', { path: 'src/a.ts', start_line: 5 }],
   ]);
   assert.match(range!, /needle here\nthree\n/);
   assert.ok(!range!.includes('one') && !range!.includes('four'));
   assert.match(whole!, /one\nneedle here\nthree\nfour/);
+  assert.equal(nulls, whole);
+  assert.match(backwards!, /^error: /);
+  assert.match(pastEnd!, /^error: .*4 lines/);
 });
 
 test('grep and list_dir see only the head revision', async () => {
-  const [hits, globbed, baseOnly, root, src] = await callTools([
+  const { results: [hits, globbed, baseOnly, root, src, srcSlash, nullPath] } = await callTools([
     ['grep', { pattern: 'needle' }],
     ['grep', { pattern: 'needle', glob: '**/*.md' }],
     ['grep', { pattern: 'basemarker' }],
     ['list_dir', {}],
     ['list_dir', { path: 'src' }],
+    ['list_dir', { path: 'src/' }],
+    ['list_dir', { path: null }],
   ]);
   assert.match(hits!, /src\/a\.ts:2:needle here/);
   assert.match(hits!, /docs\/notes\.md:1:needle in docs/);
@@ -89,55 +102,71 @@ test('grep and list_dir see only the head revision', async () => {
   assert.ok(!baseOnly!.includes('basemarker:'));
   for (const name of ['docs/', 'src/', 'gone.ts', 'escape', 'up']) assert.ok(root!.includes(name), name);
   assert.match(src!, /a\.ts/);
+  assert.equal(srcSlash, src);
+  assert.equal(nullPath, root);
 });
 
 test('diff is the reviewed base...head diff, optionally for one path', async () => {
-  const { pr, github } = setup();
-  const model = new ScriptedModel([
-    toolCall('diff', {}),
-    toolCall('diff', { path: 'src/a.ts' }),
-    toolCall('diff', { path: '../x' }),
-    toolCall('report_findings', { findings: [] }),
+  const { results: [full, one, bad, unknown], model } = await callTools([
+    ['diff', {}],
+    ['diff', { path: 'src/a.ts' }],
+    ['diff', { path: '../x' }],
+    ['diff', { path: 'nope.ts' }],
   ]);
-  const { app } = testApp({ model, github });
-  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
-  await app.drain();
-
   const reviewed = model.requests[0]!.messages[1]!.content!;
-  const [full, one, bad] = model.requests.at(-1)!.messages.filter((m) => m.role === 'tool').map((m) => m.content!);
   const body = (s: string) => s.slice(s.indexOf('diff --git'), s.lastIndexOf('</untrusted-data>'));
   assert.equal(body(full!), body(reviewed));
   assert.match(one!, /-basemarker\n\+needle here/);
   assert.ok(!one!.includes('docs/notes.md'));
   assert.match(bad!, /^error: /);
+  assert.match(unknown!, /^error: /);
 });
 
 test('credentials never appear in prompts, tool results, logs or run records', async (t) => {
-  const logged: unknown[] = [];
+  const logged: string[] = [];
   for (const m of ['log', 'info', 'warn', 'error', 'debug'] as const) {
-    t.mock.method(console, m, (...args: unknown[]) => void logged.push(args));
+    t.mock.method(console, m, (...args: unknown[]) => void logged.push(inspect(args)));
   }
-  const { pr, github } = setup();
-  const model = new ScriptedModel([
+  const OPENROUTER_KEY = 'sk-or-v1-sentinel-openrouter-key';
+  const TOKEN = 'ghs_fake_sentinel_installation_token';
+  const { privateKey } = generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' },
+  });
+
+  // Real adapters over a faked network: GitHub mints TOKEN, OpenRouter replays turns and then fails.
+  const turns = [
     toolCall('read_file', { path: '../../.git/config' }),
     toolCall('grep', { pattern: 'x', glob: '/etc/*' }),
     toolCall('list_dir', { path: 'nope' }),
     toolCall('diff', {}),
+    toolCall('read_file', { path: 'src/a.ts' }),
     toolCall('report_findings', { findings: [] }),
-  ]);
-  const { app } = testApp({ model, github });
-  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
-  await app.drain();
-  // A run whose git fetch fails records an error.
+  ];
+  const prompts: unknown[] = [];
+  const auth: string[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    auth.push(new Headers(init.headers).get('authorization') ?? '');
+    if (url.startsWith('https://api.github.com/')) return Response.json({ token: TOKEN });
+    prompts.push(JSON.parse(String(init.body)));
+    const turn = turns.shift();
+    return turn ? Response.json({ choices: [{ message: turn }] }) : new Response('', { status: 500 });
+  });
+  const { pr, github } = setup();
+  github.mintToken = gitHubApp('123', privateKey).mintToken;
   github.addPullRequest('acme/broken', 'file:///nonexistent/repo', { ...pr, number: 9 });
-  const { app: broken } = testApp({ model: new ScriptedModel([]), github, allowlist: ['acme/broken'] });
-  await broken.receive(delivery('pull_request', openedPayload('acme/broken', { ...pr, number: 9 })));
-  await broken.drain();
-  assert.equal(broken.runs()[0]!.status, 'failed');
+  const { app } = testApp({ model: openRouter(OPENROUTER_KEY), github, allowlist: [REPO, 'acme/broken'] });
 
-  const token = await github.mintToken(42);
-  const basic = Buffer.from(`x-access-token:${token}`).toString('base64');
-  const recorded = JSON.stringify([model.requests, app.runs(), broken.runs(), logged.map(String)]);
-  assert.ok(!recorded.includes(token));
-  assert.ok(!recorded.includes(basic));
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr))); // reviewed with every tool
+  await app.receive(delivery('pull_request', openedPayload('acme/broken', { ...pr, number: 9 }))); // git fetch fails
+  await app.receive(delivery('pull_request', openedPayload(REPO, { ...pr, number: 10 }))); // OpenRouter fails
+  await app.drain();
+
+  assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish', 'failed', 'failed']);
+  assert.ok(auth.includes(`Bearer ${OPENROUTER_KEY}`)); // the sentinels really were in play
+  const recorded = JSON.stringify([prompts, app.runs(), logged]);
+  const basic = Buffer.from(`x-access-token:${TOKEN}`).toString('base64');
+  const pemLine = privateKey.split('\n')[5]!;
+  for (const secret of [TOKEN, basic, OPENROUTER_KEY, pemLine]) assert.ok(!recorded.includes(secret), secret);
 });
