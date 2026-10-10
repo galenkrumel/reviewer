@@ -103,7 +103,6 @@ export async function openSource(opts: {
     await git('config', 'remote.origin.partialclonefilter', 'blob:none');
   }
   await git('config', 'remote.origin.url', opts.url);
-  // ponytail: no retry/backoff yet; a failed fetch fails the run.
   await git('fetch', '-q', '--filter=blob:none', 'origin', headSha, baseSha);
 
   /** The head tree's entry at path, if any. Symlinks are never followed: a tree stores only the link target. */

@@ -9,6 +9,8 @@ export type Chat = (messages: ChatMessage[], tools: ToolDef[]) => Promise<Assist
 
 /** An agent ran out of turns or tokens. A failure, but not one worth a retry. */
 export class BudgetExceeded extends Error {}
+/** The reviewer's report failed the schema check. */
+export class InvalidReport extends Error {}
 
 export const FOCUSES = ['correctness', 'security', 'performance', 'architecture', 'conciseness'] as const;
 export type Focus = (typeof FOCUSES)[number];
@@ -135,7 +137,7 @@ export async function runReviewer(opts: {
 
 /** Schema check; a throw makes the caller retry the reviewer once. */
 function parseFindings(args: any): Finding[] {
-  if (!Array.isArray(args?.findings)) throw new Error('report_findings: findings must be an array');
+  if (!Array.isArray(args?.findings)) throw new InvalidReport('report_findings: findings must be an array');
   const optional = (v: unknown, type: string) => v === undefined || typeof v === type;
   for (const f of args.findings) {
     const ok = typeof f?.title === 'string' && f.title.trim() !== '' && typeof f.path === 'string'
@@ -144,7 +146,7 @@ function parseFindings(args: any): Finding[] {
       && SEVERITIES.includes(f.severity)
       && (f.start_line === undefined || (Number.isInteger(f.start_line) && f.start_line >= 1 && f.start_line <= f.line))
       && optional(f.suggested_fix, 'string') && optional(f.fix_replaces_anchor, 'boolean');
-    if (!ok) throw new Error('report_findings: malformed finding');
+    if (!ok) throw new InvalidReport('report_findings: malformed finding');
   }
   // Only schema fields go on: nothing else the model sends is stored or rendered.
   return args.findings.map((f: any): Finding => ({

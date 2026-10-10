@@ -220,24 +220,31 @@ export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opene
 
 /** Pass an earlier app's dataDir to simulate a restart on the same volume. */
 export function testApp(opts: {
-  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>;
+  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>; time?: Date;
 }) {
   const github = opts.github ?? new FakeGitHub();
   const dataDir = opts.dataDir ?? tempDir();
   /** Settable: assign clock.time to move the app's clock. */
-  const clock = { time: new Date('2026-01-01T00:00:00Z'), now: () => clock.time };
+  const clock = { time: opts.time ?? new Date('2026-01-01T00:00:00Z'), now: () => clock.time };
+  /** Backoff waits, which resolve at once, and structured log entries. */
+  const sleeps: number[] = [];
+  const logs: Record<string, unknown>[] = [];
   const app = createApp({
     config: {
       webhookSecret: WEBHOOK_SECRET,
       allowlist: opts.allowlist ?? ['acme/widgets'],
       model: 'test/model',
       dataDir,
+      // Scripted turns are per agent, so most tests need jobs to run one at a time.
+      workerConcurrency: 1,
       ...opts.config,
     },
     github,
     model: opts.model,
     clock,
+    sleep: async (ms) => void sleeps.push(ms),
+    log: (entry) => void logs.push(entry),
   });
   after(() => app.close());
-  return { app, github, dataDir, clock };
+  return { app, github, dataDir, clock, sleeps, logs };
 }

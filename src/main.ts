@@ -1,6 +1,7 @@
 // Entry point: deployment config from env, real adapters, HTTP webhook endpoint, in-process worker.
 import { createServer } from 'node:http';
-import { AGENTS, createApp, type OutsidePolicy } from './app.ts';
+import { AGENTS, createApp, type Log, type OutsidePolicy } from './app.ts';
+import { SEVERITIES, type Severity } from './findings.ts';
 import { gitHubApp } from './github.ts';
 import { openRouter } from './openrouter.ts';
 
@@ -23,6 +24,20 @@ function positiveInt(name: string): number | undefined {
   return Number(v);
 }
 
+function minSeverity(): Severity | undefined {
+  const v = process.env.MIN_SEVERITY;
+  if (v === undefined || SEVERITIES.includes(v as Severity)) return v as Severity | undefined;
+  throw new Error(`MIN_SEVERITY must be one of ${SEVERITIES.join(', ')}, not ${v}`);
+}
+
+function minConfidence(): number | undefined {
+  const v = process.env.MIN_CONFIDENCE;
+  if (v === undefined) return undefined;
+  const n = Number(v);
+  if (v.trim() === '' || !(n >= 0 && n <= 1)) throw new Error(`MIN_CONFIDENCE must be a number from 0 to 1, not ${v}`);
+  return n;
+}
+
 /** Per agent: ORCHESTRATOR_MODEL, SECURITY_FALLBACK_MODEL, CORRECTNESS_MAX_TURNS, PERFORMANCE_MAX_TOKENS, ... */
 const agents = Object.fromEntries(AGENTS.map((agent) => {
   const prefix = agent.toUpperCase();
@@ -33,6 +48,10 @@ const agents = Object.fromEntries(AGENTS.map((agent) => {
     maxTokens: positiveInt(`${prefix}_MAX_TOKENS`),
   }];
 }));
+
+/** One JSON line per entry on stdout. */
+const log: Log = (entry) => console.log(JSON.stringify({ time: new Date().toISOString(), ...entry }));
+const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 const app = createApp({
   config: {
@@ -48,17 +67,32 @@ const app = createApp({
     maxReviewableLines: Number(process.env.MAX_REVIEWABLE_LINES) || undefined,
     reviewTokenBudget: Number(process.env.REVIEW_TOKEN_BUDGET) || undefined,
     maxReviewers: process.env.MAX_REVIEWERS ? Number(process.env.MAX_REVIEWERS) : undefined,
+    minSeverity: minSeverity(),
+    minConfidence: minConfidence(),
+    maxComments: positiveInt('MAX_COMMENTS'),
+    workerConcurrency: positiveInt('WORKER_CONCURRENCY'),
+    retentionDays: positiveInt('RETENTION_DAYS'),
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),
   model: openRouter(env('OPENROUTER_API_KEY')),
   clock: { now: () => new Date() },
+  log,
 });
 
 // Refuse to start on a model that can't call tools.
 await app.checkModels();
 
-const kick = () => app.drain().catch((err) => console.error('worker error', err));
+// Startup pruned already; then daily.
+setInterval(() => {
+  try {
+    app.prune();
+  } catch (err) {
+    log({ level: 'error', msg: 'prune failed', error: errorMessage(err) });
+  }
+}, 24 * 3600_000);
+
+const kick = () => app.drain().catch((err) => log({ level: 'error', msg: 'worker error', error: errorMessage(err) }));
 
 // GitHub caps webhook payloads at 25 MB; anything bigger is not GitHub.
 const MAX_BODY = 25 * 1024 * 1024;
@@ -77,14 +111,14 @@ createServer((req, res) => {
   req.on('end', async () => {
     try {
       const { status, ignored } = await app.receive({ headers: req.headers, body: Buffer.concat(chunks) });
-      if (ignored) console.log(`ignored delivery ${req.headers['x-github-delivery']}: ${ignored}`);
+      if (ignored) log({ level: 'info', msg: 'ignored delivery', delivery: req.headers['x-github-delivery'], reason: ignored });
       res.writeHead(status).end();
       kick();
     } catch (err) {
-      console.error('webhook error', err);
+      log({ level: 'error', msg: 'webhook error', delivery: req.headers['x-github-delivery'], error: errorMessage(err) });
       res.writeHead(500).end();
     }
   });
-}).listen(Number(process.env.PORT ?? 3000), () => console.log(`listening on ${process.env.PORT ?? 3000}`));
+}).listen(Number(process.env.PORT ?? 3000), () => log({ level: 'info', msg: 'listening', port: Number(process.env.PORT ?? 3000) }));
 
 kick();
