@@ -1,7 +1,9 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { addedLines, openSource } from './git.ts';
+import { matchesGlob } from 'node:path';
+import { addedLines, openSource, ToolError } from './git.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
+import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { runReviewer } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import { openStore, type Job, type RecordedFinding, type RecordedFocus } from './store.ts';
@@ -104,10 +106,28 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     });
     // Superseded runs keep that status and stop: checked between steps and right before publishing.
     if (store.superseded(job.id)) return;
+    // Read at the base SHA only, so a PR cannot change its own review by editing the config.
+    let configText: string | undefined;
+    const configWarnings: string[] = [];
+    try {
+      configText = await source.fileAtBase(REPO_CONFIG_PATH);
+    } catch (err) {
+      if (!(err instanceof ToolError)) throw err;
+      configWarnings.push(`${err.message}; ignored`);
+    }
+    // ponytail: severity, confidence and comment-cap defaults are fixed until finding validation (#8) makes them deployment config.
+    const parsed = parseRepoConfig(configText, {
+      minSeverity: 'medium', minConfidence: 0.7, maxComments: 10,
+      maxReviewers, maxReviewableLines: config.maxReviewableLines ?? 800,
+    });
+    const settings = parsed.settings;
+    configWarnings.push(...parsed.warnings);
     const files = await source.changedFiles();
-    const scope = selectFiles(files, await source.markedAtBase(files.map((f) => f.path)),
-      config.reviewTokenBudget ?? 50_000);
-    const maxLines = config.maxReviewableLines ?? 800;
+    const paths = files.map((f) => f.path);
+    const excluded = await source.markedAtBase(paths);
+    for (const p of paths) if (settings.exclude.some((glob) => matchesGlob(p, glob))) excluded.add(p);
+    const scope = selectFiles(files, excluded, config.reviewTokenBudget ?? 50_000);
+    const maxLines = settings.maxReviewableLines;
 
     // Comments anchor only against the reviewed files' diff, so excluded and skipped files are never commented on.
     let diff = '';
@@ -118,7 +138,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       diff = await source.reviewDiff(scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
       let picks: Pick[];
       try {
-        picks = await runOrchestrator({ model, modelId: config.model, files: scope.reviewed, title: job.title, body: job.body });
+        picks = await runOrchestrator({
+          model, modelId: config.model, files: scope.reviewed, title: job.title, body: job.body, pathHints: settings.pathHints,
+        });
       } catch (err) {
         // The fallback's path match sees every changed file, excluded ones (lockfiles) included.
         picks = fallbackPicks(files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
@@ -127,7 +149,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
 
       const changed = addedLines(diff);
       // Sequential: one reviewer's failure never stops the others.
-      for (const { focus, reason } of selectFocuses(picks, scope.reviewed.map((f) => f.path), maxReviewers)) {
+      // Disabled focuses leave before the cap, so they take no slot. The always-on ones can't be disabled.
+      const enabled = picks.filter((p) => !settings.disabledFocuses.has(p.focus));
+      for (const { focus, reason } of selectFocuses(enabled, scope.reviewed.map((f) => f.path), settings.maxReviewers)) {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({ focus, model, modelId: config.model, source, diff, title: job.title, body: job.body });
         try {
@@ -147,7 +171,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       .filter((f) => f.outcome === 'published')
       .map((f) => ({ path: f.path, line: f.line, side: 'RIGHT', body: commentBody(f) }));
 
-    const record = { findings, focuses, fallbackUsed, orchestratorError };
+    const record = { findings, focuses, fallbackUsed, orchestratorError, configWarnings };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
     if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
