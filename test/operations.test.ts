@@ -192,6 +192,40 @@ test('with a concurrency of 2, two queued jobs run at the same time', async () =
   assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish', 'nothing_to_publish']);
 });
 
+test('a job enqueued while another runs starts at once when a worker slot is free', async () => {
+  const { fx, pr, github } = setup();
+  github.addPullRequest(REPO, fx.url, { ...pr, number: 8 });
+  let inFlight = 0;
+  let most = 0;
+  const { app } = testApp({
+    model: new ScriptedModel([
+      async () => {
+        most = Math.max(most, ++inFlight);
+        // The second worker found the queue empty and stopped; this delivery must start one again.
+        await app.receive(delivery('pull_request', openedPayload(REPO, { ...pr, number: 8 })));
+        void app.drain();
+        for (let i = 0; i < 1000 && inFlight < 2; i++) await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        return report([]);
+      },
+      async () => {
+        most = Math.max(most, ++inFlight);
+        inFlight--;
+        return report([]);
+      },
+    ]),
+    github,
+    config: { workerConcurrency: 2 },
+  });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+  await app.drain();
+
+  assert.equal(most, 2);
+  assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish', 'nothing_to_publish']);
+});
+
 test('worker concurrency must be a positive integer', () => {
   assert.throws(() => testApp({ model: new ScriptedModel({}), config: { workerConcurrency: 0 } }), /workerConcurrency/);
 });

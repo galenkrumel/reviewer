@@ -226,10 +226,18 @@ export function openStore(dataDir: string, clock: Clock) {
     prune(before: Date) {
       const old = `SELECT id FROM runs WHERE created_at < ? AND status NOT IN ('queued', 'running')`;
       const cutoff = before.toISOString();
-      for (const table of ['findings', 'focuses', 'invocations', 'orchestrations']) {
-        db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
+      // One transaction, so a crash can't leave a run with part of its record.
+      db.exec('BEGIN');
+      try {
+        for (const table of ['findings', 'focuses', 'invocations', 'orchestrations']) {
+          db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
+        }
+        db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
       }
-      db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
     },
 
     /** The run-record query interface. */

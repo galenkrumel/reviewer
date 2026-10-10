@@ -1,6 +1,6 @@
 // Entry point: deployment config from env, real adapters, HTTP webhook endpoint, in-process worker.
 import { createServer } from 'node:http';
-import { AGENTS, createApp, type Log, type OutsidePolicy } from './app.ts';
+import { AGENTS, createApp, errorMessage, type Log, type OutsidePolicy } from './app.ts';
 import { SEVERITIES, type Severity } from './findings.ts';
 import { gitHubApp } from './github.ts';
 import { openRouter } from './openrouter.ts';
@@ -51,7 +51,7 @@ const agents = Object.fromEntries(AGENTS.map((agent) => {
 
 /** One JSON line per entry on stdout. */
 const log: Log = (entry) => console.log(JSON.stringify({ time: new Date().toISOString(), ...entry }));
-const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+const port = Number(process.env.PORT ?? 3000);
 
 const app = createApp({
   config: {
@@ -119,6 +119,6 @@ createServer((req, res) => {
       res.writeHead(500).end();
     }
   });
-}).listen(Number(process.env.PORT ?? 3000), () => log({ level: 'info', msg: 'listening', port: Number(process.env.PORT ?? 3000) }));
+}).listen(port, () => log({ level: 'info', msg: 'listening', port }));
 
 kick();

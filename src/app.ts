@@ -142,6 +142,7 @@ export function createApp(deps: {
   }
 
   /** Retry with backoff, logging every failure; the last one is rethrown as a StepError. */
+  // ponytail: retries every error, 4xx included (~42s wasted on a 422); classify transient errors if that hurts.
   async function retrying<T>(job: Job, step: 'fetch' | 'publish', fn: () => Promise<T>): Promise<T> {
     for (let attempt = 1; ; attempt++) {
       try {
@@ -323,7 +324,7 @@ export function createApp(deps: {
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(live, job)) return finishStale(job, live, record);
-    const review = {
+    const newReview = {
       commit_id: job.headSha,
       event: 'COMMENT' as const,
       body: summary(job, comments.length, { scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed }),
@@ -335,7 +336,10 @@ export function createApp(deps: {
       reviewId = await retrying(job, 'publish', async () => {
         if (store.superseded(job.id)) return;
         const posted = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
-        return posted?.id ?? (await github.createReview(token, job.repo, job.pr, review)).id;
+        if (posted) return posted.id;
+        // Another worker may have superseded this run while the list was loading.
+        if (store.superseded(job.id)) return;
+        return (await github.createReview(token, job.repo, job.pr, newReview)).id;
       });
     } catch (err) {
       // Keep the findings and costs: only the post is missing.
@@ -350,17 +354,26 @@ export function createApp(deps: {
         await reviewJob(job);
       } catch (err) {
         // Errors come from git, GitHub or the model and carry no credentials.
-        if (!(err instanceof StepError)) logFailure(job, 'run', err, true);
-        store.finish(job.id, 'failed', { error: errorMessage(err) });
+        if (err instanceof StepError) store.finish(job.id, 'failed', { error: err.message });
+        else {
+          logFailure(job, 'run', err, true);
+          store.finish(job.id, 'failed', { error: `run: ${errorMessage(err)}` });
+        }
       }
     }
   }
 
-  let draining: Promise<void> | undefined;
-  /** Process queued jobs, `workerConcurrency` at a time, until none are left, including ones enqueued meanwhile. */
+  const workers = new Set<Promise<void>>();
+  /**
+   * Top the workers back up to `workerConcurrency` and wait for them to empty the queue, including jobs enqueued
+   * meanwhile. A worker stops when it finds the queue empty, so every enqueue must be followed by a drain.
+   */
   function drain(): Promise<void> {
-    return (draining ??= Promise.all(Array.from({ length: concurrency }, worker)).then(() => {})
-      .finally(() => (draining = undefined)));
+    while (workers.size < concurrency) {
+      const w: Promise<void> = worker().finally(() => workers.delete(w));
+      workers.add(w);
+    }
+    return Promise.all(workers).then(() => {});
   }
 
   return { receive, drain, checkModels, prune, runs: store.runs, close: store.close };
@@ -373,7 +386,7 @@ const DAY_MS = 24 * 3600_000;
 const RETRY_ATTEMPTS = 4;
 const BACKOFF_MS = 2000;
 
-const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
+export const errorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 /** Whether the PR is open, ready, and at the job's head and base. */
 const isCurrent = (live: PullRequest, job: Job) =>
