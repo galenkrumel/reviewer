@@ -167,6 +167,50 @@ for (const [kind, older] of [['fetchable', 'base'], ['unfetchable', 'a'.repeat(4
   });
 }
 
+test('a late delivery at the run cap still gets the current head reviewed', async () => {
+  const { fx, pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([report()]), github, config: { runCap: 2 } });
+
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, { ...pr, headSha: fx.baseSha })));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 1);
+  assert.equal(app.runs().at(-1)!.status, 'published');
+});
+
+test('a labeled re-review superseded by a late delivery still happens', async () => {
+  const { fx, pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([report(), report()]), github });
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr)));
+  await app.drain();
+
+  await app.receive(delivery('pull_request', prPayload('labeled', REPO, pr, { label: { name: 'ai-review' } })));
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, { ...pr, headSha: fx.baseSha })));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 2);
+  assert.deepEqual(app.runs().map((r) => [r.event, r.status]), [
+    ['pull_request.synchronize', 'published'], ['pull_request.labeled', 'superseded'],
+    ['pull_request.synchronize', 'stale'], ['pull_request.labeled', 'published'],
+  ]);
+});
+
+test('a late delivery never gets a revision reviewed that gating turned away', async () => {
+  const { fx, pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([report()]), github });
+  const outsider = (labels: { name: string }[]) => ({ author_association: 'CONTRIBUTOR', labels });
+
+  // The label was removed, then B was pushed: B is not eligible. A was delivered while the label was on.
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pr, {}, outsider([]))));
+  const a = { ...pr, headSha: fx.baseSha };
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, a, {}, outsider([{ name: 'ai-review' }]))));
+  await app.drain();
+
+  assert.equal(github.reviews.length, 0);
+  assert.deepEqual(app.runs().map((r) => [r.headSha, r.status]), [[fx.baseSha, 'stale']]);
+});
+
 test('synchronize for A then B, delivered in order, reviews only B', async () => {
   const { fx, pr, github } = setup();
   const a = { ...pr, headSha: fx.baseSha };

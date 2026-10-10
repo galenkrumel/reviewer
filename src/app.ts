@@ -77,7 +77,9 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const gated = authorReason(pr, policy, label);
     if (gated) return { status: 202, ignored: gated };
 
-    const capped = enqueue({
+    // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
+    const capped = store.countRuns(repo, pr.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
+    store.enqueue({
       deliveryId: String(d.headers['x-github-delivery'] ?? ''),
       event: `pull_request.${payload.action}`,
       repo,
@@ -87,28 +89,17 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
       baseSha: pr.base.sha,
       title: pr.title ?? '',
       body: pr.body ?? '',
-    });
+    }, capped ? 'skipped' : 'queued');
     return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
-  }
-
-  /** Enqueue, or record as skipped over the run cap. Returns whether it was capped. */
-  function enqueue(job: Omit<Job, 'id'>): boolean {
-    // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
-    const capped = store.countRuns(job.repo, job.pr, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
-    store.enqueue(job, capped ? 'skipped' : 'queued');
-    return capped;
   }
 
   /**
    * Record the run stale. Deliveries can arrive out of order, so a late one for an old revision may have superseded
-   * the job for the PR's current one: queue the live revision, unless it is already queued, running or reviewed.
+   * the job for the PR's current one: revive that job. Only a job that was enqueued is revived, so gating still holds.
    */
-  function stale(job: Job, live: PullRequest, record?: Parameters<typeof store.finish>[2]) {
-    store.finish(job.id, 'stale', record); // before enqueuing, which would otherwise mark this run superseded
-    if (live.state !== 'open' || live.draft) return;
-    const { id, ...rest } = job;
-    // Not a labeled event, so the duplicate check applies.
-    enqueue({ ...rest, event: 'requeue', headSha: live.headSha, baseSha: live.baseSha });
+  function finishStale(job: Job, live: PullRequest, record?: Parameters<typeof store.finish>[2]) {
+    store.finish(job.id, 'stale', record); // before reviving, which would otherwise mark this run superseded
+    if (live.state === 'open' && !live.draft) store.revive(job.repo, job.pr, live.headSha, live.baseSha);
   }
 
   async function reviewJob(job: Job) {
@@ -117,8 +108,8 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
     if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
     // Before fetching: a late delivery's head may have been force-pushed away, and reviewing it would be wasted.
-    const before = await github.getPullRequest(token, job.repo, job.pr);
-    if (!at(before, job)) return stale(job, before);
+    const start = await github.getPullRequest(token, job.repo, job.pr);
+    if (!isCurrent(start, job)) return finishStale(job, start);
     const source = await openSource({
       dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
       headSha: job.headSha, baseSha: job.baseSha,
@@ -176,7 +167,7 @@ export function createApp(deps: { config: AppConfig; github: GitHubPort; model: 
     }
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
-    if (!at(live, job)) return stale(job, live, record);
+    if (!isCurrent(live, job)) return finishStale(job, live, record);
     if (store.superseded(job.id)) return;
     const { id } = await github.createReview(token, job.repo, job.pr, {
       commit_id: job.headSha,
@@ -210,7 +201,7 @@ const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 const DAY_MS = 24 * 3600_000;
 
 /** Whether the PR is open, ready, and at the job's head and base. */
-const at = (live: PullRequest, job: Job) =>
+const isCurrent = (live: PullRequest, job: Job) =>
   live.state === 'open' && !live.draft && live.headSha === job.headSha && live.baseSha === job.baseSha;
 
 /** Why a delivery starts no review, or undefined when it should. Drafts are never reviewed. */
