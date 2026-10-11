@@ -12,7 +12,9 @@ export type RunStatus =
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
-export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap';
+export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
+  /** On a line unchanged since a head that was already reviewed. */
+  | 'already_reviewed';
 
 export interface Finding {
   title: string;
@@ -114,6 +116,10 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       warning TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS skipped_files (
+      run_id INTEGER NOT NULL REFERENCES runs(id),
+      path TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS invocations (
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
@@ -176,6 +182,19 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     /**
+     * The head of the PR's latest run on this base where every reviewer finished and no file was skipped for budget,
+     * unless it is this head. Otherwise a PR could pad one push to get a file skipped, then never have it reviewed.
+     */
+    lastReviewedHead(repo: string, pr: number, baseSha: string, headSha: string): string | undefined {
+      const row = db.prepare(`SELECT head_sha FROM runs r WHERE repo = ? AND pr = ? AND base_sha = ? AND head_sha != ?
+        AND status IN ('published', 'nothing_to_publish')
+        AND NOT EXISTS (SELECT 1 FROM focuses WHERE run_id = r.id AND json_extract(data, '$.status') = 'failed')
+        AND NOT EXISTS (SELECT 1 FROM skipped_files WHERE run_id = r.id)
+        ORDER BY id DESC LIMIT 1`).get(repo, pr, baseSha, headSha) as any;
+      return row?.head_sha;
+    },
+
+    /**
      * Re-queue a copy of the PR's latest job at these SHAs if that job was superseded: it passed gating and the cap
      * at delivery but never finished. Once copied it is no longer the latest, so each is revived at most once.
      */
@@ -205,12 +224,14 @@ export function openStore(dataDir: string, clock: Clock) {
 
     finish(id: number, status: RunStatus, opts: {
       reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
-      invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string;
+      invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string; skipped?: string[];
     } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
       const insertFocus = db.prepare('INSERT INTO focuses (run_id, data) VALUES (?, ?)');
       for (const f of opts.focuses ?? []) insertFocus.run(id, JSON.stringify(f));
+      const insertSkipped = db.prepare('INSERT INTO skipped_files (run_id, path) VALUES (?, ?)');
+      for (const path of opts.skipped ?? []) insertSkipped.run(id, path);
       const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
       for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
       if (opts.fallbackUsed !== undefined) {
@@ -237,7 +258,7 @@ export function openStore(dataDir: string, clock: Clock) {
       // One transaction, so a crash can't leave a run with part of its record.
       db.exec('BEGIN');
       try {
-        for (const table of ['findings', 'focuses', 'invocations', 'orchestrations']) {
+        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'orchestrations']) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);

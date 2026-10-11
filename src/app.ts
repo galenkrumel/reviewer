@@ -264,8 +264,18 @@ export function createApp(deps: {
     const focuses: RecordedFocus[] = [];
     const invocations: RecordedInvocation[] = [];
     let orchestratorError: string | undefined;
-    if (scope.reviewed.length) {
-      diff = await source.reviewDiff(scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
+    const reviewedPaths = scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
+    if (scope.reviewed.length) diff = await source.reviewDiff(reviewedPaths);
+    // After a push on the same base, only what changed since the last full review is open to comment.
+    // A label re-review asks for the whole PR again.
+    const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewedHead(job.repo, job.pr, job.baseSha, job.headSha);
+    let newDiff = last === undefined ? undefined : await source.diffSince(last, reviewedPaths);
+    // The token budget only covered the PR diff. A bigger diff since then (a large revert) gets a full review instead.
+    if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
+    const since = newDiff === undefined ? undefined : last;
+    const fresh = newDiff === undefined ? undefined : addedLines(newDiff);
+    // Nothing added since then (a deletion has no line to comment on): no reviewer is worth paying for.
+    if (scope.reviewed.length && (!fresh || [...fresh.values()].some((lines) => lines.size))) {
       let picks: Pick[];
       try {
         picks = await runOrchestrator({
@@ -286,7 +296,7 @@ export function createApp(deps: {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
           focus, chat: meteredChat(focus, invocations), maxTurns: agentConfig(focus).maxTurns,
-          source, diff, title: job.title, body: job.body,
+          source, diff, newDiff, title: job.title, body: job.body,
         });
         const failed = (err: unknown, final: boolean) =>
           logFailure(job, err instanceof InvalidReport ? 'validation' : 'reviewer', err, final, { focus });
@@ -310,12 +320,12 @@ export function createApp(deps: {
     const changed = addedLines(diff);
     const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
       minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
-    });
+    }, fresh);
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
 
-    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError };
+    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
     if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
@@ -327,7 +337,9 @@ export function createApp(deps: {
     const newReview = {
       commit_id: job.headSha,
       event: 'COMMENT' as const,
-      body: summary(job, comments.length, { scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed }),
+      body: summary(job, comments.length, {
+        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since,
+      }),
       comments,
     };
     let reviewId: number | undefined;
@@ -428,7 +440,7 @@ function pathList(paths: string[], sep: string, max: number): string {
 const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
 
 function summary(job: Job, count: number, notes: {
-  scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean;
+  scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string;
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -441,6 +453,7 @@ function summary(job: Job, count: number, notes: {
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,
+    notes.since && `Comments only on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed.`,
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,

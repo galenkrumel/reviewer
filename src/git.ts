@@ -53,6 +53,8 @@ export interface Source {
   diff(path?: unknown): Promise<string>;
   /** The PR diff limited to the given paths: what the reviewers are given and what comments anchor against. */
   reviewDiff(paths: string[]): Promise<string>;
+  /** Like reviewDiff, but from an earlier head to this one; undefined if that head can't be fetched. */
+  diffSince(sha: string, paths: string[]): Promise<string | undefined>;
   changedFiles(): Promise<FileChange[]>;
   /** The paths marked linguist-generated or linguist-vendored by .gitattributes at the base SHA. */
   markedAtBase(paths: string[]): Promise<Set<string>>;
@@ -116,12 +118,24 @@ export async function openSource(opts: {
     return e?.name === path ? e : undefined;
   }
 
+  const diff = (revs: string[], paths: string[]) => git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '-M',
+    '--no-ext-diff', '--no-textconv', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', ...revs, '--', ...paths);
+
   return {
     // ponytail: pathspecs ride in argv; tens of thousands of reviewed files would hit ARG_MAX.
     // quotePath off keeps non-ASCII paths unquoted, so addedLines can key on them. Literal pathspecs keep
     // names like `[id].ts` from acting as globs; callers pass both sides of a rename so -M still pairs them.
-    reviewDiff: (paths) => git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '-M', '--no-ext-diff', '--no-textconv',
-      '--no-color', '--src-prefix=a/', '--dst-prefix=b/', range, '--', ...paths),
+    reviewDiff: (paths) => diff([range], paths),
+
+    async diffSince(sha, paths) {
+      try {
+        await git('cat-file', '-e', `${sha}^{commit}`);
+      } catch {
+        // A force-push may have removed it from GitHub too; then the whole PR is reviewed again.
+        try { await git('fetch', '-q', '--filter=blob:none', 'origin', sha); } catch { return undefined; }
+      }
+      return diff([sha, headSha], paths);
+    },
 
     async changedFiles() {
       // -z records: "added\tdeleted\tpath\0", or for a rename "added\tdeleted\t\0old\0new\0". Binary files show "-".

@@ -30,7 +30,13 @@ Use read_file, grep, list_dir and diff to see surrounding code. When finished, c
 Each finding is a comment a busy developer reads on GitHub, so write plainly:
 - title: what goes wrong, in a few plain words.
 - evidence: start with what goes wrong for a user or caller, then why. One claim per sentence, short sentences, no asides. Use the code's own names; explain any other term.
-- suggested_fix: the one fix you recommend, not a list of options.`;
+- suggested_fix: the one fix you recommend, not a list of options.
+Judge severity by realistic impact, not the worst case imaginable:
+- critical: an exploitable security hole, or data loss or corruption in normal use.
+- high: breaks a feature or exposes data under realistic conditions.
+- medium: wrong behavior in an edge case, or under unusual but plausible conditions.
+- low: unlikely, cosmetic, or only matters at a much larger scale.
+When a changes-since-last-review block is present, the rest of the diff was already reviewed: read it for context, and report only problems on lines that block adds.`;
 
 const tool = (name: string, description: string, properties: object, required: string[] = []): ToolDef =>
   ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } });
@@ -95,13 +101,17 @@ export const untrusted = (label: string, text: string) =>
 
 export async function runReviewer(opts: {
   focus: Focus; chat: Chat; maxTurns: number; source: Source; diff: string; title: string; body: string;
+  /** The diff since the last reviewed head, when there is one. */
+  newDiff?: string;
 }): Promise<Finding[]> {
   const messages: ChatMessage[] = [
     { role: 'system', content: prompt(opts.focus) },
     {
       role: 'user',
-      content: [untrusted('pr-title', opts.title), untrusted('pr-body', opts.body), untrusted('diff', opts.diff)]
-        .join('\n\n'),
+      content: [
+        untrusted('pr-title', opts.title), untrusted('pr-body', opts.body), untrusted('diff', opts.diff),
+        ...(opts.newDiff === undefined ? [] : [untrusted('changes-since-last-review', opts.newDiff)]),
+      ].join('\n\n'),
     },
   ];
 

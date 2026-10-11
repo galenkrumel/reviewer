@@ -148,7 +148,7 @@ Before publishing, comment text is sanitized: `@`-mentions are neutralized, and 
 ### 7.1 Finding schema (`report_findings` arguments)
 
 - `title`: concise and specific.
-- `severity`: `critical | high | medium | low`.
+- `severity`: `critical | high | medium | low`, judged by realistic impact: `critical` is an exploitable security hole or data loss in normal use; `high` breaks a feature or exposes data under realistic conditions; `medium` is wrong behavior in an edge case or under unusual but plausible conditions; `low` is unlikely, cosmetic, or matters only at much larger scale.
 - `confidence`: 0–1.
 - `path`, `line` (and optional `start_line`): a location in the head revision.
 - `evidence`: the concrete issue and why it is a defect or a meaningful risk.
@@ -158,12 +158,13 @@ Before publishing, comment text is sanitized: `@`-mentions are neutralized, and 
 
 1. Schema-valid.
 2. The anchor falls on a line added or modified in the reviewed diff.
+   - **Incremental after a push:** when an earlier head on the same base was reviewed with no failed focus and no file skipped for budget, the anchor must also be on a line added or modified since that head. Reviewers see the full diff for context plus the changes since that head, and are told to report only on those. A push that adds no lines runs no reviewers. A label re-review, a new base, an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
 3. `severity ≥ medium` **and** `confidence ≥ 0.7`. Both thresholds are configurable.
 4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one. The higher severity × confidence finding is kept, and all contributing focuses are noted.
 5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff.
 6. **Cap:** at most `max_comments` (default 10) per review, ranked by severity × confidence.
 
-Findings that fail validation are omitted from the review. Their outcome (`unanchorable`, `below_threshold`, `merged`, `duplicate`, `over_cap`) is recorded in run metadata.
+Findings that fail validation are omitted from the review. Their outcome (`unanchorable`, `already_reviewed`, `below_threshold`, `merged`, `duplicate`, `over_cap`) is recorded in run metadata.
 
 ## 8. Large PRs
 
@@ -182,7 +183,8 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 ### 9.2 Summary body
 
 - The reviewed revisions: `head@<sha7>`, `base@<sha7>`, followed by the result (how many issues were commented inline).
-- The names of the focuses that ran. Fallback selection is noted where used. Selection reasons stay in the run record: they are PR-influenced, and the names are enough for a reader.
+- The names of the focuses that ran. Fallback selection is noted where used.
+- On an incremental review, the earlier head whose changes were already reviewed. Selection reasons stay in the run record: they are PR-influenced, and the names are enough for a reader.
 - Any focuses that failed.
 - Any skipped files or oversized-PR note.
 - A hidden marker: `<!-- ai-review:{owner}/{repo}#{pr}:{head}:{base} -->`.
