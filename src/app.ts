@@ -54,6 +54,8 @@ export interface AppConfig {
   workerConcurrency?: number;
   /** Finished run records older than this are pruned. Default 90. */
   retentionDays?: number;
+  /** Approve a clean run once every thread this app started is resolved. Off by default. */
+  approveWhenClean?: boolean;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -67,7 +69,7 @@ export interface Delivery {
 export type Log = (entry: Record<string, unknown>) => void;
 
 /** Where a run failed. `run` is anything outside the named steps (a token mint, a PR lookup, a git read). */
-type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'publish' | 'run';
+type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'threads' | 'publish' | 'run';
 
 /** A failure already logged, its message prefixed with the step. */
 class StepError extends Error {}
@@ -328,7 +330,14 @@ export function createApp(deps: {
     const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
-    if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
+    // Clean: something was reviewed, every reviewer finished, nothing went unreviewed and nothing is left to say.
+    const clean = comments.length === 0 && scope.reviewed.length > 0 && !scope.skipped.length && !scope.binary.length
+      && !anyFailed;
+    // Earlier comments still count until someone resolves their threads: a later run may only have seen new lines.
+    // If the threads can't be read, the run simply doesn't approve.
+    const approve = clean && config.approveWhenClean === true
+      && await github.unresolvedThreads(token, job.repo, job.pr).catch((err) => (logFailure(job, 'threads', err, false), -1)) === 0;
+    if (!approve && comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
       return store.finish(job.id, 'nothing_to_publish', record);
     }
 
@@ -336,9 +345,9 @@ export function createApp(deps: {
     if (!isCurrent(live, job)) return finishStale(job, live, record);
     const newReview = {
       commit_id: job.headSha,
-      event: 'COMMENT' as const,
+      event: approve ? 'APPROVE' as const : 'COMMENT' as const,
       body: summary(job, comments.length, {
-        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since,
+        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
       }),
       comments,
     };
@@ -440,7 +449,7 @@ function pathList(paths: string[], sep: string, max: number): string {
 const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
 
 function summary(job: Job, count: number, notes: {
-  scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string;
+  scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -449,7 +458,8 @@ function summary(job: Job, count: number, notes: {
       + `${notes.splitAbove}-line limit. Consider splitting it.** Directories involved: ${
         pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\`: `
-      + (count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented inline.`),
+      + (notes.approve ? 'no issues found, and every earlier comment is resolved. Approved.'
+        : count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented inline.`),
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,

@@ -162,6 +162,29 @@ test('a diff since the last review that is bigger than the PR diff gets a full r
   assert.deepEqual(outcomes(run), [[5, 'published']]);
 });
 
+test('a clean run approves only when approvals are on and every earlier thread is resolved', async () => {
+  const clean = async (config: Partial<AppConfig>, unresolved: number, correctness = [noFindings()]) => {
+    const { pr, github } = setup();
+    github.unresolved.set(`${REPO}#7`, unresolved);
+    const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness, security: [noFindings()] });
+    const { app } = testApp({ model, github, config });
+    await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+    await app.drain();
+    return { review: github.reviews[0]?.review, status: app.runs()[0]!.status };
+  };
+
+  const approved = await clean({ approveWhenClean: true }, 0);
+  assert.equal(approved.review?.event, 'APPROVE');
+  assert.deepEqual(approved.review?.comments, []);
+  assert.match(approved.review!.body, /no issues found, and every earlier comment is resolved\. Approved\./);
+  assert.equal(approved.status, 'published');
+
+  // Off by default, an open thread, or a finding: no approval.
+  assert.deepEqual(await clean({}, 0), { review: undefined, status: 'nothing_to_publish' });
+  assert.deepEqual(await clean({ approveWhenClean: true }, 1), { review: undefined, status: 'nothing_to_publish' });
+  assert.equal((await clean({ approveWhenClean: true }, 0, [report(f(5))])).review?.event, 'COMMENT');
+});
+
 test('a push that only deletes lines runs no reviewers', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()] });

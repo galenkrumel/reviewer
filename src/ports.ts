@@ -21,7 +21,8 @@ export interface ReviewComment {
 
 export interface NewReview {
   commit_id: string;
-  event: 'COMMENT';
+  /** APPROVE only when approvals are enabled and the run is clean; never REQUEST_CHANGES. */
+  event: 'COMMENT' | 'APPROVE';
   body: string;
   comments: ReviewComment[];
 }
@@ -34,6 +35,8 @@ export interface GitHubPort {
   /** Reviews this app posted on the PR; anyone else's are left out, so nobody can forge the marker. */
   listReviews(token: string, repo: string, number: number): Promise<{ id: number; body: string }[]>;
   createReview(token: string, repo: string, number: number, review: NewReview): Promise<{ id: number }>;
+  /** How many review threads this app started on the PR are still unresolved. */
+  unresolvedThreads(token: string, repo: string, number: number): Promise<number>;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).
