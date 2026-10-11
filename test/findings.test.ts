@@ -209,6 +209,17 @@ test('an incremental run does not approve over a finding it held back, or on a d
   assert.equal(await second({ [PATH]: 'keep\n' + lines(59) }, [noFindings()]), undefined);
 });
 
+test('a finding that is dropped rather than posted still blocks approval', async () => {
+  const { pr, github } = setup();
+  // Line 1 is unchanged, so the finding can't be anchored; it is above the threshold all the same.
+  const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [report(f(1))], security: [noFindings()] });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  assert.deepEqual(outcomes(app.runs()[0]!), [[1, 'unanchorable']]);
+  assert.equal(github.reviews.length, 0);
+});
+
 test('an incremental run does not approve after an earlier run dropped findings for the comment cap', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({

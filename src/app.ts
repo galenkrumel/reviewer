@@ -330,12 +330,13 @@ export function createApp(deps: {
     const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
-    // Clean: reviewers ran and all finished, nothing went unreviewed, and nothing worth posting was found or held back.
+    // Clean: reviewers ran and all finished, nothing went unreviewed, and every finding fell below the threshold.
+    // Any other outcome (unanchorable, duplicate, already_reviewed, ...) is a problem a reviewer still sees.
     // A push that runs no reviewers (deletions only) is never clean: a deleted check is what it would hide.
-    // Held back: a finding set aside on an already-reviewed line, or, on an incremental run, one an earlier run
-    // dropped for the comment cap. Neither ever became a thread to resolve.
-    const clean = comments.length === 0 && focuses.length > 0 && !anyFailed && !scope.skipped.length && !scope.binary.length
-      && !findings.some((f) => f.outcome === 'already_reviewed')
+    // On an incremental run, an earlier run may have dropped findings for the comment cap: they never became threads.
+    // ponytail: that check reads run records, which are pruned after retentionDays; a PR busy for longer can lose them.
+    const clean = focuses.length > 0 && !anyFailed && !scope.skipped.length && !scope.binary.length
+      && findings.every((f) => f.outcome === 'below_threshold')
       && !(since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha));
     // Earlier comments still count until someone resolves their threads: a later run may only have seen new lines.
     // If the threads can't be read, the run simply doesn't approve.
