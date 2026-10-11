@@ -57,5 +57,30 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       const r = await api(token, 'POST', `/repos/${repo}/pulls/${number}/reviews`, review);
       return { id: r.id };
     },
+    async unresolvedThreads(token, repo, number) {
+      // GraphQL names a bot by its slug; REST appends [bot].
+      const slug = (await ownLogin()).replace(/\[bot\]$/, '');
+      const [owner, name] = repo.split('/');
+      let count = 0;
+      for (let after: string | null = null; ;) {
+        const res = await api(token, 'POST', '/graphql', {
+          query: `query($owner: String!, $name: String!, $number: Int!, $after: String) {
+            repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+              reviewThreads(first: 100, after: $after) {
+                pageInfo { hasNextPage endCursor }
+                nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+              } } } }`,
+          variables: { owner, name, number, after },
+        });
+        if (res.errors?.length) throw new Error(`GitHub GraphQL: ${res.errors[0].message}`);
+        const threads = res.data.repository.pullRequest.reviewThreads;
+        for (const t of threads.nodes) {
+          const login = t.comments.nodes[0]?.author?.login;
+          if (!t.isResolved && (login === slug || login === `${slug}[bot]`)) count++;
+        }
+        if (!threads.pageInfo.hasNextPage) return count;
+        after = threads.pageInfo.endCursor;
+      }
+    },
   };
 }

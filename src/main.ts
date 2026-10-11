@@ -17,6 +17,13 @@ function outsidePolicy(): OutsidePolicy | undefined {
   throw new Error(`REVIEW_OUTSIDE_PRS must be label, always or never, not ${v}`);
 }
 
+function flag(name: string): boolean | undefined {
+  const v = process.env[name];
+  if (v === undefined || v === '') return undefined;
+  if (v === 'true' || v === 'false') return v === 'true';
+  throw new Error(`${name} must be true or false, not ${v}`);
+}
+
 function positiveInt(name: string): number | undefined {
   const v = process.env[name];
   if (v === undefined) return undefined;
@@ -72,6 +79,7 @@ const app = createApp({
     maxComments: positiveInt('MAX_COMMENTS'),
     workerConcurrency: positiveInt('WORKER_CONCURRENCY'),
     retentionDays: positiveInt('RETENTION_DAYS'),
+    approveWhenClean: flag('APPROVE_WHEN_CLEAN'),
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),

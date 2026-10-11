@@ -176,8 +176,10 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 ### 9.1 When to post
 
-- Post one review per run, with event `COMMENT`. The agent never sends `APPROVE` or `REQUEST_CHANGES`.
+- Post one review per run, with event `COMMENT`, or `APPROVE` under the rule below. The agent never sends `REQUEST_CHANGES`.
 - Post a review if at least one inline comment survives validation, **or** if the summary contains an oversized-PR note, skipped files, or failed focuses.
+- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when at least one focus ran and all succeeded, no file was skipped or left unreviewed as binary, every finding the run reported fell below the publish threshold (so none was posted, merged, held back as `already_reviewed`, or dropped as `unanchorable` or `duplicate`), on an incremental run no earlier run on this base dropped a finding as `over_cap`, and every review thread the App started on the PR is resolved. If the threads can't be read, don't approve. A push that runs no reviewers (deletions only) is never approved.
+- The approval is a model's judgment over PR-controlled content, and anyone who can resolve threads, the author included, can resolve the App's. It must never be the only review that branch protection requires.
 - Otherwise post nothing.
 
 ### 9.2 Summary body
@@ -278,7 +280,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 9. An empty result with no summary-worthy notes produces no review.
 10. Duplicate event delivery does not duplicate comments.
 11. If the PR head changes during analysis, the stale run publishes nothing.
-12. The agent never approves, merges, or modifies the PR.
+12. The agent never merges or modifies the PR, and approves only under the opt-in rule in §9.1.
 13. A non-draft `opened` PR triggers a review.
 14. `converted_to_draft` or `closed` during a run results in nothing being published.
 15. Retargeting the base branch triggers a re-review against the new base.

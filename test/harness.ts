@@ -59,6 +59,8 @@ export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
   reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
+  /** Unresolved threads this app started, per `repo#number`. */
+  unresolved = new Map<string, number>();
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -101,6 +103,11 @@ export class FakeGitHub implements GitHubPort {
     const id = this.nextId++;
     this.reviews.push({ repo, number, review, id });
     return { id };
+  }
+
+  async unresolvedThreads(token: string, repo: string, number: number) {
+    this.checkToken(token);
+    return this.unresolved.get(`${repo}#${number}`) ?? 0;
   }
 }
 

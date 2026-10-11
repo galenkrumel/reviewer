@@ -30,7 +30,7 @@ installed on the account that owns it. Where this repository lives doesn't matte
   | Permission | Access | Used for |
   |---|---|---|
   | Contents | Read-only | `git fetch` of the PR's head and base commits |
-  | Pull requests | Read and write | reading the PR and the App's own reviews; posting the review |
+  | Pull requests | Read and write | reading the PR, the App's own reviews and their threads; posting the review |
   | Metadata | Read-only | mandatory for every App |
 
   Leave everything else at **No access**. The App needs no contents write, workflows, administration, or any
@@ -99,8 +99,11 @@ Optional:
 | `REVIEW_TOKEN_BUDGET` | `50000` | Estimated diff tokens given to reviewers; files past it are skipped and listed |
 | `WORKER_CONCURRENCY` | `2` | Jobs reviewed at once |
 | `RETENTION_DAYS` | `90` | Finished run records older than this are deleted, at startup and daily |
+| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when a run finds nothing, every reviewer finished, nothing went unreviewed, and every thread the App started is resolved. Otherwise a clean run posts nothing. See the note below |
 | `DATA_DIR` | `./data` | Persistent volume for SQLite and bare clones |
 | `PORT` | `3000` | HTTP port; Render sets it |
+
+**About `APPROVE_WHEN_CLEAN`:** the approval is a model's judgment over content the PR author controls, and the author can resolve the App's threads without fixing anything. Treat it as a signal, never as the review that branch protection requires: keep a human approval required, and turn on "Dismiss stale pull request approvals when new commits are pushed".
 
 ## Per-repo config (`.github/ai-review.yml`)
 

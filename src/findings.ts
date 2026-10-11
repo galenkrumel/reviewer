@@ -31,9 +31,10 @@ export function validate(
   const out: RecordedFinding[] = reported.map(({ focus, finding }) => {
     const added = changed.get(finding.path);
     const f: RecordedFinding = { ...finding, focus, outcome: 'published' };
-    if (!added?.has(f.line)) f.outcome = 'unanchorable';
+    // Threshold first: every other outcome then means a finding worth posting, which approval relies on.
+    if (rank(f.severity) < rank(limits.minSeverity) || f.confidence < limits.minConfidence) f.outcome = 'below_threshold';
+    else if (!added?.has(f.line)) f.outcome = 'unanchorable';
     else if (fresh && !fresh.get(f.path)?.has(f.line)) f.outcome = 'already_reviewed';
-    else if (rank(f.severity) < rank(limits.minSeverity) || f.confidence < limits.minConfidence) f.outcome = 'below_threshold';
     return f;
   });
 

@@ -162,6 +162,80 @@ test('a diff since the last review that is bigger than the PR diff gets a full r
   assert.deepEqual(outcomes(run), [[5, 'published']]);
 });
 
+test('a clean run approves only when approvals are on and every earlier thread is resolved', async () => {
+  const clean = async (config: Partial<AppConfig>, unresolved: number, correctness = [noFindings()]) => {
+    const { pr, github } = setup();
+    github.unresolved.set(`${REPO}#7`, unresolved);
+    const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness, security: [noFindings()] });
+    const { app } = testApp({ model, github, config });
+    await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+    await app.drain();
+    return { review: github.reviews[0]?.review, status: app.runs()[0]!.status };
+  };
+
+  const approved = await clean({ approveWhenClean: true }, 0);
+  assert.equal(approved.review?.event, 'APPROVE');
+  assert.deepEqual(approved.review?.comments, []);
+  assert.match(approved.review!.body, /no issues found, and every earlier comment is resolved\. Approved\./);
+  assert.equal(approved.status, 'published');
+
+  // Off by default, an open thread, or a finding: no approval.
+  assert.deepEqual(await clean({}, 0), { review: undefined, status: 'nothing_to_publish' });
+  assert.deepEqual(await clean({ approveWhenClean: true }, 1), { review: undefined, status: 'nothing_to_publish' });
+  assert.equal((await clean({ approveWhenClean: true }, 0, [report(f(5))])).review?.event, 'COMMENT');
+});
+
+test('an incremental run does not approve over a finding it held back, or on a deletion-only push', async () => {
+  const second = async (files: Record<string, string>, correctness: AssistantMessage[]) => {
+    const { fx, pr, github } = setup();
+    const model = new ScriptedModel({
+      orchestrator: [select('correctness'), select('correctness')], correctness, security: [noFindings(), noFindings()],
+    });
+    const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+    await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+    await app.drain();
+    github.reviews.length = 0;
+    const pushed = { ...pr, headSha: fx.push(files) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await app.drain();
+    return github.reviews[0]?.review.event;
+  };
+  const added = { [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' };
+  // The first run approves; the second finds a real issue on an old line, which it may not post: no approval.
+  assert.equal(await second(added, [noFindings(), report(f(5))]), undefined);
+  assert.equal(await second(added, [noFindings(), noFindings()]), 'APPROVE');
+  // Deleting lines runs no reviewers, so there is nothing to approve on.
+  assert.equal(await second({ [PATH]: 'keep\n' + lines(59) }, [noFindings()]), undefined);
+});
+
+test('a finding that is dropped rather than posted still blocks approval', async () => {
+  const { pr, github } = setup();
+  // Line 1 is unchanged, so the finding can't be anchored; it is above the threshold all the same.
+  const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [report(f(1))], security: [noFindings()] });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  assert.deepEqual(outcomes(app.runs()[0]!), [[1, 'unanchorable']]);
+  assert.equal(github.reviews.length, 0);
+});
+
+test('an incremental run does not approve after an earlier run dropped findings for the comment cap', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')],
+    correctness: [report(f(2), f(7)), noFindings()], security: [noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true, maxComments: 1 } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+  assert.deepEqual(github.reviews.map((r) => r.review.event), ['COMMENT']);
+});
+
 test('a push that only deletes lines runs no reviewers', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()] });
