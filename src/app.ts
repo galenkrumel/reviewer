@@ -330,9 +330,13 @@ export function createApp(deps: {
     const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
-    // Clean: something was reviewed, every reviewer finished, nothing went unreviewed and nothing is left to say.
-    const clean = comments.length === 0 && scope.reviewed.length > 0 && !scope.skipped.length && !scope.binary.length
-      && !anyFailed;
+    // Clean: reviewers ran and all finished, nothing went unreviewed, and nothing worth posting was found or held back.
+    // A push that runs no reviewers (deletions only) is never clean: a deleted check is what it would hide.
+    // Held back: a finding set aside on an already-reviewed line, or, on an incremental run, one an earlier run
+    // dropped for the comment cap. Neither ever became a thread to resolve.
+    const clean = comments.length === 0 && focuses.length > 0 && !anyFailed && !scope.skipped.length && !scope.binary.length
+      && !findings.some((f) => f.outcome === 'already_reviewed')
+      && !(since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha));
     // Earlier comments still count until someone resolves their threads: a later run may only have seen new lines.
     // If the threads can't be read, the run simply doesn't approve.
     const approve = clean && config.approveWhenClean === true

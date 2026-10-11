@@ -175,6 +175,12 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     /** Findings published on this PR at heads other than `headSha`. */
+    /** Whether any run on this PR and base dropped a finding for the comment cap: it was never posted. */
+    droppedOverCap(repo: string, pr: number, baseSha: string): boolean {
+      return db.prepare(`SELECT 1 FROM findings f JOIN runs r ON r.id = f.run_id
+        WHERE r.repo = ? AND r.pr = ? AND r.base_sha = ? AND f.outcome = 'over_cap' LIMIT 1`).get(repo, pr, baseSha) !== undefined;
+    },
+
     postedFindings(repo: string, pr: number, headSha: string): RecordedFinding[] {
       return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
         WHERE r.repo = ? AND r.pr = ? AND r.head_sha != ? AND r.status = 'published' AND f.outcome = 'published'`)

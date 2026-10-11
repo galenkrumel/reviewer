@@ -178,7 +178,8 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 - Post one review per run, with event `COMMENT`, or `APPROVE` under the rule below. The agent never sends `REQUEST_CHANGES`.
 - Post a review if at least one inline comment survives validation, **or** if the summary contains an oversized-PR note, skipped files, or failed focuses.
-- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when the run reviewed at least one file, every focus succeeded, no file was skipped or left unreviewed as binary, no comment survives validation, and every review thread the App started on the PR is resolved. If the threads can't be read, don't approve.
+- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when at least one focus ran and all succeeded, no file was skipped or left unreviewed as binary, no comment survives validation, no finding was held back as `already_reviewed`, on an incremental run no earlier run on this base dropped a finding as `over_cap`, and every review thread the App started on the PR is resolved. If the threads can't be read, don't approve. A push that runs no reviewers (deletions only) is never approved.
+- The approval is a model's judgment over PR-controlled content, and anyone who can resolve threads, the author included, can resolve the App's. It must never be the only review that branch protection requires.
 - Otherwise post nothing.
 
 ### 9.2 Summary body
