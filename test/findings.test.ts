@@ -77,7 +77,8 @@ test('a finding already posted on an earlier head is not posted again after a pu
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
 
-  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+  // Every line changes, so all of them are open to comment again.
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60, 1) }) };
   github.addPullRequest(REPO, fx.url, pushed);
   await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
   await app.drain();
@@ -98,12 +99,53 @@ test('a finding is posted again when the line of its earlier comment no longer e
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
 
-  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(10) }) };
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(10, 1) }) };
   github.addPullRequest(REPO, fx.url, pushed);
   await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
   await app.drain();
 
   assert.deepEqual(github.reviews[1]!.review.comments.map((c) => c.line), [5]);
+});
+
+test('after a push, only lines changed since the last review are commented on', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')],
+    correctness: [noFindings(), report(f(5, { title: 'old code' }), f(62, { title: 'new code' }))],
+    security: [noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+
+  assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'already_reviewed'], [62, 'published']]);
+  const { review } = github.reviews[0]!;
+  assert.deepEqual(review.comments.map((c) => c.line), [62]);
+  assert.ok(review.body.includes(`Comments only on changes since \`head@${pr.headSha.slice(0, 7)}\``));
+  // The reviewer is told which changes are new.
+  const content = String(model.requestsFor('correctness')[1]!.messages[1]!.content);
+  assert.match(content, /<untrusted-data name="changes-since-last-review">[^]*\+const extra = 1;/);
+});
+
+test('a push that only deletes lines runs no reviewers', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()] });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(59) }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+
+  assert.equal(model.requestsFor('correctness').length, 1);
+  assert.equal(app.runs()[1]!.status, 'nothing_to_publish');
 });
 
 test('a review never has more than max_comments comments, keeping the highest ranked', async () => {

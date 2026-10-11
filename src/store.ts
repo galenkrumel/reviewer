@@ -12,7 +12,9 @@ export type RunStatus =
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
-export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap';
+export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
+  /** On a line unchanged since a head that was already reviewed. */
+  | 'already_reviewed';
 
 export interface Finding {
   title: string;
@@ -173,6 +175,18 @@ export function openStore(dataDir: string, clock: Clock) {
       return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
         WHERE r.repo = ? AND r.pr = ? AND r.head_sha != ? AND r.status = 'published' AND f.outcome = 'published'`)
         .all(repo, pr, headSha).map((row: any) => JSON.parse(row.data));
+    },
+
+    /**
+     * The head of the PR's latest run on this base where every reviewer finished, unless it is this head.
+     * ponytail: files skipped for budget on that run count as reviewed; track them per run if that misleads.
+     */
+    lastReviewedHead(repo: string, pr: number, baseSha: string, headSha: string): string | undefined {
+      const row = db.prepare(`SELECT head_sha FROM runs r WHERE repo = ? AND pr = ? AND base_sha = ? AND head_sha != ?
+        AND status IN ('published', 'nothing_to_publish')
+        AND NOT EXISTS (SELECT 1 FROM focuses WHERE run_id = r.id AND json_extract(data, '$.status') = 'failed')
+        ORDER BY id DESC LIMIT 1`).get(repo, pr, baseSha, headSha) as any;
+      return row?.head_sha;
     },
 
     /**
