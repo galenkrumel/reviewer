@@ -265,14 +265,17 @@ export function createApp(deps: {
     const invocations: RecordedInvocation[] = [];
     let orchestratorError: string | undefined;
     const reviewedPaths = scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
+    if (scope.reviewed.length) diff = await source.reviewDiff(reviewedPaths);
     // After a push on the same base, only what changed since the last full review is open to comment.
     // A label re-review asks for the whole PR again.
-    const since = job.event === 'pull_request.labeled' ? undefined : store.lastReviewedHead(job.repo, job.pr, job.baseSha, job.headSha);
-    const newDiff = since === undefined ? undefined : await source.diffSince(since, reviewedPaths);
+    const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewedHead(job.repo, job.pr, job.baseSha, job.headSha);
+    let newDiff = last === undefined ? undefined : await source.diffSince(last, reviewedPaths);
+    // The token budget only covered the PR diff. A bigger diff since then (a large revert) gets a full review instead.
+    if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
+    const since = newDiff === undefined ? undefined : last;
     const fresh = newDiff === undefined ? undefined : addedLines(newDiff);
     // Nothing added since then (a deletion has no line to comment on): no reviewer is worth paying for.
     if (scope.reviewed.length && (!fresh || [...fresh.values()].some((lines) => lines.size))) {
-      diff = await source.reviewDiff(reviewedPaths);
       let picks: Pick[];
       try {
         picks = await runOrchestrator({
@@ -322,7 +325,7 @@ export function createApp(deps: {
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
 
-    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError };
+    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
     const anyFailed = focuses.some((f) => f.status === 'failed');
     if (comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
@@ -335,7 +338,7 @@ export function createApp(deps: {
       commit_id: job.headSha,
       event: 'COMMENT' as const,
       body: summary(job, comments.length, {
-        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since: newDiff === undefined ? undefined : since,
+        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since,
       }),
       comments,
     };

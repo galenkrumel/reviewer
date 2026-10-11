@@ -132,6 +132,36 @@ test('after a push, only lines changed since the last review are commented on', 
   assert.match(content, /<untrusted-data name="changes-since-last-review">[^]*\+const extra = 1;/);
 });
 
+/** Opens the PR at a first head, then pushes a second; correctness reports a line-5 finding on the second run. */
+async function twoPushes(first: Record<string, string | null>, second: Record<string, string | null>, config: Partial<AppConfig> = {}) {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')],
+    correctness: [noFindings(), report(f(5))],
+    security: [noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github, config });
+  for (const files of [first, second]) {
+    const head = { ...pr, headSha: fx.push(files) };
+    github.addPullRequest(REPO, fx.url, head);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, head)));
+    await app.drain();
+  }
+  return app.runs()[1]!;
+}
+
+test('a run that skipped files for budget does not count as reviewed', async () => {
+  // Padding gets src/app.ts skipped on the first head; dropping it must not leave src/app.ts unreviewed.
+  const run = await twoPushes({ 'src/pad.ts': lines(200) }, { 'src/pad.ts': null }, { reviewTokenBudget: 2000 });
+  assert.deepEqual(outcomes(run), [[5, 'published']]);
+});
+
+test('a diff since the last review that is bigger than the PR diff gets a full review', async () => {
+  // Reverting 300 lines: the diff since the first head outweighs the PR diff the budget allowed for.
+  const run = await twoPushes({ [PATH]: 'keep\n' + lines(60) + lines(300, 100) }, { [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' });
+  assert.deepEqual(outcomes(run), [[5, 'published']]);
+});
+
 test('a push that only deletes lines runs no reviewers', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()] });
