@@ -425,6 +425,8 @@ function pathList(paths: string[], sep: string, max: number): string {
   return shown.join(sep);
 }
 
+const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
+
 function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean;
 }): string {
@@ -434,15 +436,15 @@ function summary(job: Job, count: number, notes: {
     notes.splitAbove !== undefined && `**This PR has ${scope.reviewableLines} reviewable changed lines, over the `
       + `${notes.splitAbove}-line limit. Consider splitting it.** Directories involved: ${
         pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
-    `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\``,
-    focuses.length > 0 && `Focuses${notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}:\n`
-      // Reasons are PR-influenced: a code span renders no links, images, mentions or markup.
-      + focuses.map((f) => `- ${f.focus}: \`${f.reason}\``).join('\n'),
+    `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\`: `
+      + (count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented inline.`),
+    // Names only: the reasons are PR-influenced, so they stay in the run record.
+    focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
+      notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
-    `${count} inline comment${count === 1 ? '' : 's'}.`,
     marker(job),
   ].filter(Boolean).join('\n\n');
 }

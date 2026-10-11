@@ -113,7 +113,7 @@ test('a review never has more than max_comments comments, keeping the highest ra
   assert.equal(comments.length, 10);
   assert.deepEqual(comments.map((c) => c.line).sort((a, b) => a - b), proposed.slice(2).map((x) => x.line));
   assert.deepEqual(record.findings.filter((x) => x.outcome === 'over_cap').map((x) => x.line), [2, 7]);
-  assert.match(review!.body, /10 inline comments/);
+  assert.match(review!.body, /: 10 issues, commented inline\./);
 
   const capped = await run([report(...proposed)], undefined, { maxComments: 3 });
   assert.deepEqual(capped.comments.map((c) => c.line).sort((a, b) => a - b), [47, 52, 57]);

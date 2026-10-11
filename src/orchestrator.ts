@@ -72,10 +72,7 @@ export async function runOrchestrator(opts: {
   });
 }
 
-/**
- * Reasons are PR-influenced and land in the summary inside a code span: one short line, with no backticks
- * (so the span cannot close early) and no angle brackets (so no forged or broken marker in the raw body).
- */
+/** Reasons are PR-influenced and only kept in the run record: one short line, without markup characters. */
 const oneLine = (s: string) => s.replace(/[`<>]/g, '').replace(/\s+/g, ' ').trim().slice(0, 200);
 
 export function fallbackPicks(paths: string[]): Pick[] {
