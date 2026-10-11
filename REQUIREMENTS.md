@@ -181,11 +181,10 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 ### 9.2 Summary body
 
-- The reviewed revisions: `head@<sha7>`, `base@<sha7>`.
-- The focuses that ran, each with its one-line selection reason. Fallback selection is noted where used.
+- The reviewed revisions: `head@<sha7>`, `base@<sha7>`, followed by the result (how many issues were commented inline).
+- The names of the focuses that ran. Fallback selection is noted where used. Selection reasons stay in the run record: they are PR-influenced, and the names are enough for a reader.
 - Any focuses that failed.
 - Any skipped files or oversized-PR note.
-- The inline comment count.
 - A hidden marker: `<!-- ai-review:{owner}/{repo}#{pr}:{head}:{base} -->`.
 
 The summary does not repeat inline comment text.
