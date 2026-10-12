@@ -63,6 +63,8 @@ export class FakeGitHub implements GitHubPort {
   threads = new Map<string, (ReviewThread & { resolved: boolean })[]>();
   /** Thread reads throw while set. */
   threadsDown = false;
+  /** Resolving throws while set, as GitHub does without the permission it wants. */
+  resolveRefused = false;
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -140,6 +142,7 @@ export class FakeGitHub implements GitHubPort {
 
   async resolveThread(token: string, threadId: string) {
     this.checkToken(token);
+    if (this.resolveRefused) throw new Error('GitHub GraphQL: Resource not accessible by integration');
     this.thread(threadId).resolved = true;
   }
 }
