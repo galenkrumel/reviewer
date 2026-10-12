@@ -119,12 +119,12 @@ export function createApp(deps: {
   }
 
   /** A chat for one agent invocation: its model and fallback, usage tallied into `invocations`, tokens budgeted. */
-  function meteredChat(name: Agent, invocations: RecordedInvocation[]): Chat {
+  function meteredChat(job: Job, name: Agent, invocations: RecordedInvocation[]): Chat {
     const { model: primary, fallbackModel, maxTokens } = agentConfig(name);
     const used: RecordedInvocation = { agent: name, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
     invocations.push(used);
     return async (messages, tools) => {
-      const res = await model.chat({ model: primary, models: fallbackModel ? [primary, fallbackModel] : undefined, messages, tools });
+      const res = await model.chat({ model: primary, models: fallbackModel ? [primary, fallbackModel] : undefined, messages, tools, session_id: `${job.repo}#${job.pr}` });
       if (!used.models.includes(res.model)) used.models.push(res.model);
       used.inputTokens += res.usage.inputTokens;
       used.outputTokens += res.usage.outputTokens;
@@ -281,7 +281,7 @@ export function createApp(deps: {
       let picks: Pick[];
       try {
         picks = await runOrchestrator({
-          chat: meteredChat('orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
+          chat: meteredChat(job, 'orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
           pathHints: settings.pathHints,
         });
       } catch (err) {
@@ -297,7 +297,7 @@ export function createApp(deps: {
       for (const { focus, reason } of selectFocuses(enabled, scope.reviewed.map((f) => f.path), settings.maxReviewers)) {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
-          focus, chat: meteredChat(focus, invocations), maxTurns: agentConfig(focus).maxTurns,
+          focus, chat: meteredChat(job, focus, invocations), maxTurns: agentConfig(focus).maxTurns,
           source, diff, newDiff, title: job.title, body: job.body,
         });
         const failed = (err: unknown, final: boolean) =>
