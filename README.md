@@ -85,8 +85,8 @@ Optional:
 | Variable | Default | Meaning |
 |---|---|---|
 | `REVIEW_FALLBACK_MODEL` | none | Default fallback model, passed in OpenRouter's `models` array |
-| `<AGENT>_MODEL`, `<AGENT>_FALLBACK_MODEL` | `REVIEW_MODEL`, `REVIEW_FALLBACK_MODEL` | Per-agent overrides; `<AGENT>` is `ORCHESTRATOR`, `CORRECTNESS`, `SECURITY`, `PERFORMANCE`, `ARCHITECTURE` or `CONCISENESS`. Startup fails if any configured model lacks tool support on OpenRouter |
-| `<AGENT>_MAX_TURNS` | `20` | Model calls per reviewer invocation; over it, the reviewer fails |
+| `<AGENT>_MODEL`, `<AGENT>_FALLBACK_MODEL` | `REVIEW_MODEL`, `REVIEW_FALLBACK_MODEL` | Per-agent overrides; `<AGENT>` is `ORCHESTRATOR`, `VERIFIER`, `CORRECTNESS`, `SECURITY`, `PERFORMANCE`, `ARCHITECTURE` or `CONCISENESS`. Startup fails if any configured model lacks tool support on OpenRouter |
+| `<AGENT>_MAX_TURNS` | `20` | Model calls per reviewer or verifier invocation; over it, the agent fails |
 | `<AGENT>_MAX_TOKENS` | `2000000` | Input plus output tokens per invocation, summed over its calls; each call resends the whole conversation, so this grows with every turn. Over it, the agent fails |
 | `MAX_REVIEWERS` | `3` | Reviewer cap per run, at least 2 (correctness and security always run on code changes) |
 | `REVIEW_OUTSIDE_PRS` | `label` | PRs from authors other than OWNER/MEMBER/COLLABORATOR: `label` (only while labelled), `always`, `never` |
@@ -99,11 +99,11 @@ Optional:
 | `REVIEW_TOKEN_BUDGET` | `50000` | Estimated diff tokens given to reviewers; files past it are skipped and listed |
 | `WORKER_CONCURRENCY` | `2` | Jobs reviewed at once |
 | `RETENTION_DAYS` | `90` | Finished run records older than this are deleted, at startup and daily |
-| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when a run finds nothing, every reviewer finished, nothing went unreviewed, and every thread the App started is resolved. Otherwise a clean run posts nothing. See the note below |
+| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when a run finds nothing, every reviewer finished, nothing went unreviewed, and every thread the App started is resolved. Otherwise every run posts a review whose **Not approved:** line names what blocks it. See the note below |
 | `DATA_DIR` | `./data` | Persistent volume for SQLite and bare clones |
 | `PORT` | `3000` | HTTP port; Render sets it |
 
-**About `APPROVE_WHEN_CLEAN`:** the approval is a model's judgment over content the PR author controls, and the author can resolve the App's threads without fixing anything. Treat it as a signal, never as the review that branch protection requires: keep a human approval required, and turn on "Dismiss stale pull request approvals when new commits are pushed".
+**About `APPROVE_WHEN_CLEAN`:** the approval is a model's judgment over content the PR author controls. The author can resolve the App's threads without fixing anything, and the verifier, which resolves threads it judges fixed, reads the author's replies. Treat it as a signal, never as the review that branch protection requires: keep a human approval required, and turn on "Dismiss stale pull request approvals when new commits are pushed".
 
 ## Per-repo config (`.github/ai-review.yml`)
 
@@ -138,6 +138,8 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
   - `orchestrator`: focus selection, after which the fixed fallback is used;
   - `reviewer`: a focus reviewer's model call or budget;
   - `validation`: a reviewer's report that failed the schema check;
+  - `verifier`: re-checking the App's open threads, after which they all count as open;
+  - `threads`: reading, answering or resolving the App's threads;
   - `publish`: posting the review;
   - `run`: anything else, such as a token mint or PR lookup.
 

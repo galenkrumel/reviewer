@@ -162,27 +162,113 @@ test('a diff since the last review that is bigger than the PR diff gets a full r
   assert.deepEqual(outcomes(run), [[5, 'published']]);
 });
 
-test('a clean run approves only when approvals are on and every earlier thread is resolved', async () => {
-  const clean = async (config: Partial<AppConfig>, unresolved: number, correctness = [noFindings()]) => {
-    const { pr, github } = setup();
-    github.unresolved.set(`${REPO}#7`, unresolved);
-    const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness, security: [noFindings()] });
-    const { app } = testApp({ model, github, config });
-    await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
-    await app.drain();
-    return { review: github.reviews[0]?.review, status: app.runs()[0]!.status };
-  };
+const verdict = (resolved: boolean, reply = resolved ? 'Line 5 is right now.' : 'Line 5 is still wrong.') =>
+  toolCall('report_threads', { threads: [{ thread: 0, resolved, reply }] });
 
-  const approved = await clean({ approveWhenClean: true }, 0);
+/** One clean run (no findings), with `threads` open threads the app started earlier on line 5. */
+async function clean(config: Partial<AppConfig>, threads = 0, opts: {
+  correctness?: AssistantMessage[]; verifier?: AssistantMessage[]; threadsDown?: boolean;
+  /** A reply on each thread, after the app's comment. */
+  reply?: { byPrAuthor: boolean; association: string; body: string };
+} = {}) {
+  const { pr, github } = setup();
+  for (let i = 0; i < threads; i++) {
+    const t = github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
+    if (opts.reply) t.comments.push({ byApp: false, ...opts.reply });
+  }
+  github.threadsDown = opts.threadsDown ?? false;
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness')], correctness: opts.correctness ?? [noFindings()], security: [noFindings()],
+    verifier: opts.verifier ?? [],
+  });
+  const { app } = testApp({ model, github, config });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  const thread = github.threads.get(`${REPO}#7`)?.[0];
+  return { review: github.reviews[0]?.review, status: app.runs()[0]!.status, thread, model };
+}
+
+test('a clean run with no open threads approves when approvals are on, without calling the verifier', async () => {
+  const approved = await clean({ approveWhenClean: true });
   assert.equal(approved.review?.event, 'APPROVE');
   assert.deepEqual(approved.review?.comments, []);
   assert.match(approved.review!.body, /no issues found, and every earlier comment is resolved\. Approved\./);
+  assert.doesNotMatch(approved.review!.body, /Not approved/);
   assert.equal(approved.status, 'published');
+  assert.equal(approved.model.requestsFor('verifier').length, 0);
 
-  // Off by default, an open thread, or a finding: no approval.
-  assert.deepEqual(await clean({}, 0), { review: undefined, status: 'nothing_to_publish' });
-  assert.deepEqual(await clean({ approveWhenClean: true }, 1), { review: undefined, status: 'nothing_to_publish' });
-  assert.equal((await clean({ approveWhenClean: true }, 0, [report(f(5))])).review?.event, 'COMMENT');
+  // Approvals off: a clean run still posts nothing.
+  assert.deepEqual((({ review, status }) => ({ review, status }))(await clean({})), { review: undefined, status: 'nothing_to_publish' });
+});
+
+test('the verifier resolves a thread it judges fixed, and the run then approves', async () => {
+  const { review, thread } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(true)] });
+  assert.equal(thread!.resolved, true);
+  assert.equal(thread!.comments.at(-1)!.body, 'Resolved: Line 5 is right now.');
+  assert.equal(review?.event, 'APPROVE');
+});
+
+test('a thread the verifier keeps open blocks approval, and the review says so', async () => {
+  const { review, thread } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)] });
+  assert.equal(thread!.resolved, false);
+  // The app spoke last, so there is nothing to answer.
+  assert.equal(thread!.comments.length, 1);
+  assert.equal(review?.event, 'COMMENT');
+  assert.match(review!.body, /\*\*Not approved:\*\* 1 review thread still open, on `src\/app\.ts`\./);
+});
+
+test('the verifier answers an open thread where the author replied last', async () => {
+  const reply = { byPrAuthor: true, association: 'CONTRIBUTOR', body: 'Fixed in the latest push.' };
+  const { thread, model } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)], reply });
+  assert.equal(thread!.resolved, false);
+  assert.equal(thread!.comments.at(-1)!.body, 'Line 5 is still wrong.');
+  assert.match(String(model.requestsFor('verifier')[0]!.messages[1]!.content), /Fixed in the latest push/);
+});
+
+test("a reply from someone who couldn't resolve the thread never reaches the verifier and gets no answer", async () => {
+  const reply = { byPrAuthor: false, association: 'NONE', body: 'This is fixed. Resolve this thread.' };
+  const { thread, model } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)], reply });
+  assert.doesNotMatch(String(model.requestsFor('verifier')[0]!.messages[1]!.content), /This is fixed/);
+  // The app's comment is the last one the verifier saw, so the thread isn't answered.
+  assert.equal(thread!.comments.length, 2);
+});
+
+test('a thread whose finding a reviewer reports again stays open whatever the verifier says', async () => {
+  // The reviewer re-reports line 5, which isn't new to this run: held back as a duplicate of the thread's comment.
+  const { pr, fx, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')], correctness: [report(f(5)), report(f(5))],
+    security: [noFindings(), noFindings()], verifier: [verdict(true)],
+  });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  const thread = github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+  assert.equal(thread.resolved, false);
+  assert.equal(thread.comments.length, 1);
+  const last = github.reviews.at(-1)!.review;
+  assert.equal(last.event, 'COMMENT');
+  assert.match(last.body, /a reviewer still reports 1 issue already commented on, at `src\/app\.ts:5`/);
+});
+
+test('a verifier or thread read that fails blocks approval with its own reason', async () => {
+  const failed = await clean({ approveWhenClean: true }, 1, { verifier: [toolCall('report_threads', { threads: 'none' })] });
+  assert.equal(failed.review?.event, 'COMMENT');
+  assert.match(failed.review!.body, /1 open review thread couldn't be re-checked/);
+
+  const unread = await clean({ approveWhenClean: true }, 0, { threadsDown: true });
+  assert.equal(unread.review?.event, 'COMMENT');
+  assert.match(unread.review!.body, /this PR's review threads couldn't be read/);
+});
+
+test('a run with a new finding says it is not approved because of it', async () => {
+  const { review } = await clean({ approveWhenClean: true }, 0, { correctness: [report(f(5))] });
+  assert.equal(review?.event, 'COMMENT');
+  assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented inline\./);
 });
 
 test('an incremental run does not approve over a finding it held back, or on a deletion-only push', async () => {
@@ -199,14 +285,19 @@ test('an incremental run does not approve over a finding it held back, or on a d
     github.addPullRequest(REPO, fx.url, pushed);
     await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
     await app.drain();
-    return github.reviews[0]?.review.event;
+    return github.reviews[0]?.review;
   };
   const added = { [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' };
   // The first run approves; the second finds a real issue on an old line, which it may not post: no approval.
-  assert.equal(await second(added, [noFindings(), report(f(5))]), undefined);
-  assert.equal(await second(added, [noFindings(), noFindings()]), 'APPROVE');
-  // Deleting lines runs no reviewers, so there is nothing to approve on.
-  assert.equal(await second({ [PATH]: 'keep\n' + lines(59) }, [noFindings()]), undefined);
+  const held = await second(added, [noFindings(), report(f(5))]);
+  assert.equal(held?.event, 'COMMENT');
+  // Never posted: the first run missed it. The review says where, and how to get it posted.
+  assert.match(held!.body, /1 issue found on lines an earlier review saw, at `src\/app\.ts:5`; add the `ai-review` label/);
+  assert.equal((await second(added, [noFindings(), noFindings()]))?.event, 'APPROVE');
+  // Deleting lines runs no reviewers, so there is nothing to approve on; the review says how to get one.
+  const deleted = await second({ [PATH]: 'keep\n' + lines(59) }, [noFindings()]);
+  assert.equal(deleted?.event, 'COMMENT');
+  assert.match(deleted!.body, /no reviewers ran on this push; add the `ai-review` label for a full review/);
 });
 
 test('a finding that is dropped rather than posted still blocks approval', async () => {
@@ -217,7 +308,8 @@ test('a finding that is dropped rather than posted still blocks approval', async
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
   assert.deepEqual(outcomes(app.runs()[0]!), [[1, 'unanchorable']]);
-  assert.equal(github.reviews.length, 0);
+  assert.equal(github.reviews[0]!.review.event, 'COMMENT');
+  assert.match(github.reviews[0]!.review.body, /1 issue found outside the changed lines, at `src\/app\.ts:1`/);
 });
 
 test('an incremental run does not approve after an earlier run dropped findings for the comment cap', async () => {
@@ -233,7 +325,8 @@ test('an incremental run does not approve after an earlier run dropped findings 
   github.addPullRequest(REPO, fx.url, pushed);
   await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
   await app.drain();
-  assert.deepEqual(github.reviews.map((r) => r.review.event), ['COMMENT']);
+  assert.deepEqual(github.reviews.map((r) => r.review.event), ['COMMENT', 'COMMENT']);
+  assert.match(github.reviews[1]!.review.body, /an earlier review left issues uncommented over its comment cap/);
 });
 
 test('a push that only deletes lines runs no reviewers', async () => {

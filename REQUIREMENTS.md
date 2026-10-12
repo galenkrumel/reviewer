@@ -108,7 +108,7 @@ The orchestrator selects from a fixed enum of five focuses:
 
 ### 5.4 Models
 
-- Every agent (orchestrator plus each of the five focuses) has its own `model` and an optional `fallback_model` in deployment config. Models are addressed by OpenRouter ID.
+- Every agent (orchestrator, verifier, and each of the five focuses) has its own `model` and an optional `fallback_model` in deployment config. Models are addressed by OpenRouter ID.
 - Calls go through OpenRouter's chat completions API. Fallback uses OpenRouter's `models: [...]` array.
 - **Startup validation:** the service checks every configured model against OpenRouter's `/models` endpoint. Each one's `supported_parameters` must include `tools`. If any model fails the check, the service refuses to start.
 - Findings come back as a call to the `report_findings` tool, not through `response_format`. Arguments are schema-validated, and invalid output is retried once.
@@ -177,12 +177,22 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 ### 9.1 When to post
 
 - Post one review per run, with event `COMMENT`, or `APPROVE` under the rule below. The agent never sends `REQUEST_CHANGES`.
-- Post a review if at least one inline comment survives validation, **or** if the summary contains an oversized-PR note, skipped files, or failed focuses.
-- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when at least one focus ran and all succeeded, no file was skipped or left unreviewed as binary, every finding the run reported fell below the publish threshold (so none was posted, merged, held back as `already_reviewed`, or dropped as `unanchorable` or `duplicate`), on an incremental run no earlier run on this base dropped a finding as `over_cap`, and every review thread the App started on the PR is resolved. If the threads can't be read, don't approve. A push that runs no reviewers (deletions only) is never approved.
-- The approval is a model's judgment over PR-controlled content, and anyone who can resolve threads, the author included, can resolve the App's. It must never be the only review that branch protection requires.
+- Post a review if at least one inline comment survives validation, **or** if the summary contains an oversized-PR note, skipped files, or failed focuses, **or** if approvals are on (every such run either approves or says why not).
+- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when at least one focus ran and all succeeded, no file was skipped or left unreviewed as binary, every finding the run reported fell below the publish threshold (so none was posted, merged, held back as `already_reviewed`, or dropped as `unanchorable` or `duplicate`), on an incremental run no earlier run on this base dropped a finding as `over_cap`, and every review thread the App started on the PR is resolved. If the threads can't be read, or the verifier fails, don't approve. A push that runs no reviewers (deletions only) is never approved.
+- **Not approved:** with approvals on, a run that doesn't approve says why in one summary line, naming every blocker with counts and paths, never model text: new issues, issues a reviewer still reports, issues outside the changed lines, an earlier comment-cap drop, failed focuses, unreviewed files, unreadable or un-rechecked threads, threads still open, or no reviewers having run (with the re-review label as the way out).
+- The approval is a model's judgment over PR-controlled content, and anyone who can resolve threads, the author included, can resolve the App's. The verifier reads replies from the PR's author and anyone with write access, as untrusted data; those people can resolve the App's threads directly anyway. It must never be the only review that branch protection requires.
 - Otherwise post nothing.
 
-### 9.2 Summary body
+### 9.2 Re-checking the App's threads
+
+- Every run reads the review threads the App started that are still unresolved, whether or not reviewers ran (a deletion can be the fix). When there are any, the verifier agent judges each at the current head, with the read-only repository tools (§6.2) and each thread's original diff hunk, comments and replies as untrusted data. It finishes with one `report_threads` call: per thread, resolved or open, and a short reply.
+- Only comments from the App, the PR's author, and OWNER, MEMBER or COLLABORATOR authors reach the verifier: the people who could resolve the thread themselves. Anyone else's replies are dropped, and don't count as the author speaking last.
+- If the verifier's report is malformed it is retried once, as reviewers are.
+- A thread judged resolved gets the reply (prefixed `Resolved:`) and is resolved, unless a finding this run reported again (held back as `already_reviewed` or `duplicate`) matches it by path and a nearby line or the same title: that thread stays open.
+- A thread judged open gets the reply only when the author spoke last, so an unanswered thread isn't repeated on every push.
+- Replies are sanitized like inline comments, and are only sent while the run is current and not superseded. A thread that fails to update stays open.
+
+### 9.3 Summary body
 
 - The reviewed revisions: `head@<sha7>`, `base@<sha7>`, followed by the result (how many issues were commented inline).
 - The names of the focuses that ran. Fallback selection is noted where used.
@@ -193,7 +203,7 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 The summary does not repeat inline comment text.
 
-### 9.3 Inline comment body
+### 9.4 Inline comment body
 
 - The title in bold.
 - A severity and focus badge.
@@ -202,7 +212,7 @@ The summary does not repeat inline comment text.
 
 Confidence is not shown to readers. It is stored in metadata only.
 
-### 9.4 Idempotency
+### 9.5 Idempotency
 
 - The idempotency key is (repo, PR, head SHA, base SHA).
 - Before posting, the publisher lists existing reviews on the PR. If one carries the matching marker, the run is recorded as `published` and nothing is posted again.
@@ -263,7 +273,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
   - Source fetch: retry with backoff.
   - Reviewer: retry once, then mark the focus failed and continue with the others.
   - Orchestrator: fixed fallback (§5.2).
-  - Publish: retry with backoff, guarded by the marker check (§9.4).
+  - Publish: retry with backoff, guarded by the marker check (§9.5).
   - All failures are written to structured logs and run metadata.
 - **Restart safety:** jobs left `running` at startup are re-queued. The idempotency marker prevents double-posting.
 
