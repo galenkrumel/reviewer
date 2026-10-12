@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { after } from 'node:test';
 import { createApp, type AppConfig } from '../src/app.ts';
 import type {
-  AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest,
+  AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest, ReviewThread,
 } from '../src/ports.ts';
 
 const tmpRoots: string[] = [];
@@ -59,8 +59,10 @@ export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
   reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
-  /** Unresolved threads this app started, per `repo#number`. */
-  unresolved = new Map<string, number>();
+  /** Threads this app started, per `repo#number`. */
+  threads = new Map<string, (ReviewThread & { resolved: boolean })[]>();
+  /** Thread reads throw while set. */
+  threadsDown = false;
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -105,9 +107,37 @@ export class FakeGitHub implements GitHubPort {
     return { id };
   }
 
-  async unresolvedThreads(token: string, repo: string, number: number) {
+  /** Open a thread this app started, with its first comment. */
+  addThread(repo: string, number: number, path: string, line: number | null, body: string) {
+    const key = `${repo}#${number}`;
+    const list = this.threads.get(key) ?? [];
+    const thread = { id: `T${list.length}`, path, line, diffHunk: '@@ -1 +1 @@', comments: [{ byApp: true, body }], resolved: false };
+    list.push(thread);
+    this.threads.set(key, list);
+    return thread;
+  }
+
+  private thread(id: string) {
+    const t = [...this.threads.values()].flat().find((x) => x.id === id);
+    if (!t) throw new Error(`no thread ${id}`);
+    return t;
+  }
+
+  async openThreads(token: string, repo: string, number: number) {
     this.checkToken(token);
-    return this.unresolved.get(`${repo}#${number}`) ?? 0;
+    if (this.threadsDown) throw new Error('GitHub GraphQL: 502');
+    return structuredClone((this.threads.get(`${repo}#${number}`) ?? []).filter((t) => !t.resolved))
+      .map(({ resolved, ...t }) => t);
+  }
+
+  async replyToThread(token: string, threadId: string, body: string) {
+    this.checkToken(token);
+    this.thread(threadId).comments.push({ byApp: true, body });
+  }
+
+  async resolveThread(token: string, threadId: string) {
+    this.checkToken(token);
+    this.thread(threadId).resolved = true;
   }
 }
 

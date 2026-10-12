@@ -50,7 +50,8 @@ const REPO_TOOLS: Record<string, (source: Source, args: any) => Promise<string>>
   diff: (s, a) => s.diff(a.path),
 };
 
-const TOOLS: ToolDef[] = [
+/** Definitions of the repository tools, for any agent that reads code. */
+export const READ_TOOLS: ToolDef[] = [
   tool('read_file', 'Read a file at the head revision, optionally only lines start_line..end_line.', {
     path: PATH, start_line: { type: 'integer', minimum: 1 }, end_line: { type: 'integer', minimum: 1 },
   }, ['path']),
@@ -59,6 +60,9 @@ const TOOLS: ToolDef[] = [
   }, ['pattern']),
   tool('list_dir', 'List a directory at the head revision (the root if path is omitted). Directories end in /.', { path: PATH }),
   tool('diff', 'The pull request diff from base to head, optionally for one path.', { path: PATH }),
+];
+
+const REPORT: ToolDef =
   {
     type: 'function',
     function: {
@@ -92,8 +96,7 @@ const TOOLS: ToolDef[] = [
         required: ['findings'],
       },
     },
-  },
-];
+  };
 
 /** Wrap PR content in a data block it cannot close early. */
 export const untrusted = (label: string, text: string) =>
@@ -115,11 +118,23 @@ export async function runReviewer(opts: {
     },
   ];
 
+  return parseFindings(await runTools({ chat: opts.chat, messages, finish: REPORT, maxTurns: opts.maxTurns, source: opts.source }));
+}
+
+/**
+ * An agent's tool loop over the repository tools, until it calls `finish`. Returns that call's arguments, or
+ * undefined when they aren't JSON, for the caller to validate.
+ */
+export async function runTools(opts: {
+  chat: Chat; messages: ChatMessage[]; finish: ToolDef; maxTurns: number; source: Source;
+}): Promise<any> {
+  const { messages } = opts;
+  const finish = opts.finish.function.name;
   for (let turn = 0; turn < opts.maxTurns; turn++) {
-    const reply = await opts.chat(messages, TOOLS);
+    const reply = await opts.chat(messages, [...READ_TOOLS, opts.finish]);
     messages.push(reply);
     if (!reply.tool_calls?.length) {
-      messages.push({ role: 'user', content: 'Call report_findings to finish.' });
+      messages.push({ role: 'user', content: `Call ${finish} to finish.` });
       continue;
     }
     for (const call of reply.tool_calls) {
@@ -129,7 +144,7 @@ export async function runReviewer(opts: {
       } catch {
         args = undefined;
       }
-      if (call.function.name === 'report_findings') return parseFindings(args);
+      if (call.function.name === finish) return args;
       let content: string;
       if (args === undefined) {
         content = 'error: tool arguments are not valid JSON';

@@ -2,15 +2,16 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { addedLines, openSource, ToolError } from './git.ts';
-import { toComment, validate, type Severity } from './findings.ts';
+import { sanitize, stillReported, toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation } from './store.ts';
-import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment } from './ports.ts';
+import { runVerifier, type Verdict } from './verifier.ts';
+import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
 
-export const AGENTS = ['orchestrator', ...FOCUSES] as const;
+export const AGENTS = ['orchestrator', 'verifier', ...FOCUSES] as const;
 export type Agent = (typeof AGENTS)[number];
 
 /** Overrides for one agent; anything unset takes the deployment-wide default. */
@@ -69,7 +70,7 @@ export interface Delivery {
 export type Log = (entry: Record<string, unknown>) => void;
 
 /** Where a run failed. `run` is anything outside the named steps (a token mint, a PR lookup, a git read). */
-type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'threads' | 'publish' | 'run';
+type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'verifier' | 'threads' | 'publish' | 'run';
 
 /** A failure already logged, its message prefixed with the step. */
 class StepError extends Error {}
@@ -138,6 +139,36 @@ export function createApp(deps: {
   /** One line per step of a run, so the logs alone show what it reviewed, who ran and what they found. */
   function progress(job: Job, msg: string, extra: Record<string, unknown> = {}) {
     log({ level: 'info', msg, run: job.id, repo: job.repo, pr: job.pr, ...extra });
+  }
+
+  /**
+   * Reply to and resolve the threads the verifier judged fixed, and answer open ones where the author spoke last
+   * (answering every open thread would repeat itself on each push). Only while this run is still current.
+   * Returns the ids of the threads now resolved; a thread that fails to update stays open.
+   */
+  async function settleThreads(job: Job, token: string, verdicts: Verdict[]): Promise<Set<string>> {
+    const resolved = new Set<string>();
+    const act = verdicts.filter((v) => v.resolved || v.thread.comments.at(-1)?.byApp === false);
+    if (!act.length || store.superseded(job.id)) return resolved;
+    try {
+      if (!isCurrent(await github.getPullRequest(token, job.repo, job.pr), job)) return resolved;
+    } catch (err) {
+      logFailure(job, 'threads', err, false);
+      return resolved;
+    }
+    for (const v of act) {
+      try {
+        // Reply first: a crash in between leaves an open thread with its explanation, which the next run re-checks.
+        await github.replyToThread(token, v.thread.id, sanitize(`${v.resolved ? 'Resolved: ' : ''}${v.reply}`, job.repo));
+        if (v.resolved) {
+          await github.resolveThread(token, v.thread.id);
+          resolved.add(v.thread.id);
+        }
+      } catch (err) {
+        logFailure(job, 'threads', err, false);
+      }
+    }
+    return resolved;
   }
 
   /** `warn` when something retries or falls back, `error` when it gives up. Messages only: they carry no credentials. */
@@ -334,6 +365,25 @@ export function createApp(deps: {
         }
       }
     }
+    // The verifier re-checks this app's open threads whether or not reviewers ran: a deletion can be the fix.
+    let open: ReviewThread[] | undefined;
+    let verdicts: Verdict[] = [];
+    let verifierFailed = false;
+    try {
+      open = await github.openThreads(token, job.repo, job.pr);
+    } catch (err) {
+      logFailure(job, 'threads', err, false);
+    }
+    if (open?.length) {
+      try {
+        verdicts = await runVerifier({
+          chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads: open,
+        });
+      } catch (err) {
+        verifierFailed = true;
+        logFailure(job, 'verifier', err, false);
+      }
+    }
     if (store.superseded(job.id)) return;
     const fallbackUsed = orchestratorError !== undefined;
     const changed = addedLines(diff);
@@ -346,23 +396,40 @@ export function createApp(deps: {
 
     const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
-    const anyFailed = focuses.some((f) => f.status === 'failed');
-    // Clean: reviewers ran and all finished, nothing went unreviewed, and every finding fell below the threshold.
-    // Any other outcome (unanchorable, duplicate, already_reviewed, ...) is a problem a reviewer still sees.
-    // A push that runs no reviewers (deletions only) is never clean: a deleted check is what it would hide.
+    const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
+    const unreviewed = scope.skipped.length + scope.binary.length;
+
+    // A thread whose finding a reviewer reported again stays open, even if the verifier thinks otherwise.
+    const resolved = await settleThreads(job, token, verdicts.filter((v) => !v.resolved || !stillReported(v.thread, findings)));
+    const stillOpen = open?.filter((t) => !resolved.has(t.id));
+    progress(job, 'threads checked', { open: open?.length, resolved: resolved.size });
+
+    // Everything that stops an approval, each specific enough for the PR's author to act on.
+    // Any finding outcome but below_threshold is a problem someone still sees (published, unanchorable, ...).
     // On an incremental run, an earlier run may have dropped findings for the comment cap: they never became threads.
     // ponytail: that check reads run records, which are pruned after retentionDays; a PR busy for longer can lose them.
-    const clean = focuses.length > 0 && !anyFailed && !scope.skipped.length && !scope.binary.length
-      && findings.every((f) => f.outcome === 'below_threshold')
-      && !(since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha));
-    // Earlier comments still count until someone resolves their threads: a later run may only have seen new lines.
-    // If the threads can't be read, the run simply doesn't approve.
-    const approve = clean && config.approveWhenClean === true
-      && await github.unresolvedThreads(token, job.repo, job.pr).catch((err) => (logFailure(job, 'threads', err, false), -1)) === 0;
-    const outcomes: Record<string, number> = {};
-    for (const f of findings) outcomes[f.outcome] = (outcomes[f.outcome] ?? 0) + 1;
-    progress(job, 'review decided', { comments: comments.length, approve, findings: outcomes });
-    if (!approve && comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
+    const count = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`;
+    const reReported = findings.filter((f) => f.outcome === 'already_reviewed' || f.outcome === 'duplicate').length;
+    const notPosted = findings.filter((f) => f.outcome === 'unanchorable').length;
+    const blockers = [
+      // A push that runs no reviewers (deletions only) is never clean: a deleted check is what it would hide.
+      focuses.length === 0 && `no reviewers ran on this push; add the \`${label}\` label for a full review`,
+      failed.length > 0 && `the ${listed(failed)} review failed`,
+      unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
+      comments.length > 0 && `${count(comments.length, 'new issue')} commented inline`,
+      reReported > 0 && `a reviewer still reports ${count(reReported, 'earlier issue')}`,
+      notPosted > 0 && `${count(notPosted, 'issue')} found outside the changed lines`,
+      since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha)
+        && 'an earlier review left issues uncommented over its comment cap',
+      open === undefined && "this PR's review threads couldn't be read",
+      verifierFailed && `${count(open!.length, 'open review thread')} couldn't be re-checked`,
+      !verifierFailed && stillOpen?.length && `${count(stillOpen.length, 'review thread')} still open, on ${
+        pathList([...new Set(stillOpen.map((t) => t.path))], ', ', 10)}`,
+    ].filter((b): b is string => typeof b === 'string');
+    const approve = config.approveWhenClean === true && blockers.length === 0;
+    progress(job, 'review decided', { comments: comments.length, approve, blockers: blockers.length, findings: outcomes(findings) });
+    // With approvals on, every run says where the PR stands, even when there is nothing else to post.
+    if (!config.approveWhenClean && comments.length === 0 && !oversized && !unreviewed && !failed.length) {
       return store.finish(job.id, 'nothing_to_publish', record);
     }
 
@@ -373,6 +440,7 @@ export function createApp(deps: {
       event: approve ? 'APPROVE' as const : 'COMMENT' as const,
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
+        blockers: config.approveWhenClean ? blockers : [],
       }),
       comments,
     };
@@ -473,8 +541,17 @@ function pathList(paths: string[], sep: string, max: number): string {
 
 const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
 
+/** Findings counted by outcome, for the log. */
+function outcomes(findings: { outcome: string }[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const f of findings) out[f.outcome] = (out[f.outcome] ?? 0) + 1;
+  return out;
+}
+
 function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
+  /** Why this run didn't approve, when approvals are on. */
+  blockers: string[];
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -491,6 +568,7 @@ function summary(job: Job, count: number, notes: {
     notes.since && `Comments only on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed.`,
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
+    notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),

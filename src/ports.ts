@@ -27,6 +27,17 @@ export interface NewReview {
   comments: ReviewComment[];
 }
 
+/** An unresolved review thread this app started. */
+export interface ReviewThread {
+  id: string;
+  path: string;
+  /** The line at the head revision; null once the code it was posted on has changed. */
+  line: number | null;
+  /** The diff hunk the first comment was posted on, as it was then. */
+  diffHunk: string;
+  comments: { byApp: boolean; body: string }[];
+}
+
 export interface GitHubPort {
   mintToken(installationId: number): Promise<string>;
   /** URL the bare clone fetches from. Credentials never go in it. */
@@ -35,8 +46,10 @@ export interface GitHubPort {
   /** Reviews this app posted on the PR; anyone else's are left out, so nobody can forge the marker. */
   listReviews(token: string, repo: string, number: number): Promise<{ id: number; body: string }[]>;
   createReview(token: string, repo: string, number: number, review: NewReview): Promise<{ id: number }>;
-  /** How many review threads this app started on the PR are still unresolved. */
-  unresolvedThreads(token: string, repo: string, number: number): Promise<number>;
+  /** The review threads this app started on the PR that are still unresolved. */
+  openThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
+  replyToThread(token: string, threadId: string, body: string): Promise<void>;
+  resolveThread(token: string, threadId: string): Promise<void>;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).

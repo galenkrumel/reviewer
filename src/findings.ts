@@ -1,5 +1,5 @@
 // Deterministic finding validation and comment formatting. Nothing here trusts the model.
-import type { ReviewComment } from './ports.ts';
+import type { ReviewComment, ReviewThread } from './ports.ts';
 import type { Finding, RecordedFinding } from './store.ts';
 
 export type Severity = Finding['severity'];
@@ -59,6 +59,16 @@ export function validate(
   return out;
 }
 
+/**
+ * Whether a finding this run reported again (held back as already reviewed, or a duplicate of an earlier comment)
+ * is the one a thread raised: same path, and a nearby line or the same title. Such a thread must stay open.
+ */
+export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
+  const opening = normalizeTitle(thread.comments[0]?.body.split('\n')[0] ?? '');
+  return findings.some((f) => (f.outcome === 'already_reviewed' || f.outcome === 'duplicate') && f.path === thread.path
+    && ((thread.line !== null && Math.abs(thread.line - f.line) <= MERGE_WINDOW) || opening === normalizeTitle(f.title)));
+}
+
 /** The inline comment for a published finding. A multi-line range anchors only if every line in it was added. */
 export function toComment(f: RecordedFinding, changed: Map<string, Set<number>>, repo: string): ReviewComment {
   const added = changed.get(f.path)!;
@@ -83,7 +93,7 @@ export function toComment(f: RecordedFinding, changed: Map<string, Set<number>>,
  * Neutralize @-mentions, HTML tags and entities, and drop links that don't point into the reviewed repo on github.com.
  * ponytail: code spans in prose get the zero-width spaces too; parsing code like GitHub does is the upgrade.
  */
-function sanitize(text: string, repo: string): string {
+export function sanitize(text: string, repo: string): string {
   const prefix = `https://github.com/${repo}`.toLowerCase();
   const allowed = (url: string) => {
     const u = url.toLowerCase();
