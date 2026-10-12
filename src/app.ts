@@ -144,31 +144,42 @@ export function createApp(deps: {
   /**
    * Reply to and resolve the threads the verifier judged fixed, and answer open ones where the author spoke last
    * (answering every open thread would repeat itself on each push). Only while this run is still current.
-   * Returns the ids of the threads now resolved; a thread that fails to update stays open.
+   * Resolving can be refused (GitHub may want more than pull request write), so a thread counts as closed once its
+   * fix is verified and the reply carrying VERIFIED is posted; threads verified on earlier runs get another try.
+   * Returns the ids of the closed threads; a thread whose reply fails stays open.
    */
-  async function settleThreads(job: Job, token: string, verdicts: Verdict[]): Promise<Set<string>> {
-    const resolved = new Set<string>();
+  async function settleThreads(job: Job, token: string, verdicts: Verdict[], verified: ReviewThread[]) {
+    const closed = new Set<string>();
+    let resolved = 0;
     const act = verdicts.filter((v) => v.resolved || v.thread.comments.at(-1)?.byApp === false);
-    if (!act.length || store.superseded(job.id)) return resolved;
+    if ((!act.length && !verified.length) || store.superseded(job.id)) return { closed, resolved };
     try {
-      if (!isCurrent(await github.getPullRequest(token, job.repo, job.pr), job)) return resolved;
+      if (!isCurrent(await github.getPullRequest(token, job.repo, job.pr), job)) return { closed, resolved };
     } catch (err) {
       logFailure(job, 'threads', err, false);
-      return resolved;
+      return { closed, resolved };
     }
+    const refused: unknown[] = [];
+    const resolve = async (id: string) => {
+      closed.add(id);
+      await github.resolveThread(token, id).then(() => resolved++, (err) => refused.push(err));
+    };
+    for (const t of verified) await resolve(t.id);
     for (const v of act) {
+      // The model sometimes writes the prefix itself.
+      const reply = sanitize(v.reply.replace(/^\s*resolved:\s*/i, ''), job.repo);
       try {
         // Reply first: a crash in between leaves an open thread with its explanation, which the next run re-checks.
-        await github.replyToThread(token, v.thread.id, sanitize(`${v.resolved ? 'Resolved: ' : ''}${v.reply}`, job.repo));
-        if (v.resolved) {
-          await github.resolveThread(token, v.thread.id);
-          resolved.add(v.thread.id);
-        }
+        await github.replyToThread(token, v.thread.id, v.resolved ? `Resolved: ${reply}\n\n${VERIFIED}` : reply);
       } catch (err) {
         logFailure(job, 'threads', err, false);
+        continue;
       }
+      if (v.resolved) await resolve(v.thread.id);
     }
-    return resolved;
+    // Once per run, not per thread: a refusal repeats on every thread and every run until the permission changes.
+    if (refused.length) logFailure(job, 'threads', refused[0], false, { unresolved: refused.length });
+    return { closed, resolved };
   }
 
   /** `warn` when something retries or falls back, `error` when it gives up. Messages only: they carry no credentials. */
@@ -377,9 +388,13 @@ export function createApp(deps: {
     // Only people who could resolve a thread themselves get a say: the PR's author and those with write access.
     // Anyone else's replies (anyone at all, on a public repo) never reach the verifier.
     open = open?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
-    if (open?.length) {
+    // Verified on an earlier run (the app's VERIFIED reply is still the last word): not checked again.
+    // ponytail: a later push can't reopen a verified thread; a reviewer reporting the issue again keeps it open.
+    const verified = open?.filter(isVerified) ?? [];
+    const unverified = open?.filter((t) => !verified.includes(t));
+    if (unverified?.length) {
       const verify = () => runVerifier({
-        chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads: open!,
+        chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads: unverified,
       });
       try {
         // One retry for a malformed report, as reviewers get; a blown budget would only be spent again.
@@ -409,9 +424,11 @@ export function createApp(deps: {
     const unreviewed = scope.skipped.length + scope.binary.length;
 
     // A thread whose finding a reviewer reported again stays open, even if the verifier thinks otherwise.
-    const resolved = await settleThreads(job, token, verdicts.filter((v) => !v.resolved || !stillReported(v.thread, findings)));
-    const stillOpen = open?.filter((t) => !resolved.has(t.id));
-    progress(job, 'threads checked', { open: open?.length, resolved: resolved.size });
+    const { closed, resolved } = await settleThreads(job, token,
+      verdicts.filter((v) => !v.resolved || !stillReported(v.thread, findings)),
+      verified.filter((t) => !stillReported(t, findings)));
+    const stillOpen = open?.filter((t) => !closed.has(t.id));
+    progress(job, 'threads checked', { open: open?.length, closed: closed.size, resolved });
 
     // Everything that stops an approval, each specific enough for the PR's author to act on.
     // Any finding outcome but below_threshold is a problem someone still sees (published, unanchorable, ...).
@@ -443,7 +460,7 @@ export function createApp(deps: {
       since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha)
         && 'an earlier review left issues uncommented over its comment cap',
       open === undefined && "this PR's review threads couldn't be read",
-      verifierFailed && `${count(open!.length, 'open review thread')} couldn't be re-checked`,
+      verifierFailed && `${count(unverified!.length, 'open review thread')} couldn't be re-checked`,
       !verifierFailed && stillOpen?.length && `${count(stillOpen.length, 'review thread')} still open, on ${
         pathList([...new Set(stillOpen.map((t) => t.path))], ', ', 10)}`,
     ].filter((b): b is string => typeof b === 'string');
@@ -581,7 +598,7 @@ function summary(job: Job, count: number, notes: {
       + `${notes.splitAbove}-line limit. Consider splitting it.** Directories involved: ${
         pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\`: `
-      + (notes.approve ? 'no issues found, and every earlier comment is resolved. Approved.'
+      + (notes.approve ? 'no issues found, and every earlier comment is resolved or verified fixed. Approved.'
         : count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented inline.`),
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
@@ -594,6 +611,19 @@ function summary(job: Job, count: number, notes: {
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),
   ].filter(Boolean).join('\n\n');
+}
+
+/** Ends a reply that verified a thread fixed. Only the app's own comments are trusted to carry it. */
+const VERIFIED = '<!-- ai-review:verified -->';
+
+/**
+ * Whether the thread's last trusted word is the app's verified reply. Only a reply (never the thread's first
+ * comment, a finding whose suggestion fence isn't sanitized) that ends with the marker counts: model text is
+ * sanitized everywhere else, so nothing PR-influenced can end a reply with it.
+ */
+function isVerified(t: ReviewThread): boolean {
+  const last = t.comments.at(-1);
+  return t.comments.length > 1 && !!last?.byApp && last.body.endsWith(`\n\n${VERIFIED}`);
 }
 
 // A label re-review repeats a head/base pair on purpose, so its marker also names the run.

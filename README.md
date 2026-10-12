@@ -99,7 +99,7 @@ Optional:
 | `REVIEW_TOKEN_BUDGET` | `50000` | Estimated diff tokens given to reviewers; files past it are skipped and listed |
 | `WORKER_CONCURRENCY` | `2` | Jobs reviewed at once |
 | `RETENTION_DAYS` | `90` | Finished run records older than this are deleted, at startup and daily |
-| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when a run finds nothing, every reviewer finished, nothing went unreviewed, and every thread the App started is resolved. Otherwise every run posts a review whose **Not approved:** line names what blocks it. See the note below |
+| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when a run finds nothing, every reviewer finished, nothing went unreviewed, and every thread the App started is resolved or verified fixed (the App resolves threads it verifies; without contents write, GitHub may refuse, and the threads stay visibly open). Otherwise every run posts a review whose **Not approved:** line names what blocks it. See the note below |
 | `DATA_DIR` | `./data` | Persistent volume for SQLite and bare clones |
 | `PORT` | `3000` | HTTP port; Render sets it |
 
