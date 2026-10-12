@@ -62,41 +62,40 @@ export const READ_TOOLS: ToolDef[] = [
   tool('diff', 'The pull request diff from base to head, optionally for one path.', { path: PATH }),
 ];
 
-const REPORT: ToolDef =
-  {
-    type: 'function',
-    function: {
-      name: 'report_findings',
-      description: 'Report your findings and finish the review.',
-      parameters: {
-        type: 'object',
-        properties: {
-          findings: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                title: { type: 'string' },
-                severity: { type: 'string', enum: [...SEVERITIES].reverse() },
-                confidence: { type: 'number', minimum: 0, maximum: 1 },
-                path: { type: 'string' },
-                line: { type: 'integer' },
-                start_line: { type: 'integer' },
-                evidence: { type: 'string' },
-                suggested_fix: { type: 'string', description: 'Replacement code for the anchored lines, or prose' },
-                fix_replaces_anchor: {
-                  type: 'boolean',
-                  description: 'True only when suggested_fix is the exact replacement for lines start_line..line (or line)',
-                },
+const REPORT: ToolDef = {
+  type: 'function',
+  function: {
+    name: 'report_findings',
+    description: 'Report your findings and finish the review.',
+    parameters: {
+      type: 'object',
+      properties: {
+        findings: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              severity: { type: 'string', enum: [...SEVERITIES].reverse() },
+              confidence: { type: 'number', minimum: 0, maximum: 1 },
+              path: { type: 'string' },
+              line: { type: 'integer' },
+              start_line: { type: 'integer' },
+              evidence: { type: 'string' },
+              suggested_fix: { type: 'string', description: 'Replacement code for the anchored lines, or prose' },
+              fix_replaces_anchor: {
+                type: 'boolean',
+                description: 'True only when suggested_fix is the exact replacement for lines start_line..line (or line)',
               },
-              required: ['title', 'severity', 'confidence', 'path', 'line', 'evidence'],
             },
+            required: ['title', 'severity', 'confidence', 'path', 'line', 'evidence'],
           },
         },
-        required: ['findings'],
       },
+      required: ['findings'],
     },
-  };
+  },
+};
 
 /** Wrap PR content in a data block it cannot close early. */
 export const untrusted = (label: string, text: string) =>
