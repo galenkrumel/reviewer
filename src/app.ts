@@ -135,6 +135,11 @@ export function createApp(deps: {
     };
   }
 
+  /** One line per step of a run, so the logs alone show what it reviewed, who ran and what they found. */
+  function progress(job: Job, msg: string, extra: Record<string, unknown> = {}) {
+    log({ level: 'info', msg, run: job.id, repo: job.repo, pr: job.pr, ...extra });
+  }
+
   /** `warn` when something retries or falls back, `error` when it gives up. Messages only: they carry no credentials. */
   function logFailure(job: Job, step: Step, err: unknown, final: boolean, extra: Record<string, unknown> = {}) {
     log({
@@ -224,6 +229,7 @@ export function createApp(deps: {
   }
 
   async function reviewJob(job: Job) {
+    progress(job, 'run started', { event: job.event, head: job.headSha.slice(0, 7) });
     const token = await github.mintToken(job.installationId);
     // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
     const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
@@ -276,6 +282,10 @@ export function createApp(deps: {
     if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
     const since = newDiff === undefined ? undefined : last;
     const fresh = newDiff === undefined ? undefined : addedLines(newDiff);
+    progress(job, 'scope', {
+      changed: files.length, reviewed: scope.reviewed.length, excluded: excluded.size, skipped: scope.skipped.length,
+      binary: scope.binary.length, lines: scope.reviewableLines, ...(since !== undefined && { since: since.slice(0, 7) }),
+    });
     // Nothing added since then (a deletion has no line to comment on): no reviewer is worth paying for.
     if (scope.reviewed.length && (!fresh || [...fresh.values()].some((lines) => lines.size))) {
       let picks: Pick[];
@@ -294,7 +304,9 @@ export function createApp(deps: {
       // Sequential: one reviewer's failure never stops the others.
       // Disabled focuses leave before the cap, so they take no slot. The always-on ones can't be disabled.
       const enabled = picks.filter((p) => !settings.disabledFocuses.has(p.focus));
-      for (const { focus, reason } of selectFocuses(enabled, scope.reviewed.map((f) => f.path), settings.maxReviewers)) {
+      const selected = selectFocuses(enabled, scope.reviewed.map((f) => f.path), settings.maxReviewers);
+      progress(job, 'reviewers picked', { focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined });
+      for (const { focus, reason } of selected) {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
           focus, chat: meteredChat(focus, invocations), maxTurns: agentConfig(focus).maxTurns,
@@ -311,6 +323,11 @@ export function createApp(deps: {
           });
           reported.push(...found.map((finding) => ({ focus, finding })));
           focuses.push({ focus, reason, status: 'succeeded' });
+          const used = invocations.filter((i) => i.agent === focus);
+          progress(job, 'reviewer finished', {
+            focus, findings: found.length, tokens: used.reduce((n, i) => n + i.inputTokens + i.outputTokens, 0),
+            cost: used.reduce((n, i) => n + i.cost, 0),
+          });
         } catch (err) {
           failed(err, true);
           focuses.push({ focus, reason, status: 'failed', error: errorMessage(err) });
@@ -342,6 +359,9 @@ export function createApp(deps: {
     // If the threads can't be read, the run simply doesn't approve.
     const approve = clean && config.approveWhenClean === true
       && await github.unresolvedThreads(token, job.repo, job.pr).catch((err) => (logFailure(job, 'threads', err, false), -1)) === 0;
+    const outcomes: Record<string, number> = {};
+    for (const f of findings) outcomes[f.outcome] = (outcomes[f.outcome] ?? 0) + 1;
+    progress(job, 'review decided', { comments: comments.length, approve, findings: outcomes });
     if (!approve && comments.length === 0 && !oversized && !scope.skipped.length && !scope.binary.length && !anyFailed) {
       return store.finish(job.id, 'nothing_to_publish', record);
     }

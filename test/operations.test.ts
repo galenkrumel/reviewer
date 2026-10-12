@@ -247,3 +247,22 @@ test('every finished run logs its outcome', async () => {
   );
   assert.equal(typeof finished[0]!.cost, 'number');
 });
+
+test('a run logs each step: what it reviewed, which reviewers ran, what they found and what it decided', async () => {
+  const { pr, github } = setup();
+  const { app, logs } = testApp({ model: new ScriptedModel([report()]), github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const steps = logs.filter((l) => l.run !== undefined && l.level === 'info');
+  assert.deepEqual(steps.map((l) => l.msg),
+    ['run started', 'scope', 'reviewers picked', 'reviewer finished', 'reviewer finished', 'review decided', 'run finished']);
+  assert.ok(steps.every((l) => l.repo === REPO && l.pr === 7));
+  const scope = steps.find((l) => l.msg === 'scope')!;
+  assert.equal(scope.reviewed, 1);
+  const correctness = steps.find((l) => l.msg === 'reviewer finished' && l.focus === 'correctness')!;
+  assert.equal(correctness.findings, 1);
+  assert.equal(correctness.tokens, 120);
+  assert.deepEqual(steps.find((l) => l.msg === 'review decided')!.findings, { published: 1 });
+});
