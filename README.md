@@ -87,7 +87,7 @@ Optional:
 | `REVIEW_FALLBACK_MODEL` | none | Default fallback model, passed in OpenRouter's `models` array |
 | `<AGENT>_MODEL`, `<AGENT>_FALLBACK_MODEL` | `REVIEW_MODEL`, `REVIEW_FALLBACK_MODEL` | Per-agent overrides; `<AGENT>` is `ORCHESTRATOR`, `CORRECTNESS`, `SECURITY`, `PERFORMANCE`, `ARCHITECTURE` or `CONCISENESS`. Startup fails if any configured model lacks tool support on OpenRouter |
 | `<AGENT>_MAX_TURNS` | `20` | Model calls per reviewer invocation; over it, the reviewer fails |
-| `<AGENT>_MAX_TOKENS` | `500000` | Input plus output tokens per invocation; over it, the agent fails |
+| `<AGENT>_MAX_TOKENS` | `2000000` | Input plus output tokens per invocation, summed over its calls; each call resends the whole conversation, so this grows with every turn. Over it, the agent fails |
 | `MAX_REVIEWERS` | `3` | Reviewer cap per run, at least 2 (correctness and security always run on code changes) |
 | `REVIEW_OUTSIDE_PRS` | `label` | PRs from authors other than OWNER/MEMBER/COLLABORATOR: `label` (only while labelled), `always`, `never` |
 | `REVIEW_LABEL` | `ai-review` | Label that opts a PR in and triggers a (re-)review |

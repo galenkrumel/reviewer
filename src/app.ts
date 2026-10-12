@@ -19,7 +19,7 @@ export interface AgentConfig {
   fallbackModel?: string;
   /** Model calls per reviewer invocation. Default 20. The orchestrator makes one. */
   maxTurns?: number;
-  /** Input plus output tokens per invocation, summed over its calls. Default 500000. */
+  /** Input plus output tokens per invocation, summed over its calls; every call resends the whole conversation. Default 2000000. */
   maxTokens?: number;
 }
 
@@ -103,7 +103,7 @@ export function createApp(deps: {
       model: c?.model ?? config.model,
       fallbackModel: c?.fallbackModel ?? config.fallbackModel,
       maxTurns: c?.maxTurns ?? 20,
-      maxTokens: c?.maxTokens ?? 500_000,
+      maxTokens: c?.maxTokens ?? 2_000_000,
     };
   };
 
