@@ -390,7 +390,7 @@ export function createApp(deps: {
     open = open?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
     // Verified on an earlier run (the app's VERIFIED reply is still the last word): not checked again.
     // ponytail: a later push can't reopen a verified thread; a reviewer reporting the issue again keeps it open.
-    const verified = open?.filter((t) => t.comments.at(-1)?.byApp && t.comments.at(-1)!.body.includes(VERIFIED)) ?? [];
+    const verified = open?.filter(isVerified) ?? [];
     const unverified = open?.filter((t) => !verified.includes(t));
     if (unverified?.length) {
       const verify = () => runVerifier({
@@ -615,6 +615,16 @@ function summary(job: Job, count: number, notes: {
 
 /** Ends a reply that verified a thread fixed. Only the app's own comments are trusted to carry it. */
 const VERIFIED = '<!-- ai-review:verified -->';
+
+/**
+ * Whether the thread's last trusted word is the app's verified reply. Only a reply (never the thread's first
+ * comment, a finding whose suggestion fence isn't sanitized) that ends with the marker counts: model text is
+ * sanitized everywhere else, so nothing PR-influenced can end a reply with it.
+ */
+function isVerified(t: ReviewThread): boolean {
+  const last = t.comments.at(-1);
+  return t.comments.length > 1 && !!last?.byApp && last.body.endsWith(`\n\n${VERIFIED}`);
+}
 
 // A label re-review repeats a head/base pair on purpose, so its marker also names the run.
 const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha}${
