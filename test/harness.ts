@@ -111,7 +111,10 @@ export class FakeGitHub implements GitHubPort {
   addThread(repo: string, number: number, path: string, line: number | null, body: string) {
     const key = `${repo}#${number}`;
     const list = this.threads.get(key) ?? [];
-    const thread = { id: `T${list.length}`, path, line, diffHunk: '@@ -1 +1 @@', comments: [{ byApp: true, body }], resolved: false };
+    const thread = {
+      id: `T${list.length}`, path, line, diffHunk: '@@ -1 +1 @@', resolved: false,
+      comments: [{ byApp: true, byPrAuthor: false, association: 'NONE', body }],
+    };
     list.push(thread);
     this.threads.set(key, list);
     return thread;
@@ -132,7 +135,7 @@ export class FakeGitHub implements GitHubPort {
 
   async replyToThread(token: string, threadId: string, body: string) {
     this.checkToken(token);
-    this.thread(threadId).comments.push({ byApp: true, body });
+    this.thread(threadId).comments.push({ byApp: true, byPrAuthor: false, association: 'NONE', body });
   }
 
   async resolveThread(token: string, threadId: string) {

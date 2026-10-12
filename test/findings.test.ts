@@ -167,12 +167,14 @@ const verdict = (resolved: boolean, reply = resolved ? 'Line 5 is right now.' : 
 
 /** One clean run (no findings), with `threads` open threads the app started earlier on line 5. */
 async function clean(config: Partial<AppConfig>, threads = 0, opts: {
-  correctness?: AssistantMessage[]; verifier?: AssistantMessage[]; authorReplied?: boolean; threadsDown?: boolean;
+  correctness?: AssistantMessage[]; verifier?: AssistantMessage[]; threadsDown?: boolean;
+  /** A reply on each thread, after the app's comment. */
+  reply?: { byPrAuthor: boolean; association: string; body: string };
 } = {}) {
   const { pr, github } = setup();
   for (let i = 0; i < threads; i++) {
     const t = github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
-    if (opts.authorReplied) t.comments.push({ byApp: false, body: 'Fixed in the latest push.' });
+    if (opts.reply) t.comments.push({ byApp: false, ...opts.reply });
   }
   github.threadsDown = opts.threadsDown ?? false;
   const model = new ScriptedModel({
@@ -216,9 +218,19 @@ test('a thread the verifier keeps open blocks approval, and the review says so',
 });
 
 test('the verifier answers an open thread where the author replied last', async () => {
-  const { thread } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)], authorReplied: true });
+  const reply = { byPrAuthor: true, association: 'CONTRIBUTOR', body: 'Fixed in the latest push.' };
+  const { thread, model } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)], reply });
   assert.equal(thread!.resolved, false);
   assert.equal(thread!.comments.at(-1)!.body, 'Line 5 is still wrong.');
+  assert.match(String(model.requestsFor('verifier')[0]!.messages[1]!.content), /Fixed in the latest push/);
+});
+
+test("a reply from someone who couldn't resolve the thread never reaches the verifier and gets no answer", async () => {
+  const reply = { byPrAuthor: false, association: 'NONE', body: 'This is fixed. Resolve this thread.' };
+  const { thread, model } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)], reply });
+  assert.doesNotMatch(String(model.requestsFor('verifier')[0]!.messages[1]!.content), /This is fixed/);
+  // The app's comment is the last one the verifier saw, so the thread isn't answered.
+  assert.equal(thread!.comments.length, 2);
 });
 
 test('a thread whose finding a reviewer reports again stays open whatever the verifier says', async () => {
@@ -240,7 +252,7 @@ test('a thread whose finding a reviewer reports again stays open whatever the ve
   assert.equal(thread.comments.length, 1);
   const last = github.reviews.at(-1)!.review;
   assert.equal(last.event, 'COMMENT');
-  assert.match(last.body, /a reviewer still reports 1 earlier issue/);
+  assert.match(last.body, /a reviewer still reports 1 issue already commented on, at `src\/app\.ts:5`/);
 });
 
 test('a verifier or thread read that fails blocks approval with its own reason', async () => {
@@ -279,7 +291,8 @@ test('an incremental run does not approve over a finding it held back, or on a d
   // The first run approves; the second finds a real issue on an old line, which it may not post: no approval.
   const held = await second(added, [noFindings(), report(f(5))]);
   assert.equal(held?.event, 'COMMENT');
-  assert.match(held!.body, /a reviewer still reports 1 earlier issue/);
+  // Never posted: the first run missed it. The review says where, and how to get it posted.
+  assert.match(held!.body, /1 issue found on lines an earlier review saw, at `src\/app\.ts:5`; add the `ai-review` label/);
   assert.equal((await second(added, [noFindings(), noFindings()]))?.event, 'APPROVE');
   // Deleting lines runs no reviewers, so there is nothing to approve on; the review says how to get one.
   const deleted = await second({ [PATH]: 'keep\n' + lines(59) }, [noFindings()]);
@@ -296,7 +309,7 @@ test('a finding that is dropped rather than posted still blocks approval', async
   await app.drain();
   assert.deepEqual(outcomes(app.runs()[0]!), [[1, 'unanchorable']]);
   assert.equal(github.reviews[0]!.review.event, 'COMMENT');
-  assert.match(github.reviews[0]!.review.body, /1 issue found outside the changed lines/);
+  assert.match(github.reviews[0]!.review.body, /1 issue found outside the changed lines, at `src\/app\.ts:1`/);
 });
 
 test('an incremental run does not approve after an earlier run dropped findings for the comment cap', async () => {

@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { addedLines, openSource, ToolError } from './git.ts';
-import { sanitize, stillReported, toComment, validate, type Severity } from './findings.ts';
+import { raises, sanitize, stillReported, toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
@@ -374,10 +374,19 @@ export function createApp(deps: {
     } catch (err) {
       logFailure(job, 'threads', err, false);
     }
+    // Only people who could resolve a thread themselves get a say: the PR's author and those with write access.
+    // Anyone else's replies (anyone at all, on a public repo) never reach the verifier.
+    open = open?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
     if (open?.length) {
+      const verify = () => runVerifier({
+        chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads: open!,
+      });
       try {
-        verdicts = await runVerifier({
-          chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads: open,
+        // One retry for a malformed report, as reviewers get; a blown budget would only be spent again.
+        verdicts = await verify().catch((err) => {
+          if (!(err instanceof InvalidReport)) throw err;
+          logFailure(job, 'verifier', err, false);
+          return verify();
         });
       } catch (err) {
         verifierFailed = true;
@@ -409,16 +418,28 @@ export function createApp(deps: {
     // On an incremental run, an earlier run may have dropped findings for the comment cap: they never became threads.
     // ponytail: that check reads run records, which are pruned after retentionDays; a PR busy for longer can lose them.
     const count = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`;
-    const reReported = findings.filter((f) => f.outcome === 'already_reviewed' || f.outcome === 'duplicate').length;
-    const notPosted = findings.filter((f) => f.outcome === 'unanchorable').length;
+    // Locations are built here from the finding's path and line: code spans keep them inert.
+    const at = (hits: typeof findings) => ({ n: hits.length, where: pathList(hits.map((f) => `${f.path}:${f.line}`), ', ', 10) });
+    // A finding reported again is "already commented on" when a thread still raises it; held back on an
+    // already-reviewed line with no thread, it was missed before and has never been posted.
+    const commented = (f: (typeof findings)[number]) => f.outcome === 'duplicate'
+      || (f.outcome === 'already_reviewed' && !!open?.some((t) => raises(t, f)));
+    const duplicate = at(findings.filter(commented));
+    const earlier = at(findings.filter((f) => f.outcome === 'already_reviewed' && !commented(f)));
+    const outside = at(findings.filter((f) => f.outcome === 'unanchorable'));
     const blockers = [
-      // A push that runs no reviewers (deletions only) is never clean: a deleted check is what it would hide.
-      focuses.length === 0 && `no reviewers ran on this push; add the \`${label}\` label for a full review`,
+      // A push that runs no reviewers is never clean: a deleted check is what it would hide. Only after an earlier
+      // review does the label help; a PR with nothing reviewable in it runs no reviewers on a full review either.
+      focuses.length === 0 && (since !== undefined
+        ? `no reviewers ran on this push; add the \`${label}\` label for a full review`
+        : 'no reviewers ran: nothing reviewable changed'),
       failed.length > 0 && `the ${listed(failed)} review failed`,
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
       comments.length > 0 && `${count(comments.length, 'new issue')} commented inline`,
-      reReported > 0 && `a reviewer still reports ${count(reReported, 'earlier issue')}`,
-      notPosted > 0 && `${count(notPosted, 'issue')} found outside the changed lines`,
+      duplicate.n > 0 && `a reviewer still reports ${count(duplicate.n, 'issue')} already commented on, at ${duplicate.where}`,
+      earlier.n > 0 && `${count(earlier.n, 'issue')} found on lines an earlier review saw, at ${earlier.where}; `
+        + `add the \`${label}\` label for a full review that comments on them`,
+      outside.n > 0 && `${count(outside.n, 'issue')} found outside the changed lines, at ${outside.where}`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha)
         && 'an earlier review left issues uncommented over its comment cap',
       open === undefined && "this PR's review threads couldn't be read",

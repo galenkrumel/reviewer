@@ -72,17 +72,22 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       for (let after: string | null = null; ;) {
         const data = await graphql(token, `query($owner: String!, $name: String!, $number: Int!, $after: String) {
           repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+            author { login }
             reviewThreads(first: 50, after: $after) {
               pageInfo { hasNextPage endCursor }
-              nodes { id isResolved path line comments(first: 50) { nodes { author { login } body diffHunk } } }
+              nodes { id isResolved path line comments(first: 50) { nodes { author { login } authorAssociation body diffHunk } } }
             } } } }`, { owner, name, number, after });
+        const prAuthor = data.repository.pullRequest.author?.login;
         const threads = data.repository.pullRequest.reviewThreads;
         for (const t of threads.nodes) {
           const comments = t.comments.nodes;
           if (t.isResolved || !byApp(comments[0]?.author?.login)) continue;
           out.push({
             id: t.id, path: t.path, line: t.line ?? null, diffHunk: comments[0].diffHunk ?? '',
-            comments: comments.map((c: any) => ({ byApp: byApp(c.author?.login), body: c.body ?? '' })),
+            comments: comments.map((c: any) => ({
+              byApp: byApp(c.author?.login), byPrAuthor: !!prAuthor && c.author?.login === prAuthor,
+              association: c.authorAssociation ?? 'NONE', body: c.body ?? '',
+            })),
           });
         }
         if (!threads.pageInfo.hasNextPage) return out;

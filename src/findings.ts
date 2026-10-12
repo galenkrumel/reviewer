@@ -64,9 +64,14 @@ export function validate(
  * is the one a thread raised: same path, and a nearby line or the same title. Such a thread must stay open.
  */
 export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
+  return findings.some((f) => (f.outcome === 'already_reviewed' || f.outcome === 'duplicate') && raises(thread, f));
+}
+
+/** Whether a thread is about this finding: same path, and a nearby line or the same title. */
+export function raises(thread: ReviewThread, f: Pick<Finding, 'path' | 'line' | 'title'>): boolean {
   const opening = normalizeTitle(thread.comments[0]?.body.split('\n')[0] ?? '');
-  return findings.some((f) => (f.outcome === 'already_reviewed' || f.outcome === 'duplicate') && f.path === thread.path
-    && ((thread.line !== null && Math.abs(thread.line - f.line) <= MERGE_WINDOW) || opening === normalizeTitle(f.title)));
+  return f.path === thread.path
+    && ((thread.line !== null && Math.abs(thread.line - f.line) <= MERGE_WINDOW) || opening === normalizeTitle(f.title));
 }
 
 /** The inline comment for a published finding. A multi-line range anchors only if every line in it was added. */
