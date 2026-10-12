@@ -68,6 +68,8 @@ export interface ChatRequest {
   models?: string[];
   messages: ChatMessage[];
   tools: ToolDef[];
+  /** OpenRouter session: groups a PR's calls in its dashboard and keeps them on one provider. */
+  session_id?: string;
 }
 
 export interface Usage {
