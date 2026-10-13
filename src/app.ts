@@ -319,7 +319,7 @@ export function createApp(deps: {
     // After a push, only what changed since the last full review is open to comment, even if the base moved forward
     // (main merged in). A label re-review asks for the whole PR again.
     const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewed(job.repo, job.pr, job.headSha);
-    let newDiff = last === undefined ? undefined : await source.diffSince(last.headSha, last.baseSha, reviewedPaths);
+    let newDiff = last === undefined ? undefined : await source.diffSince(last.headSha, last.baseSha, scope.reviewed);
     // The token budget only covered the PR diff. A bigger diff since then (a large revert) gets a full review instead.
     if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
     const since = newDiff === undefined ? undefined : last!.headSha;

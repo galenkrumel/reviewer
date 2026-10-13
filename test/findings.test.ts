@@ -167,6 +167,30 @@ for (const kind of ['merged from main', 'retargeted'] as const) {
   });
 }
 
+test('a file main changed is reviewed whole after the PR merges main, so a merge undoing main is seen', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')],
+    correctness: [noFindings(), report(f(1, { title: 'undoes main' }), f(5, { title: 'old code' }))],
+    security: [noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  // Main fixes line 1; the PR merges main but keeps its own, unfixed line 1.
+  fx.git('checkout', '-q', '--detach', fx.baseSha);
+  const baseSha = fx.push({ [PATH]: 'fixed\n' });
+  fx.git('checkout', '-q', 'main');
+  fx.git('merge', '-q', '--no-edit', '-s', 'ours', baseSha);
+  const pushed = { ...pr, baseSha, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+
+  assert.deepEqual(outcomes(app.runs()[1]!), [[1, 'published'], [5, 'published']]);
+});
+
 /** Opens the PR at a first head, then pushes a second; correctness reports a line-5 finding on the second run. */
 async function twoPushes(first: Record<string, string | null>, second: Record<string, string | null>, config: Partial<AppConfig> = {}) {
   const { fx, pr, github } = setup();
