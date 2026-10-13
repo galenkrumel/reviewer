@@ -53,8 +53,12 @@ export interface Source {
   diff(path?: unknown): Promise<string>;
   /** The PR diff limited to the given paths: what the reviewers are given and what comments anchor against. */
   reviewDiff(paths: string[]): Promise<string>;
-  /** Like reviewDiff, but from an earlier head to this one; undefined if that head can't be fetched. */
-  diffSince(sha: string, paths: string[]): Promise<string | undefined>;
+  /**
+   * Like reviewDiff, but from an earlier head, reviewed against an earlier base, to this one. Files the base changed
+   * since then are given whole, as in reviewDiff. Undefined if either can't be fetched, or that base isn't an ancestor
+   * of this one: a retarget can bring in lines no review saw.
+   */
+  diffSince(sha: string, base: string, files: FileChange[]): Promise<string | undefined>;
   changedFiles(): Promise<FileChange[]>;
   /** The paths marked linguist-generated or linguist-vendored by .gitattributes at the base SHA. */
   markedAtBase(paths: string[]): Promise<Set<string>>;
@@ -118,6 +122,7 @@ export async function openSource(opts: {
     return e?.name === path ? e : undefined;
   }
 
+  const sides = (f: FileChange) => (f.oldPath ? [f.oldPath, f.path] : [f.path]);
   const diff = (revs: string[], paths: string[]) => git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '-M',
     '--no-ext-diff', '--no-textconv', '--no-color', '--src-prefix=a/', '--dst-prefix=b/', ...revs, '--', ...paths);
 
@@ -127,14 +132,28 @@ export async function openSource(opts: {
     // names like `[id].ts` from acting as globs; callers pass both sides of a rename so -M still pairs them.
     reviewDiff: (paths) => diff([range], paths),
 
-    async diffSince(sha, paths) {
-      try {
-        await git('cat-file', '-e', `${sha}^{commit}`);
-      } catch {
-        // A force-push may have removed it from GitHub too; then the whole PR is reviewed again.
-        try { await git('fetch', '-q', '--filter=blob:none', 'origin', sha); } catch { return undefined; }
+    async diffSince(sha, base, files) {
+      for (const rev of [sha, base]) {
+        try {
+          await git('cat-file', '-e', `${rev}^{commit}`);
+        } catch {
+          // A force-push may have removed it from GitHub too; then the whole PR is reviewed again.
+          try { await git('fetch', '-q', '--filter=blob:none', 'origin', rev); } catch { return undefined; }
+        }
       }
-      return diff([sha, headSha], paths);
+      // Merging main in can put back the PR's old version of a line main changed: unchanged since that head, yet
+      // never in a reviewed diff. So a file the base changed since that review is reviewed whole.
+      let moved: Set<string>;
+      try {
+        await git('merge-base', '--is-ancestor', base, baseSha);
+        const from = (await git('merge-base', base, sha)).trim();
+        const to = (await git('merge-base', baseSha, headSha)).trim();
+        moved = new Set((await git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '--name-only', '-z',
+          '--no-renames', from, to, '--', ...files.flatMap(sides))).split('\0'));
+      } catch { return undefined; }
+      const whole = files.filter((f) => sides(f).some((p) => moved.has(p))).flatMap(sides);
+      const rest = files.filter((f) => !sides(f).some((p) => moved.has(p))).flatMap(sides);
+      return (whole.length ? await diff([range], whole) : '') + (rest.length ? await diff([sha, headSha], rest) : '');
     },
 
     async changedFiles() {

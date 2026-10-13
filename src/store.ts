@@ -176,9 +176,9 @@ export function openStore(dataDir: string, clock: Clock) {
 
     /** Findings published on this PR at heads other than `headSha`. */
     /** Whether any run on this PR and base dropped a finding for the comment cap: it was never posted. */
-    droppedOverCap(repo: string, pr: number, baseSha: string): boolean {
+    droppedOverCap(repo: string, pr: number): boolean {
       return db.prepare(`SELECT 1 FROM findings f JOIN runs r ON r.id = f.run_id
-        WHERE r.repo = ? AND r.pr = ? AND r.base_sha = ? AND f.outcome = 'over_cap' LIMIT 1`).get(repo, pr, baseSha) !== undefined;
+        WHERE r.repo = ? AND r.pr = ? AND f.outcome = 'over_cap' LIMIT 1`).get(repo, pr) !== undefined;
     },
 
     postedFindings(repo: string, pr: number, headSha: string): RecordedFinding[] {
@@ -188,16 +188,16 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     /**
-     * The head of the PR's latest run on this base where every reviewer finished and no file was skipped for budget,
+     * The head and base of the PR's latest run where every reviewer finished and no file was skipped for budget,
      * unless it is this head. Otherwise a PR could pad one push to get a file skipped, then never have it reviewed.
      */
-    lastReviewedHead(repo: string, pr: number, baseSha: string, headSha: string): string | undefined {
-      const row = db.prepare(`SELECT head_sha FROM runs r WHERE repo = ? AND pr = ? AND base_sha = ? AND head_sha != ?
+    lastReviewed(repo: string, pr: number, headSha: string): { headSha: string; baseSha: string } | undefined {
+      const row = db.prepare(`SELECT head_sha, base_sha FROM runs r WHERE repo = ? AND pr = ? AND head_sha != ?
         AND status IN ('published', 'nothing_to_publish')
         AND NOT EXISTS (SELECT 1 FROM focuses WHERE run_id = r.id AND json_extract(data, '$.status') = 'failed')
         AND NOT EXISTS (SELECT 1 FROM skipped_files WHERE run_id = r.id)
-        ORDER BY id DESC LIMIT 1`).get(repo, pr, baseSha, headSha) as any;
-      return row?.head_sha;
+        ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha) as any;
+      return row && { headSha: row.head_sha, baseSha: row.base_sha };
     },
 
     /**
