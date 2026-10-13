@@ -52,7 +52,7 @@ export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
   const headSha = commit(head, 'head');
   /** Commit on top of the current head, returning the new head SHA. */
   const push = (files: FixtureFiles) => commit(files, 'push');
-  return { url: `file://${dir}`, baseSha, headSha, push };
+  return { url: `file://${dir}`, baseSha, headSha, push, git };
 }
 
 export class FakeGitHub implements GitHubPort {

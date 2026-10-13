@@ -132,6 +132,41 @@ test('after a push, only lines changed since the last review are commented on', 
   assert.match(content, /<untrusted-data name="changes-since-last-review">[^]*\+const extra = 1;/);
 });
 
+for (const kind of ['merged from main', 'retargeted'] as const) {
+  test(`after a push with the base ${kind}, ${kind === 'retargeted' ? 'the whole PR' : 'only new lines'} can be commented on`, async () => {
+    const { fx, pr, github } = setup();
+    const model = new ScriptedModel({
+      orchestrator: [select('correctness'), select('correctness')],
+      correctness: [noFindings(), report(f(5, { title: 'old code' }), f(62, { title: 'new code' }))],
+      security: [noFindings(), noFindings()],
+    });
+    const { app } = testApp({ model, github });
+    await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+    await app.drain();
+
+    let baseSha: string;
+    if (kind === 'merged from main') {
+      // Main moves on, and the PR merges it in.
+      fx.git('checkout', '-q', '--detach', fx.baseSha);
+      baseSha = fx.push({ 'other.ts': 'from main\n' });
+      fx.git('checkout', '-q', 'main');
+      fx.git('merge', '-q', '--no-edit', baseSha);
+    } else {
+      // A base with no history in common with the old one.
+      baseSha = fx.git('commit-tree', `${fx.baseSha}^{tree}`, '-m', 'other branch');
+      fx.git('merge', '-q', '--no-edit', '-s', 'ours', '--allow-unrelated-histories', baseSha);
+    }
+    const pushed = { ...pr, baseSha, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await app.drain();
+
+    assert.deepEqual(outcomes(app.runs()[1]!), kind === 'retargeted'
+      ? [[5, 'published'], [62, 'published']]
+      : [[5, 'already_reviewed'], [62, 'published']]);
+  });
+}
+
 /** Opens the PR at a first head, then pushes a second; correctness reports a line-5 finding on the second run. */
 async function twoPushes(first: Record<string, string | null>, second: Record<string, string | null>, config: Partial<AppConfig> = {}) {
   const { fx, pr, github } = setup();

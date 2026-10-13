@@ -316,13 +316,13 @@ export function createApp(deps: {
     let orchestratorError: string | undefined;
     const reviewedPaths = scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
     if (scope.reviewed.length) diff = await source.reviewDiff(reviewedPaths);
-    // After a push on the same base, only what changed since the last full review is open to comment.
-    // A label re-review asks for the whole PR again.
-    const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewedHead(job.repo, job.pr, job.baseSha, job.headSha);
-    let newDiff = last === undefined ? undefined : await source.diffSince(last, reviewedPaths);
+    // After a push, only what changed since the last full review is open to comment, even if the base moved forward
+    // (main merged in). A label re-review asks for the whole PR again.
+    const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewed(job.repo, job.pr, job.headSha);
+    let newDiff = last === undefined ? undefined : await source.diffSince(last.headSha, last.baseSha, reviewedPaths);
     // The token budget only covered the PR diff. A bigger diff since then (a large revert) gets a full review instead.
     if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
-    const since = newDiff === undefined ? undefined : last;
+    const since = newDiff === undefined ? undefined : last!.headSha;
     const fresh = newDiff === undefined ? undefined : addedLines(newDiff);
     progress(job, 'scope', {
       changed: files.length, reviewed: scope.reviewed.length, excluded: excluded.size, skipped: scope.skipped.length,
@@ -457,7 +457,7 @@ export function createApp(deps: {
       earlier.n > 0 && `${count(earlier.n, 'issue')} found on lines an earlier review saw, at ${earlier.where}; `
         + `add the \`${label}\` label for a full review that comments on them`,
       outside.n > 0 && `${count(outside.n, 'issue')} found outside the changed lines, at ${outside.where}`,
-      since !== undefined && store.droppedOverCap(job.repo, job.pr, job.baseSha)
+      since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
       open === undefined && "this PR's review threads couldn't be read",
       verifierFailed && `${count(unverified!.length, 'open review thread')} couldn't be re-checked`,
