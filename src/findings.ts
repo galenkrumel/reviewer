@@ -65,7 +65,7 @@ export function stillReported(thread: ReviewThread, findings: RecordedFinding[])
 }
 
 /** Whether a thread is about this finding: same path, and a nearby line or the same title. */
-export function raises(thread: ReviewThread, f: Pick<Finding, 'path' | 'line' | 'title'>): boolean {
+function raises(thread: ReviewThread, f: Pick<Finding, 'path' | 'line' | 'title'>): boolean {
   const opening = normalizeTitle(thread.comments[0]?.body.split('\n')[0] ?? '');
   return f.path === thread.path
     && ((thread.line !== null && Math.abs(thread.line - f.line) <= MERGE_WINDOW) || opening === normalizeTitle(f.title));

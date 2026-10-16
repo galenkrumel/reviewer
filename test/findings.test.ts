@@ -354,7 +354,7 @@ test("a reply from someone who couldn't resolve the thread never reaches the ver
 });
 
 test('a thread whose finding a reviewer reports again stays open whatever the verifier says', async () => {
-  // The reviewer re-reports line 5, which isn't new to this run: held back as a duplicate of the thread's comment.
+  // The reviewer re-reports line 5, already posted on the first head: a duplicate of the thread's comment.
   const { pr, fx, github } = setup();
   const model = new ScriptedModel({
     orchestrator: [select('correctness'), select('correctness')], correctness: [report(f(5)), report(f(5))],
