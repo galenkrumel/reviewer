@@ -58,13 +58,17 @@ export function gitFixture(base: FixtureFiles, head: FixtureFiles) {
 export class FakeGitHub implements GitHubPort {
   prs = new Map<string, PullRequest>();
   repos = new Map<string, string>();
-  reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean }[] = [];
+  reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean; dismissed?: string }[] = [];
   /** Threads this app started, per `repo#number`. */
   threads = new Map<string, ReviewThread[]>();
   /** Thread reads throw while set. */
   threadsDown = false;
   /** Resolving throws while set, as GitHub does without the permission it wants. */
   resolveRefused = false;
+  /** Dismissing throws while set, as GitHub does when branch protection restricts who may dismiss. */
+  dismissRefused = false;
+  /** Every dismissal attempted, refused or not. */
+  dismissals: number[] = [];
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -99,7 +103,20 @@ export class FakeGitHub implements GitHubPort {
     this.checkToken(token);
     return this.reviews
       .filter((r) => r.repo === repo && r.number === number && !r.foreign)
-      .map((r) => ({ id: r.id, body: r.review.body }));
+      .map((r) => ({
+        id: r.id, body: r.review.body,
+        state: r.dismissed !== undefined ? 'DISMISSED' : r.review.event === 'APPROVE' ? 'APPROVED' : 'COMMENTED',
+      }));
+  }
+
+  /** Records the message on the review; only this app's reviews can be dismissed through the port. */
+  async dismissReview(token: string, repo: string, number: number, reviewId: number, message: string) {
+    this.checkToken(token);
+    this.dismissals.push(reviewId);
+    if (this.dismissRefused) throw new Error('GitHub PUT dismissals: 403');
+    const r = this.reviews.find((x) => x.repo === repo && x.number === number && x.id === reviewId && !x.foreign);
+    if (!r) throw new Error('404');
+    r.dismissed = message;
   }
 
   async createReview(token: string, repo: string, number: number, review: NewReview) {

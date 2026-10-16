@@ -1,2 +1,4 @@
 node_modules/
 data/
+.claude/worktrees/
+.claude/settings.local.json
