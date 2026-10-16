@@ -12,9 +12,7 @@ export type RunStatus =
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
-export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
-  /** On a line unchanged since a head that was already reviewed. */
-  | 'already_reviewed';
+export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap';
 
 export interface Finding {
   title: string;

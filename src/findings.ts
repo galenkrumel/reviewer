@@ -25,8 +25,6 @@ const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu
 export function validate(
   reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
   posted: Pick<Finding, 'path' | 'title' | 'line'>[], limits: Thresholds,
-  /** Lines added since the last reviewed head; only these may be commented on. */
-  fresh?: Map<string, Set<number>>,
 ): RecordedFinding[] {
   const out: RecordedFinding[] = reported.map(({ focus, finding }) => {
     const added = changed.get(finding.path);
@@ -34,7 +32,6 @@ export function validate(
     // Threshold first: every other outcome then means a finding worth posting, which approval relies on.
     if (rank(f.severity) < rank(limits.minSeverity) || f.confidence < limits.minConfidence) f.outcome = 'below_threshold';
     else if (!added?.has(f.line)) f.outcome = 'unanchorable';
-    else if (fresh && !fresh.get(f.path)?.has(f.line)) f.outcome = 'already_reviewed';
     return f;
   });
 
@@ -60,11 +57,11 @@ export function validate(
 }
 
 /**
- * Whether a finding this run reported again (held back as already reviewed, or a duplicate of an earlier comment)
- * is the one a thread raised: same path, and a nearby line or the same title. Such a thread must stay open.
+ * Whether a finding this run reported again (a duplicate of an earlier comment) is the one a thread raised:
+ * same path, and a nearby line or the same title. Such a thread must stay open.
  */
 export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
-  return findings.some((f) => (f.outcome === 'already_reviewed' || f.outcome === 'duplicate') && raises(thread, f));
+  return findings.some((f) => f.outcome === 'duplicate' && raises(thread, f));
 }
 
 /** Whether a thread is about this finding: same path, and a nearby line or the same title. */

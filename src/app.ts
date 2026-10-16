@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { addedLines, openSource, ToolError } from './git.ts';
-import { raises, sanitize, stillReported, toComment, validate, type Severity } from './findings.ts';
+import { sanitize, stillReported, toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
@@ -316,8 +316,9 @@ export function createApp(deps: {
     let orchestratorError: string | undefined;
     const reviewedPaths = scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
     if (scope.reviewed.length) diff = await source.reviewDiff(reviewedPaths);
-    // After a push, only what changed since the last full review is open to comment, even if the base moved forward
-    // (main merged in). A label re-review asks for the whole PR again.
+    // After a push, reviewers focus on what changed since the last full review, even if the base moved forward
+    // (main merged in). A late finding on a line that review saw is still commented on. A label re-review asks for the
+    // whole PR again.
     const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewed(job.repo, job.pr, job.headSha);
     let newDiff = last === undefined ? undefined : await source.diffSince(last.headSha, last.baseSha, scope.reviewed);
     // The token budget only covered the PR diff. A bigger diff since then (a large revert) gets a full review instead.
@@ -413,7 +414,7 @@ export function createApp(deps: {
     const changed = addedLines(diff);
     const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
       minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
-    }, fresh);
+    });
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
@@ -437,12 +438,7 @@ export function createApp(deps: {
     const count = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`;
     // Locations are built here from the finding's path and line: code spans keep them inert.
     const at = (hits: typeof findings) => ({ n: hits.length, where: pathList(hits.map((f) => `${f.path}:${f.line}`), ', ', 10) });
-    // A finding reported again is "already commented on" when a thread still raises it; held back on an
-    // already-reviewed line with no thread, it was missed before and has never been posted.
-    const commented = (f: (typeof findings)[number]) => f.outcome === 'duplicate'
-      || (f.outcome === 'already_reviewed' && !!open?.some((t) => raises(t, f)));
-    const duplicate = at(findings.filter(commented));
-    const earlier = at(findings.filter((f) => f.outcome === 'already_reviewed' && !commented(f)));
+    const duplicate = at(findings.filter((f) => f.outcome === 'duplicate'));
     const outside = at(findings.filter((f) => f.outcome === 'unanchorable'));
     const blockers = [
       // A push that runs no reviewers is never clean: a deleted check is what it would hide. Only after an earlier
@@ -454,8 +450,6 @@ export function createApp(deps: {
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
       comments.length > 0 && `${count(comments.length, 'new issue')} commented inline`,
       duplicate.n > 0 && `a reviewer still reports ${count(duplicate.n, 'issue')} already commented on, at ${duplicate.where}`,
-      earlier.n > 0 && `${count(earlier.n, 'issue')} found on lines an earlier review saw, at ${earlier.where}; `
-        + `add the \`${label}\` label for a full review that comments on them`,
       outside.n > 0 && `${count(outside.n, 'issue')} found outside the changed lines, at ${outside.where}`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
@@ -603,7 +597,7 @@ function summary(job: Job, count: number, notes: {
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,
-    notes.since && `Comments only on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed.`,
+    notes.since && `Focused on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed.`,
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,

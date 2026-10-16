@@ -107,7 +107,7 @@ test('a finding is posted again when the line of its earlier comment no longer e
   assert.deepEqual(github.reviews[1]!.review.comments.map((c) => c.line), [5]);
 });
 
-test('after a push, only lines changed since the last review are commented on', async () => {
+test('after a push, a late finding on a line an earlier review saw is commented on too', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({
     orchestrator: [select('correctness'), select('correctness')],
@@ -123,17 +123,17 @@ test('after a push, only lines changed since the last review are commented on', 
   await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
   await app.drain();
 
-  assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'already_reviewed'], [62, 'published']]);
+  assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'published'], [62, 'published']]);
   const { review } = github.reviews[0]!;
-  assert.deepEqual(review.comments.map((c) => c.line), [62]);
-  assert.ok(review.body.includes(`Comments only on changes since \`head@${pr.headSha.slice(0, 7)}\``));
-  // The reviewer is told which changes are new.
+  assert.deepEqual(review.comments.map((c) => c.line).sort((a, b) => a - b), [5, 62]);
+  assert.ok(review.body.includes(`Focused on changes since \`head@${pr.headSha.slice(0, 7)}\``));
+  // The reviewer is told which changes are new, and to focus on them.
   const content = String(model.requestsFor('correctness')[1]!.messages[1]!.content);
   assert.match(content, /<untrusted-data name="changes-since-last-review">[^]*\+const extra = 1;/);
 });
 
 for (const kind of ['merged from main', 'retargeted'] as const) {
-  test(`after a push with the base ${kind}, ${kind === 'retargeted' ? 'the whole PR' : 'only new lines'} can be commented on`, async () => {
+  test(`after a push with the base ${kind}, the review ${kind === 'retargeted' ? 'covers the whole PR' : 'focuses on new lines'}`, async () => {
     const { fx, pr, github } = setup();
     const model = new ScriptedModel({
       orchestrator: [select('correctness'), select('correctness')],
@@ -161,9 +161,9 @@ for (const kind of ['merged from main', 'retargeted'] as const) {
     await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
     await app.drain();
 
-    assert.deepEqual(outcomes(app.runs()[1]!), kind === 'retargeted'
-      ? [[5, 'published'], [62, 'published']]
-      : [[5, 'already_reviewed'], [62, 'published']]);
+    // Line 5 is posted either way: a late finding is commented on like any other.
+    assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'published'], [62, 'published']]);
+    assert.equal(github.reviews[0]!.review.body.includes('Focused on changes since'), kind !== 'retargeted');
   });
 }
 
@@ -391,7 +391,31 @@ test('a run with a new finding says it is not approved because of it', async () 
   assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented inline\./);
 });
 
-test('an incremental run does not approve over a finding it held back, or on a deletion-only push', async () => {
+test('an incremental run posts a late finding instead of approving, and does not post it again', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness'), select('correctness')],
+    correctness: [noFindings(), report(f(5)), report(f(5))], security: [noFindings(), noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  for (const extra of ['const extra = 1;\n', 'const extra = 1;\nconst more = 2;\n']) {
+    const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + extra }) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await app.drain();
+  }
+  // The first run approves; the second finds a real issue on a line the first saw, and posts it like any other.
+  assert.deepEqual(github.reviews.map((r) => r.review.event), ['APPROVE', 'COMMENT', 'COMMENT']);
+  assert.deepEqual(github.reviews[1]!.review.comments.map((c) => c.line), [5]);
+  assert.match(github.reviews[1]!.review.body, /\*\*Not approved:\*\* 1 new issue commented inline/);
+  // Reported again on the next push, it was already posted: a duplicate, not a second comment.
+  assert.deepEqual(outcomes(app.runs()[2]!), [[5, 'duplicate']]);
+  assert.deepEqual(github.reviews[2]!.review.comments, []);
+});
+
+test('an incremental run does not approve on a deletion-only push', async () => {
   const second = async (files: Record<string, string>, correctness: AssistantMessage[]) => {
     const { fx, pr, github } = setup();
     const model = new ScriptedModel({
@@ -408,11 +432,6 @@ test('an incremental run does not approve over a finding it held back, or on a d
     return github.reviews[0]?.review;
   };
   const added = { [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' };
-  // The first run approves; the second finds a real issue on an old line, which it may not post: no approval.
-  const held = await second(added, [noFindings(), report(f(5))]);
-  assert.equal(held?.event, 'COMMENT');
-  // Never posted: the first run missed it. The review says where, and how to get it posted.
-  assert.match(held!.body, /1 issue found on lines an earlier review saw, at `src\/app\.ts:5`; add the `ai-review` label/);
   assert.equal((await second(added, [noFindings(), noFindings()]))?.event, 'APPROVE');
   // Deleting lines runs no reviewers, so there is nothing to approve on; the review says how to get one.
   const deleted = await second({ [PATH]: 'keep\n' + lines(59) }, [noFindings()]);
