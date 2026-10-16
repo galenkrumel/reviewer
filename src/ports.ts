@@ -27,9 +27,12 @@ export interface NewReview {
   comments: ReviewComment[];
 }
 
-/** An unresolved review thread this app started. */
+/** A review thread this app started. */
 export interface ReviewThread {
   id: string;
+  resolved: boolean;
+  /** Who resolved it, when resolved. `association` as on comments below. */
+  resolvedBy?: { login: string; association: string };
   path: string;
   /** The line at the head revision; null once the code it was posted on has changed. */
   line: number | null;
@@ -47,8 +50,8 @@ export interface GitHubPort {
   /** Reviews this app posted on the PR; anyone else's are left out, so nobody can forge the marker. */
   listReviews(token: string, repo: string, number: number): Promise<{ id: number; body: string }[]>;
   createReview(token: string, repo: string, number: number, review: NewReview): Promise<{ id: number }>;
-  /** The review threads this app started on the PR that are still unresolved. */
-  openThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
+  /** The review threads this app started on the PR, resolved or not. */
+  reviewThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
   replyToThread(token: string, threadId: string, body: string): Promise<void>;
   resolveThread(token: string, threadId: string): Promise<void>;
 }

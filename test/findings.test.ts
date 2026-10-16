@@ -328,6 +328,24 @@ test('an author reply after a verified reply sends the thread back to the verifi
   assert.equal(github.reviews[0]!.review.event, 'COMMENT');
 });
 
+test('a thread someone resolved in GitHub never reaches the verifier and blocks nothing', async () => {
+  const { pr, github } = setup();
+  const done = github.addThread(REPO, 7, PATH, 20, '**issue at 20**\n\nLine 20 is wrong.');
+  github.resolveAs(done.id, 'maintainer', 'MEMBER');
+  github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()], verifier: [verdict(true)],
+  });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  const sent = String(model.requestsFor('verifier')[0]!.messages[1]!.content);
+  assert.match(sent, /issue at 5/);
+  assert.doesNotMatch(sent, /issue at 20|thread 1/);
+  assert.deepEqual(done.comments.length, 1);
+  assert.equal(github.reviews[0]!.review.event, 'APPROVE');
+});
+
 test('a thread the verifier keeps open blocks approval, and the review says so', async () => {
   const { review, thread } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)] });
   assert.equal(thread!.resolved, false);
