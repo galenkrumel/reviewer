@@ -47,8 +47,8 @@ test('each agent calls its configured model with the fallback passed through', a
   const [sec] = model.requestsFor('security');
   assert.equal(sec!.model, 'sec/model');
   assert.deepEqual(sec!.models, ['sec/model', 'sec/backup']);
-  // Every call carries the PR as its OpenRouter session, so usage groups per PR.
-  assert.ok(model.requests.every((r) => r.session_id === 'acme/widgets#7'));
+  // Every call carries the PR as its OpenRouter session, URL-safe so the dashboard can filter on it.
+  assert.ok(model.requests.every((r) => r.session_id === 'acme--widgets--pr-7'));
 
   // No fallback configured: no models array.
   const plain = await review({ orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()] });
