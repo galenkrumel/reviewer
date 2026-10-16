@@ -52,16 +52,19 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
     async listReviews(token, repo, number) {
       // Every page: the idempotency marker check must see all of the PR's reviews.
       const login = await ownLogin();
-      const out: { id: number; body: string }[] = [];
+      const out: { id: number; body: string; state: string }[] = [];
       for (let page = 1; ; page++) {
         const reviews = await api(token, 'GET', `/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`);
-        for (const r of reviews) if (r.user?.login === login) out.push({ id: r.id, body: r.body ?? '' });
+        for (const r of reviews) if (r.user?.login === login) out.push({ id: r.id, body: r.body ?? '', state: r.state });
         if (reviews.length < 100) return out;
       }
     },
     async createReview(token, repo, number, review: NewReview) {
       const r = await api(token, 'POST', `/repos/${repo}/pulls/${number}/reviews`, review);
       return { id: r.id };
+    },
+    async dismissReview(token, repo, number, reviewId, message) {
+      await api(token, 'PUT', `/repos/${repo}/pulls/${number}/reviews/${reviewId}/dismissals`, { message, event: 'DISMISS' });
     },
     async openThreads(token, repo, number) {
       // GraphQL names a bot by its slug; REST appends [bot].

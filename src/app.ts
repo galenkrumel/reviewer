@@ -70,7 +70,7 @@ export interface Delivery {
 export type Log = (entry: Record<string, unknown>) => void;
 
 /** Where a run failed. `run` is anything outside the named steps (a token mint, a PR lookup, a git read). */
-type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'verifier' | 'threads' | 'publish' | 'run';
+type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'verifier' | 'threads' | 'dismiss' | 'publish' | 'run';
 
 /** A failure already logged, its message prefixed with the step. */
 class StepError extends Error {}
@@ -180,6 +180,31 @@ export function createApp(deps: {
     // Once per run, not per thread: a refusal repeats on every thread and every run until the permission changes.
     if (refused.length) logFailure(job, 'threads', refused[0], false, { unresolved: refused.length });
     return { closed, resolved };
+  }
+
+  /**
+   * Dismiss this app's approvals still in force, so its approval always reflects its latest verdict. Only while the
+   * run is current: called right before publishing. Returns whether any dismissal was refused.
+   */
+  async function dismissApprovals(job: Job, token: string, blockers: string[]): Promise<boolean> {
+    if (store.superseded(job.id)) return false;
+    let approvals: { id: number }[];
+    try {
+      approvals = (await github.listReviews(token, job.repo, job.pr)).filter((r) => r.state === 'APPROVED');
+    } catch (err) {
+      // Unknown whether an approval is in force: say so rather than stay silent.
+      logFailure(job, 'dismiss', err, false);
+      return true;
+    }
+    const refused: unknown[] = [];
+    for (const r of approvals) {
+      await github.dismissReview(token, job.repo, job.pr, r.id, `Not approved: ${blockers.join('; ')}.`)
+        .catch((err) => refused.push(err));
+    }
+    // Once per run, like a refused resolve: branch protection refuses every dismissal until it changes.
+    if (refused.length) logFailure(job, 'dismiss', refused[0], false, { undismissed: refused.length });
+    if (approvals.length) progress(job, 'approvals dismissed', { dismissed: approvals.length - refused.length });
+    return refused.length > 0;
   }
 
   /** `warn` when something retries or falls back, `error` when it gives up. Messages only: they carry no credentials. */
@@ -473,12 +498,13 @@ export function createApp(deps: {
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(live, job)) return finishStale(job, live, record);
+    const undismissed = config.approveWhenClean && !approve ? await dismissApprovals(job, token, blockers) : false;
     const newReview = {
       commit_id: job.headSha,
       event: approve ? 'APPROVE' as const : 'COMMENT' as const,
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
-        blockers: config.approveWhenClean ? blockers : [],
+        blockers: config.approveWhenClean ? blockers : [], undismissed,
       }),
       comments,
     };
@@ -590,6 +616,8 @@ function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
   /** Why this run didn't approve, when approvals are on. */
   blockers: string[];
+  /** An earlier approval by this app is still in force: GitHub refused to dismiss it. */
+  undismissed?: boolean;
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -607,6 +635,7 @@ function summary(job: Job, count: number, notes: {
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
+    notes.undismissed && 'An earlier approval by this App could not be dismissed.',
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),

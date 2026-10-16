@@ -449,6 +449,47 @@ test('an incremental run does not approve after an earlier run dropped findings 
   assert.match(github.reviews[1]!.review.body, /an earlier review left issues uncommented over its comment cap/);
 });
 
+/** An approved first run, then a push per entry in `pushes` with the given correctness turn. */
+async function afterApproval(pushes: AssistantMessage[], opts: { dismissRefused?: boolean } = {}) {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [pr, ...pushes].map(() => select('correctness')), correctness: [noFindings(), ...pushes],
+    security: [pr, ...pushes].map(() => noFindings()),
+  });
+  const { app, logs } = testApp({ model, github, config: { approveWhenClean: true } });
+  // Someone else's approval is never the app's to dismiss.
+  github.reviews.push({ repo: REPO, number: 7, id: 999, foreign: true, review: { commit_id: pr.headSha, event: 'APPROVE', body: 'LGTM', comments: [] } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  github.dismissRefused = opts.dismissRefused ?? false;
+  let content = 'keep\n' + lines(60);
+  for (const _ of pushes) {
+    content += `const extra${content.length} = 1;\n`;
+    const pushed = { ...pr, headSha: fx.push({ [PATH]: content }) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await app.drain();
+  }
+  return { github, logs, own: github.reviews.filter((r) => !r.foreign) };
+}
+
+test('a push after an approval that finds a blocker dismisses the approval with the reasons, once', async () => {
+  const { github, own } = await afterApproval([report(f(62)), report(f(63))]);
+  assert.deepEqual(own.map((r) => r.review.event), ['APPROVE', 'COMMENT', 'COMMENT']);
+  // The first non-approving run's reasons; the second run finds the approval already dismissed.
+  assert.equal(own[0]!.dismissed, 'Not approved: 1 new issue commented inline.');
+  assert.equal(github.reviews.find((r) => r.foreign)!.dismissed, undefined);
+  assert.doesNotMatch(own[1]!.review.body, /could not be dismissed/);
+});
+
+test('when GitHub refuses the dismissal, the run still publishes, logs it once and says so', async () => {
+  const { own, logs } = await afterApproval([report(f(62), f(63))], { dismissRefused: true });
+  assert.equal(own[0]!.dismissed, undefined);
+  assert.equal(own[1]!.review.event, 'COMMENT');
+  assert.match(own[1]!.review.body, /An earlier approval by this App could not be dismissed\./);
+  assert.equal(logs.filter((l) => l.step === 'dismiss').length, 1);
+});
+
 test('a push that only deletes lines runs no reviewers', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()] });
