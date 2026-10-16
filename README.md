@@ -1,80 +1,119 @@
 # reviewer
 
-This is my self-hostable GitHub code review agent. See `REQUIREMENTS.md`.
+`reviewer` is a self-hosted GitHub App that reviews your pull requests and posts its findings as review comments.
+It only reads the code changes. It never runs your code, pushes commits, or merges.
 
-`reviewer` will listen for new pull requests on your repo, and then dispatch a few different special-purpose agents to review your code. These special purpose agents are *Correctness*, *Security*, *Architecture*, *Performance*, and *Conciseness*. Their feedback will then be applied back as comments on the PR. After you address those comments `reviewer` will then kick off another round of review. Once all the comments have been resolved, `reviewer` will approve the PR to be merged.
+Each review runs a few focused AI reviewers: *Correctness* and *Security* always, plus *Architecture*, *Performance*
+or *Conciseness* when the change calls for them. When you push new commits, it reviews again and checks whether its
+earlier comments were addressed. It never approves a PR unless you turn that on with
+[`APPROVE_WHEN_CLEAN`](#deployment-config-env-vars).
 
-You may notice that sometimes your coding agent and `reviewer` may disagree with the review. This is normal, and to be expected. When this happens you may need to step in and mediate the dispute.
+The reviewers will sometimes disagree with you or your coding agent. That's expected. Treat the comments as a second
+opinion, not a verdict.
 
-For now, there are a few assumptions about external resources baked into `reviewer`:
-1. Your source code is in GitHub.
-2. The `reviewer` deployment environment is running on `https://render.com` (note that `reviewer` has no opinion about your code's operating environment, as it does NOT inspect running code; this is strictly static code review). In the future I may add support for other deployment environments, such as Railway or EC2.
-3. `https://openrouter.ai` is the AI gateway in use. 
+## Get your first review
 
-Each `reviewer` deployment is single-tenant: one operator, one GitHub App, one OpenRouter bill. It runs as one service with a
-persistent disk, which holds SQLite (the job queue and run records) and a bare clone cache of the reviewed repositories.
+You'll need:
 
-When run locally, `reviewer` requires Node ≥ 22.18 and `git` on the PATH. No runtime dependencies.
+- A **GitHub** account (user or organization) that owns the repositories you want reviewed
+- An **OpenRouter** API key from [openrouter.ai](https://openrouter.ai). Model usage is billed there
+- A **Render** account on a paid plan, because the service needs a persistent disk (a `starter` instance is enough)
 
-```sh
-npm install        # dev tooling only (typescript)
-npm test
-npm run typecheck
-npm start
-```
+There are three steps: create a GitHub App, deploy on Render, then point the App at the service.
 
-## Deploying
+### 1. Create a GitHub App
 
-### 1. Create the GitHub App
+On the account that owns the repositories, go to **Settings → Developer settings → GitHub Apps → New GitHub App**.
 
-Create the App on the account (user or organization) that owns the repositories to review. A private App can only be
-installed on the account that owns it. Where this repository lives doesn't matter. On GitHub, go to that account's
-**Settings → Developer settings → GitHub Apps → New GitHub App**.
-
-- **Webhook:** active. The URL is the service's root, and the service accepts deliveries as `POST /`. The service
-  doesn't exist yet, so enter a placeholder such as `https://example.com/` and replace it in step 2.
-  Set a long random **webhook secret**, e.g. from `openssl rand -hex 32`. You need it again in step 2.
-- **Repository permissions:** exactly these three.
+- **Webhook URL:** enter a placeholder like `https://example.com/` for now. You'll replace it in step 3.
+- **Webhook secret:** a long random string, e.g. from `openssl rand -hex 32`. Save it for step 2.
+- **Repository permissions:** set exactly these three and leave everything else at **No access**:
 
   | Permission | Access | Used for |
   |---|---|---|
-  | Contents | Read-only | `git fetch` of the PR's head and base commits |
-  | Pull requests | Read and write | reading the PR, the App's own reviews and their threads; posting the review |
-  | Metadata | Read-only | mandatory for every App |
+  | Contents | Read-only | fetching the PR's commits |
+  | Pull requests | Read and write | reading the PR and posting the review |
+  | Metadata | Read-only | required for every App |
 
-  Leave everything else at **No access**. The App needs no contents write, workflows, administration, or any
-  permission that could merge or push.
-- **Subscribe to events:** **Pull request** only. The service ignores every other event and filters actions in code.
+- **Subscribe to events:** **Pull request** only.
 - **Where can this GitHub App be installed:** only on this account.
 
-After creating it, note the **App ID** and generate a **private key** (a `.pem` download). Then **Install App** on the
-repositories to review. Installing alone does nothing: a repository is reviewed only if it is also in `REPO_ALLOWLIST`.
+Create the App, then:
+
+1. Note its **App ID**.
+2. Generate a **private key**. A `.pem` file downloads.
+3. Click **Install App** and choose the repositories to review.
 
 ### 2. Deploy on Render
 
-`render.yaml` is a Blueprint for one web service, with a 10 GB disk mounted at `/var/data` and `DATA_DIR` pointing at it.
-The service is created in its own Render project, `reviewer` (environment `production`), so it stays separate from
-other projects in the workspace.
-Disks need a paid instance type, so the Blueprint uses `starter`.
+1. Fork this repository if you don't own it. Render can only deploy from repositories your account can access.
+2. In Render, choose **New → Blueprint** and select your copy. Render reads `render.yaml` from it.
+3. Fill in the values it asks for:
 
-1. In Render, choose **New → Blueprint** and select the GitHub repository that holds this code, with `render.yaml` at
-   its root. That's this repository if you own it. Otherwise fork it into your own account first, because Render
-   deploys only from repositories your connected GitHub account can access.
-2. Fill in the secrets it asks for: `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY`, `GITHUB_WEBHOOK_SECRET`, `OPENROUTER_API_KEY`,
-   `REPO_ALLOWLIST` and `REVIEW_MODEL`. For `GITHUB_PRIVATE_KEY`, paste the whole PEM. Newlines written as `\n` work too.
-3. Once it is live, copy the service URL from the Render dashboard (e.g. `https://reviewer.onrender.com`; Render
-   adds a suffix if the name is taken) and set it as the App's webhook URL in place of the placeholder. Deliveries
-   sent before this fail harmlessly. Redeliver one from the App's **Advanced** tab or push again to trigger a review.
+   | Variable | What to enter |
+   |---|---|
+   | `GITHUB_APP_ID` | The App ID from step 1 |
+   | `GITHUB_PRIVATE_KEY` | The full contents of the `.pem` file |
+   | `GITHUB_WEBHOOK_SECRET` | The webhook secret from step 1 |
+   | `OPENROUTER_API_KEY` | Your OpenRouter key |
+   | `REPO_ALLOWLIST` | The repositories to review, comma-separated, e.g. `your-org/api,your-org/web` |
+   | `REVIEW_MODEL` | An OpenRouter model ID that supports tool use |
 
-At startup the service checks every configured model against OpenRouter and refuses to start if one is unlisted or
-lacks tool support. A failed deploy log naming a model means you need a different model ID.
+Only repositories in `REPO_ALLOWLIST` are reviewed. Installing the App on a repository isn't enough on its own.
 
-To confirm the deployment works, open a non-draft PR on an allowlisted repository. A review appears within minutes,
-or nothing does if the reviewers found nothing worth posting. Either way the logs show a `delivery` line for the webhook and a `run finished` line
-with the outcome, and the run is in the run records.
+If the deploy fails with an error naming a model, OpenRouter doesn't list that model ID or the model doesn't support
+tool use. Pick a different one.
 
-Elsewhere: any host that runs `npm start` on Node ≥ 22.18 with `git` installed and a persistent `DATA_DIR`. Run one
-instance only, because the queue lives in that instance's SQLite.
+### 3. Point the App at the service
+
+Once the service is live, copy its URL from the Render dashboard (e.g. `https://reviewer.onrender.com`). Paste it into
+the App's **Webhook URL** in place of the placeholder.
+
+### Check that it works
+
+Open a pull request that:
+
+- isn't a draft,
+- is in a repository listed in `REPO_ALLOWLIST`,
+- is by the repository's owner, an organization member or a collaborator. PRs from anyone else are reviewed only once
+  you add the `ai-review` label.
+
+A review should appear within a few minutes. If the reviewers find nothing, its summary says "no issues to comment on".
+Nothing showing up? See [Troubleshooting](#troubleshooting).
+
+## Troubleshooting
+
+Open the service's logs in Render. Every webhook GitHub sends logs a `delivery` line, and every review logs a
+`run finished` line.
+
+- **No `delivery` lines:** GitHub isn't reaching the service. Check the App's webhook URL, and look at
+  **Advanced → Recent Deliveries** in the App settings. You can redeliver a failed event from there.
+- **`delivery` with status 401:** `GITHUB_WEBHOOK_SECRET` doesn't match the App's webhook secret.
+- **`delivery` but no review:** the line's `reason` says why it was skipped, e.g. the repository isn't in
+  `REPO_ALLOWLIST`, the PR is a draft, or the author is outside and the PR lacks the label.
+- **`run finished` with an `error`:** the error names the step that failed. See [Operating](#operating).
+
+## Local development
+
+Requires Node ≥ 22.18 and `git` on your `PATH`. There are no npm runtime dependencies: `npm install` only installs
+TypeScript for type checking.
+
+```sh
+npm install
+npm test
+npm run typecheck
+```
+
+To run the service locally, set the six variables from step 2, then run `npm start`. You can keep them in a `.env` file
+and run `node --env-file=.env src/main.ts` instead. Data goes to `./data` unless you set `DATA_DIR`. GitHub needs a
+public URL to send webhooks to, so expose the local port through a tunnel.
+
+Hosting somewhere other than Render works too: any host that runs `npm start` on Node ≥ 22.18 with `git` installed and
+a persistent `DATA_DIR`. Run one instance only, because the job queue lives in that instance's SQLite database.
+
+---
+
+Everything below is reference material.
 
 ## Deployment config (env vars)
 
