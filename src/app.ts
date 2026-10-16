@@ -422,11 +422,11 @@ export function createApp(deps: {
     }
     // Read from the store, not GitHub's current state: unresolving a waived thread doesn't revoke the waiver.
     const waivers = store.waivers(job.repo, job.pr);
-    const waived = new Set(waivers.map((w) => w.thread));
+    const waivedIds = new Set(waivers.map((w) => w.thread));
     // Waived threads are closed: the verifier never sees them, and they never block.
-    const open = threads?.filter((t) => !t.resolved && !waived.has(t.id));
+    const open = threads?.filter((t) => !t.resolved && !waivedIds.has(t.id));
     // Resolved by someone who can't waive (an outside PR's author): still a blocker, unless verified fixed.
-    const outsideResolved = threads?.filter((t) => t.resolved && !waived.has(t.id)) ?? [];
+    const outsideResolved = threads?.filter((t) => t.resolved && !waivedIds.has(t.id)) ?? [];
     // Verified on an earlier run (the app's VERIFIED reply is still the last word): not checked again.
     // ponytail: a later push can't reopen a verified thread; a reviewer reporting the issue again keeps it open.
     const verified = open?.filter(isVerified) ?? [];
@@ -514,7 +514,8 @@ export function createApp(deps: {
       event: approve ? 'APPROVE' as const : 'COMMENT' as const,
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
-        blockers: config.approveWhenClean ? blockers : [], undismissed, waivers: approve ? waivers : [],
+        blockers: config.approveWhenClean ? blockers : [], undismissed, // Fixed is the stronger end state: a maintainer tidying up a verified thread accepted no risk.
+        waivers: approve ? waivers.filter((w) => !threads?.some((t) => t.id === w.thread && isVerified(t))) : [],
       }),
       comments,
     };

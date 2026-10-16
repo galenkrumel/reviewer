@@ -27,12 +27,13 @@ const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu
 export function validate(
   reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
   posted: Pick<Finding, 'path' | 'title' | 'line'>[], limits: Thresholds,
-  threads: ReviewThread[] = [], waivers: Waiver[] = [],
+  threads: ReviewThread[] | undefined, waivers: Waiver[],
 ): RecordedFinding[] {
-  const ids = new Set(waivers.map((w) => w.thread));
+  threads ??= [];
+  const waivedIds = new Set(waivers.map((w) => w.thread));
   // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
   const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
-  const others = threads.filter((t) => !ids.has(t.id));
+  const others = threads.filter((t) => !waivedIds.has(t.id));
   const out: RecordedFinding[] = reported.map(({ focus, finding }) => {
     const added = changed.get(finding.path);
     const f: RecordedFinding = { ...finding, focus, outcome: 'published' };

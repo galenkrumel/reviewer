@@ -382,13 +382,22 @@ test('a maintainer resolving a thread waives it: a re-report is recorded as waiv
   assert.equal(model.requestsFor('verifier').length, 0);
 
   // Unresolving doesn't revoke it, across a restart; the waived thread never reaches the verifier, which has no turns.
-  thread.resolved = false;
-  delete thread.resolvedBy;
+  github.unresolve(thread.id);
   const second = await push({ restart: true });
   assert.equal(second.review.event, 'APPROVE');
   assert.deepEqual(outcomes(second.record), [[5, 'waived']]);
   assert.equal(second.logs.filter((l) => l.msg === 'finding waived').length, 0);
   assert.equal(model.requestsFor('verifier').length, 0);
+});
+
+test('an approval lists a thread a maintainer resolved after it was verified fixed as fixed, not waived', async () => {
+  const { github, thread, push } = await withThread([noFindings()]);
+  github.resolveRefused = true;
+  thread.comments.push({ byApp: true, byPrAuthor: false, association: 'NONE', body: 'Resolved: fixed.\n\n<!-- ai-review:verified -->' });
+  github.resolveAs(thread.id, 'octo-maint', 'OWNER');
+  const { review } = await push();
+  assert.equal(review.event, 'APPROVE');
+  assert.doesNotMatch(review.body, /Waived/);
 });
 
 test('a thread resolved by someone who is not a maintainer stays a blocker', async () => {

@@ -86,8 +86,9 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
         // ponytail: OWNER/MEMBER/COLLABORATOR inferred, not read; REST collaborators/{login}/permission if it matters.
         const resolver = (login = 'ghost') => ({
           login,
-          association: login === prAuthor ? data.repository.pullRequest.authorAssociation
-            : login === owner ? 'OWNER' : login === 'ghost' ? 'NONE' : 'COLLABORATOR',
+          // The app resolving its own thread is never a maintainer's decision, so never a waiver.
+          association: byApp(login) || login === 'ghost' ? 'NONE' : login === prAuthor ? data.repository.pullRequest.authorAssociation
+            : login === owner ? 'OWNER' : 'COLLABORATOR',
         });
         const threads = data.repository.pullRequest.reviewThreads;
         for (const t of threads.nodes) {
