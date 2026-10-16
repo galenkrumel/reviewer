@@ -37,19 +37,19 @@ async function api(auth: string, method: string, path: string, body?: unknown, s
   return json;
 }
 
-const installation = await call(jwt, 'GET', `/repos/${repo}/installation`, undefined, false);
-const minted = await call(jwt, 'POST', `/app/installations/${installation.id}/access_tokens`, undefined, false);
+const installation = await api(jwt, 'GET', `/repos/${repo}/installation`, undefined, false);
+const minted = await api(jwt, 'POST', `/app/installations/${installation.id}/access_tokens`, undefined, false);
 console.log('token permissions:', JSON.stringify(minted.permissions)); // never print the token itself
 const token = minted.token;
 
-const pull = await call(token, 'GET', `/repos/${repo}/pulls/${pr}`, undefined, false);
+const pull = await api(token, 'GET', `/repos/${repo}/pulls/${pr}`, undefined, false);
 // Likely 403: the App has no administration permission. Note the branch's protection settings by hand.
-await call(token, 'GET', `/repos/${repo}/branches/${pull.base.ref}/protection`, undefined, true, false);
+await api(token, 'GET', `/repos/${repo}/branches/${pull.base.ref}/protection`, undefined, true, false);
 
-const review = await call(token, 'POST', `/repos/${repo}/pulls/${pr}/reviews`, {
+const review = await api(token, 'POST', `/repos/${repo}/pulls/${pr}/reviews`, {
   event: 'APPROVE', body: 'Probe for #49: this approval is about to be dismissed.',
 });
 if (review.state !== 'APPROVED') throw new Error(`expected an APPROVED review, got ${review.state}`);
-await call(token, 'PUT', `/repos/${repo}/pulls/${pr}/reviews/${review.id}/dismissals`, {
+await api(token, 'PUT', `/repos/${repo}/pulls/${pr}/reviews/${review.id}/dismissals`, {
   message: 'Probe for #49.', event: 'DISMISS',
 }, true, false);
