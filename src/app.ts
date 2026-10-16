@@ -184,17 +184,17 @@ export function createApp(deps: {
 
   /**
    * Dismiss this app's approvals still in force, so its approval always reflects its latest verdict. Only while the
-   * run is current: called right before publishing. Returns whether any dismissal was refused.
+   * run is current: called right before publishing. Returns the summary line when one may still be in force.
    */
-  async function dismissApprovals(job: Job, token: string, blockers: string[]): Promise<boolean> {
-    if (store.superseded(job.id)) return false;
+  async function dismissApprovals(job: Job, token: string, blockers: string[]): Promise<string | undefined> {
+    if (store.superseded(job.id)) return;
     let approvals: { id: number }[];
     try {
       approvals = (await github.listReviews(token, job.repo, job.pr)).filter((r) => r.state === 'APPROVED');
     } catch (err) {
       // Unknown whether an approval is in force: say so rather than stay silent.
       logFailure(job, 'dismiss', err, false);
-      return true;
+      return "This App's earlier reviews couldn't be read, so an earlier approval by it may still be in force.";
     }
     const refused: unknown[] = [];
     for (const r of approvals) {
@@ -204,7 +204,7 @@ export function createApp(deps: {
     // Once per run, like a refused resolve: branch protection refuses every dismissal until it changes.
     if (refused.length) logFailure(job, 'dismiss', refused[0], false, { undismissed: refused.length });
     if (approvals.length) progress(job, 'approvals dismissed', { dismissed: approvals.length - refused.length });
-    return refused.length > 0;
+    if (refused.length) return 'An earlier approval by this App could not be dismissed.';
   }
 
   /** `warn` when something retries or falls back, `error` when it gives up. Messages only: they carry no credentials. */
@@ -498,7 +498,7 @@ export function createApp(deps: {
 
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(live, job)) return finishStale(job, live, record);
-    const undismissed = config.approveWhenClean && !approve ? await dismissApprovals(job, token, blockers) : false;
+    const undismissed = config.approveWhenClean && !approve ? await dismissApprovals(job, token, blockers) : undefined;
     const newReview = {
       commit_id: job.headSha,
       event: approve ? 'APPROVE' as const : 'COMMENT' as const,
@@ -616,8 +616,8 @@ function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
   /** Why this run didn't approve, when approvals are on. */
   blockers: string[];
-  /** An earlier approval by this app is still in force: GitHub refused to dismiss it. */
-  undismissed?: boolean;
+  /** Why an earlier approval by this app may still be in force, when it may. */
+  undismissed?: string;
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -635,7 +635,7 @@ function summary(job: Job, count: number, notes: {
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
-    notes.undismissed && 'An earlier approval by this App could not be dismissed.',
+    notes.undismissed,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),

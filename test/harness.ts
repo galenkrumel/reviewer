@@ -67,6 +67,8 @@ export class FakeGitHub implements GitHubPort {
   resolveRefused = false;
   /** Dismissing throws while set, as GitHub does when branch protection restricts who may dismiss. */
   dismissRefused = false;
+  /** Every dismissal attempted, refused or not. */
+  dismissals: number[] = [];
   tokensMinted: number[] = [];
   private nextId = 1;
 
@@ -110,6 +112,7 @@ export class FakeGitHub implements GitHubPort {
   /** Records the message on the review; only this app's reviews can be dismissed through the port. */
   async dismissReview(token: string, repo: string, number: number, reviewId: number, message: string) {
     this.checkToken(token);
+    this.dismissals.push(reviewId);
     if (this.dismissRefused) throw new Error('GitHub PUT dismissals: 403');
     const r = this.reviews.find((x) => x.repo === repo && x.number === number && x.id === reviewId && !x.foreign);
     if (!r) throw new Error('404');

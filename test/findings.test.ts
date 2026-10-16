@@ -478,6 +478,7 @@ test('a push after an approval that finds a blocker dismisses the approval with 
   assert.deepEqual(own.map((r) => r.review.event), ['APPROVE', 'COMMENT', 'COMMENT']);
   // The first non-approving run's reasons; the second run finds the approval already dismissed.
   assert.equal(own[0]!.dismissed, 'Not approved: 1 new issue commented inline.');
+  assert.deepEqual(github.dismissals, [own[0]!.id]);
   assert.equal(github.reviews.find((r) => r.foreign)!.dismissed, undefined);
   assert.doesNotMatch(own[1]!.review.body, /could not be dismissed/);
 });
