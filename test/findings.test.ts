@@ -342,7 +342,7 @@ test('a thread someone resolved in GitHub never reaches the verifier and blocks 
   const sent = String(model.requestsFor('verifier')[0]!.messages[1]!.content);
   assert.match(sent, /issue at 5/);
   assert.doesNotMatch(sent, /issue at 20|thread 1/);
-  assert.deepEqual(done.comments.length, 1);
+  assert.equal(done.comments.length, 1);
   assert.equal(github.reviews[0]!.review.event, 'APPROVE');
 });
 
