@@ -2,12 +2,12 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { addedLines, openSource, ToolError } from './git.ts';
-import { sanitize, stillReported, toComment, validate, type Severity } from './findings.ts';
+import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
-import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation } from './store.ts';
+import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation, type Waiver } from './store.ts';
 import { runVerifier, type Verdict } from './verifier.ts';
 import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
 
@@ -403,17 +403,30 @@ export function createApp(deps: {
       }
     }
     // The verifier re-checks this app's open threads whether or not reviewers ran: a deletion can be the fix.
-    let open: ReviewThread[] | undefined;
+    let threads: ReviewThread[] | undefined;
     let verdicts: Verdict[] = [];
     let verifierFailed = false;
     try {
-      open = (await github.reviewThreads(token, job.repo, job.pr)).filter((t) => !t.resolved);
+      threads = await github.reviewThreads(token, job.repo, job.pr);
     } catch (err) {
       logFailure(job, 'threads', err, false);
     }
     // Only people who could resolve a thread themselves get a say: the PR's author and those with write access.
     // Anyone else's replies (anyone at all, on a public repo) never reach the verifier.
-    open = open?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
+    threads = threads?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
+    // The app can't resolve its own threads, so a maintainer's resolve is a human decision: a waiver, kept for good.
+    for (const t of threads ?? []) {
+      if (!t.resolved || !TRUSTED_AUTHORS.has(t.resolvedBy?.association ?? '')) continue;
+      const w: Waiver = { thread: t.id, by: t.resolvedBy!.login, how: 'resolve', path: t.path, line: t.line, title: threadTitle(t) };
+      if (store.recordWaiver(job.repo, job.pr, w)) progress(job, 'finding waived', { thread: w.thread, by: w.by, how: w.how });
+    }
+    // Read from the store, not GitHub's current state: unresolving a waived thread doesn't revoke the waiver.
+    const waivers = store.waivers(job.repo, job.pr);
+    const waivedIds = new Set(waivers.map((w) => w.thread));
+    // Waived threads are closed: the verifier never sees them, and they never block.
+    const open = threads?.filter((t) => !t.resolved && !waivedIds.has(t.id));
+    // Resolved by someone who can't waive (an outside PR's author): still a blocker, unless verified fixed.
+    const outsideResolved = threads?.filter((t) => t.resolved && !waivedIds.has(t.id)) ?? [];
     // Verified on an earlier run (the app's VERIFIED reply is still the last word): not checked again.
     // ponytail: a later push can't reopen a verified thread; a reviewer reporting the issue again keeps it open.
     const verified = open?.filter(isVerified) ?? [];
@@ -439,7 +452,7 @@ export function createApp(deps: {
     const changed = addedLines(diff);
     const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
       minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
-    });
+    }, threads, waivers);
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
@@ -454,6 +467,7 @@ export function createApp(deps: {
       verdicts.filter((v) => !v.resolved || !stillReported(v.thread, findings)),
       verified.filter((t) => !stillReported(t, findings)));
     const stillOpen = open?.filter((t) => !closed.has(t.id));
+    const outsideOpen = outsideResolved.filter((t) => !isVerified(t) || stillReported(t, findings));
     progress(job, 'threads checked', { open: open?.length, closed: closed.size, resolved });
 
     // Everything that stops an approval, each specific enough for the PR's author to act on.
@@ -482,6 +496,8 @@ export function createApp(deps: {
       verifierFailed && `${count(unverified!.length, 'open review thread')} couldn't be re-checked`,
       !verifierFailed && stillOpen?.length && `${count(stillOpen.length, 'review thread')} still open, on ${
         pathList([...new Set(stillOpen.map((t) => t.path))], ', ', 10)}`,
+      outsideOpen.length > 0 && `${count(outsideOpen.length, 'review thread')} resolved by someone who can't waive it, on ${
+        pathList([...new Set(outsideOpen.map((t) => t.path))], ', ', 10)}`,
     ].filter((b): b is string => typeof b === 'string');
     const approve = config.approveWhenClean === true && blockers.length === 0;
     progress(job, 'review decided', { comments: comments.length, approve, blockers: blockers.length, findings: outcomes(findings) });
@@ -499,6 +515,11 @@ export function createApp(deps: {
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
         blockers: config.approveWhenClean ? blockers : [], undismissed,
+        // Fixed is the stronger end state: a maintainer tidying up a verified thread accepted no risk, until it comes back.
+        waivers: approve ? waivers.filter((w) => {
+          const t = threads?.find((x) => x.id === w.thread);
+          return !t || !isVerified(t) || absorbed(t, findings);
+        }) : [],
       }),
       comments,
     };
@@ -592,9 +613,12 @@ function authorReason(pr: any, policy: OutsidePolicy, label: string): string | u
  * them from forging a marker (and so skipping a later review) in the raw body, and long lists are capped.
  */
 function pathList(paths: string[], sep: string, max: number): string {
-  const shown = paths.slice(0, max).map((p) => '`' + p.replace(/[`<>\r\n]/g, '') + '`');
-  if (paths.length > max) shown.push(`…and ${paths.length - max} more`);
-  return shown.join(sep);
+  return capped(paths.map((p) => '`' + p.replace(/[`<>\r\n]/g, '') + '`'), max).join(sep);
+}
+
+/** The first `max` items, then a count of the rest. */
+function capped(items: string[], max: number): string[] {
+  return items.length > max ? [...items.slice(0, max), `…and ${items.length - max} more`] : items;
 }
 
 const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
@@ -612,6 +636,8 @@ function summary(job: Job, count: number, notes: {
   blockers: string[];
   /** Why an earlier approval by this app may still be in force, when it may. */
   undismissed?: string;
+  /** Listed on an approval: the risks it accepted. */
+  waivers: Waiver[];
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -630,6 +656,10 @@ function summary(job: Job, count: number, notes: {
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
     notes.undismissed,
+    // Titles are the app's own comments, sanitized again; logins are plain names, never mentions.
+    notes.waivers.length > 0 && `Waived by a maintainer:\n- ${capped(notes.waivers.map((w) => `${
+      sanitize(w.title, job.repo)} (${pathList([w.line === null ? w.path : `${w.path}:${w.line}`], '', 1)}), waived by ${
+      w.by.replace(/[^\w-]/g, '')}`), 50).join('\n- ')}`,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),

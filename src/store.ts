@@ -12,7 +12,10 @@ export type RunStatus =
   | 'stale'
   /** Over the per-PR run cap: recorded, never claimed. */
   | 'skipped';
-export type FindingOutcome = 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap';
+export type FindingOutcome =
+  | 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
+  /** A re-report of a finding a maintainer waived: never posted, never blocks. */
+  | 'waived';
 
 export interface Finding {
   title: string;
@@ -32,6 +35,19 @@ export interface RecordedFinding extends Finding {
   outcome: FindingOutcome;
   /** On a kept finding: every focus that flagged it, its own first. */
   focuses?: string[];
+}
+
+/** A maintainer's decision not to fix a thread's finding on this PR. Never revoked. */
+export interface Waiver {
+  thread: string;
+  /** The maintainer's login. */
+  by: string;
+  how: 'resolve';
+  path: string;
+  /** The thread's line when it was waived; null once the code it was posted on had changed. */
+  line: number | null;
+  /** From the app's own first comment on the thread. */
+  title: string;
 }
 
 export interface RecordedFocus {
@@ -121,6 +137,14 @@ export function openStore(dataDir: string, clock: Clock) {
     CREATE TABLE IF NOT EXISTS invocations (
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS waivers (
+      repo TEXT NOT NULL,
+      pr INTEGER NOT NULL,
+      thread_id TEXT NOT NULL,
+      data TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (repo, pr, thread_id)
     );
     CREATE TABLE IF NOT EXISTS orchestrations (
       run_id INTEGER PRIMARY KEY REFERENCES runs(id),
@@ -216,6 +240,20 @@ export function openStore(dataDir: string, clock: Clock) {
       const row = db.prepare(`UPDATE runs SET status = 'running', updated_at = ?
         WHERE id = (SELECT id FROM runs WHERE status = 'queued' ORDER BY id LIMIT 1) RETURNING *`).get(now());
       return row && toJob(row);
+    },
+
+    /**
+     * Record a waiver the first time any run sees it; returns whether this was that time.
+     * ponytail: never pruned (a row per waived thread); prune with the PR's runs if the table ever matters.
+     */
+    recordWaiver(repo: string, pr: number, w: Waiver): boolean {
+      return db.prepare('INSERT OR IGNORE INTO waivers (repo, pr, thread_id, data, created_at) VALUES (?, ?, ?, ?, ?)')
+        .run(repo, pr, w.thread, JSON.stringify(w), now()).changes > 0;
+    },
+
+    waivers(repo: string, pr: number): Waiver[] {
+      return db.prepare('SELECT data FROM waivers WHERE repo = ? AND pr = ? ORDER BY rowid').all(repo, pr)
+        .map((row: any) => JSON.parse(row.data));
     },
 
     /** Recorded as soon as the config is read, so they survive a run that later fails or is superseded. */

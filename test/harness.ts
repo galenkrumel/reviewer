@@ -156,6 +156,13 @@ export class FakeGitHub implements GitHubPort {
     Object.assign(this.thread(threadId), { resolved: true, resolvedBy: { login, association } });
   }
 
+  /** Someone unresolves a thread in GitHub's UI. */
+  unresolve(threadId: string) {
+    const t = this.thread(threadId);
+    t.resolved = false;
+    delete t.resolvedBy;
+  }
+
   async replyToThread(token: string, threadId: string, body: string) {
     this.checkToken(token);
     this.thread(threadId).comments.push({ byApp: true, byPrAuthor: false, association: 'NONE', body });
