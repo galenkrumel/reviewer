@@ -1,6 +1,6 @@
 // Deterministic finding validation and comment formatting. Nothing here trusts the model.
 import type { ReviewComment, ReviewThread } from './ports.ts';
-import type { Finding, RecordedFinding } from './store.ts';
+import type { Finding, RecordedFinding, Waiver } from './store.ts';
 
 export type Severity = Finding['severity'];
 /** Severities, lowest first; the rank of each is its index + 1. */
@@ -18,19 +18,27 @@ const score = (f: Finding) => rank(f.severity) * f.confidence;
 const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
 /**
- * Give every reported finding exactly one outcome, in reporting order: anchor, threshold, cross-reviewer
+ * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor, cross-reviewer
  * merge, cross-push dedup against `posted` (findings published at earlier heads), then cap.
  * A published finding names every focus merged into it.
+ * A finding is waived when it raises a waived thread and no other of `threads` (this app's, as read this run).
+ * ponytail: a genuinely new problem at a waived finding's place is absorbed too, if `raises` matches it.
  */
 export function validate(
   reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
   posted: Pick<Finding, 'path' | 'title' | 'line'>[], limits: Thresholds,
+  threads: ReviewThread[] = [], waivers: Waiver[] = [],
 ): RecordedFinding[] {
+  const ids = new Set(waivers.map((w) => w.thread));
+  // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
+  const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
+  const others = threads.filter((t) => !ids.has(t.id));
   const out: RecordedFinding[] = reported.map(({ focus, finding }) => {
     const added = changed.get(finding.path);
     const f: RecordedFinding = { ...finding, focus, outcome: 'published' };
     // Threshold first: every other outcome then means a finding worth posting, which approval relies on.
     if (rank(f.severity) < rank(limits.minSeverity) || f.confidence < limits.minConfidence) f.outcome = 'below_threshold';
+    else if (waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f))) f.outcome = 'waived';
     else if (!added?.has(f.line)) f.outcome = 'unanchorable';
     return f;
   });
@@ -64,11 +72,14 @@ export function stillReported(thread: ReviewThread, findings: RecordedFinding[])
   return findings.some((f) => f.outcome === 'duplicate' && raises(thread, f));
 }
 
-/** Whether a thread is about this finding: same path, and a nearby line or the same title. */
-function raises(thread: ReviewThread, f: Pick<Finding, 'path' | 'line' | 'title'>): boolean {
-  const opening = normalizeTitle(thread.comments[0]?.body.split('\n')[0] ?? '');
+/** The title of the finding a thread raised: the first line of the app's own first comment, unbolded. */
+export const threadTitle = (t: ReviewThread) => (t.comments[0]?.body.split('\n')[0] ?? '').replace(/^\*\*(.*)\*\*$/, '$1');
+
+/** Whether a thread (or a waiver's record of one) is about this finding: same path, and a nearby line or the same title. */
+function raises(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'line' | 'title'>): boolean {
+  const title = 'comments' in thread ? threadTitle(thread) : thread.title;
   return f.path === thread.path
-    && ((thread.line !== null && Math.abs(thread.line - f.line) <= MERGE_WINDOW) || opening === normalizeTitle(f.title));
+    && ((thread.line !== null && Math.abs(thread.line - f.line) <= MERGE_WINDOW) || normalizeTitle(title) === normalizeTitle(f.title));
 }
 
 /** The inline comment for a published finding. A multi-line range anchors only if every line in it was added. */

@@ -346,6 +346,70 @@ test('a thread someone resolved in GitHub never reaches the verifier and blocks 
   assert.equal(github.reviews[0]!.review.event, 'APPROVE');
 });
 
+/** A first run posts a finding at line 5 and the app's thread for it; then `push` pushes and runs again. */
+async function withThread(correctness: AssistantMessage[], opts: { dataDir?: string } = {}) {
+  const { pr, fx, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: Array(5).fill(select('correctness')), correctness: [report(f(5)), ...correctness],
+    security: Array(5).fill(noFindings()),
+  });
+  let t = testApp({ model, github, config: { approveWhenClean: true }, dataDir: opts.dataDir });
+  await t.app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await t.app.drain();
+  const thread = github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
+  let n = 0;
+  const push = async (o: { restart?: boolean } = {}) => {
+    if (o.restart) t = testApp({ model, github, config: { approveWhenClean: true }, dataDir: t.dataDir });
+    const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + `const extra = ${++n};\n` }) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await t.app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await t.app.drain();
+    return { review: github.reviews.at(-1)!.review, record: t.app.runs().at(-1)!, logs: t.logs };
+  };
+  return { github, thread, model, push };
+}
+
+test('a maintainer resolving a thread waives it: a re-report is recorded as waived, not posted, and the run approves', async () => {
+  const { github, thread, model, push } = await withThread([report(f(5)), report(f(5))]);
+  github.resolveAs(thread.id, 'octo-maint', 'COLLABORATOR');
+  const first = await push();
+  assert.equal(first.review.event, 'APPROVE');
+  assert.deepEqual(first.review.comments, []);
+  assert.deepEqual(outcomes(first.record), [[5, 'waived']]);
+  assert.match(first.review.body, /Waived by a maintainer:\n- issue at 5 \(`src\/app\.ts:5`\), waived by octo-maint/);
+  assert.doesNotMatch(first.review.body, /@octo-maint/);
+  assert.deepEqual(first.logs.filter((l) => l.msg === 'finding waived').map((l) => [l.thread, l.by]), [[thread.id, 'octo-maint']]);
+  assert.equal(model.requestsFor('verifier').length, 0);
+
+  // Unresolving doesn't revoke it, across a restart; the waived thread never reaches the verifier, which has no turns.
+  thread.resolved = false;
+  delete thread.resolvedBy;
+  const second = await push({ restart: true });
+  assert.equal(second.review.event, 'APPROVE');
+  assert.deepEqual(outcomes(second.record), [[5, 'waived']]);
+  assert.equal(second.logs.filter((l) => l.msg === 'finding waived').length, 0);
+  assert.equal(model.requestsFor('verifier').length, 0);
+});
+
+test('a thread resolved by someone who is not a maintainer stays a blocker', async () => {
+  const { github, thread, model, push } = await withThread([noFindings()]);
+  github.resolveAs(thread.id, 'drive-by', 'CONTRIBUTOR');
+  const { review } = await push();
+  assert.equal(review.event, 'COMMENT');
+  assert.match(review.body, /1 review thread resolved by someone who can't waive it, on `src\/app\.ts`/);
+  assert.equal(model.requestsFor('verifier').length, 0);
+});
+
+test('a re-report matching both a waived thread and an open one still blocks', async () => {
+  const { github, thread, push } = await withThread([report(f(5)), toolCall('report_threads', { threads: [{ thread: 0, resolved: false, reply: 'No.' }] })]);
+  github.resolveAs(thread.id, 'octo-maint', 'MEMBER');
+  github.addThread(REPO, 7, PATH, 7, '**other issue at 7**\n\nLine 7 is wrong.');
+  const { review, record } = await push();
+  assert.equal(review.event, 'COMMENT');
+  assert.deepEqual(outcomes(record), [[5, 'duplicate']]);
+  assert.match(review.body, /a reviewer still reports 1 issue already commented on/);
+});
+
 test('a thread the verifier keeps open blocks approval, and the review says so', async () => {
   const { review, thread } = await clean({ approveWhenClean: true }, 1, { verifier: [verdict(false)] });
   assert.equal(thread!.resolved, false);
