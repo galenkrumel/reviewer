@@ -44,9 +44,14 @@ export interface GitHubPort {
   /** URL the bare clone fetches from. Credentials never go in it. */
   cloneUrl(repo: string): string;
   getPullRequest(token: string, repo: string, number: number): Promise<PullRequest>;
-  /** Reviews this app posted on the PR; anyone else's are left out, so nobody can forge the marker. */
-  listReviews(token: string, repo: string, number: number): Promise<{ id: number; body: string }[]>;
+  /**
+   * Reviews this app posted on the PR; anyone else's are left out, so nobody can forge the marker.
+   * `state` is GitHub's (APPROVED, COMMENTED, DISMISSED, ...).
+   */
+  listReviews(token: string, repo: string, number: number): Promise<{ id: number; body: string; state: string }[]>;
   createReview(token: string, repo: string, number: number, review: NewReview): Promise<{ id: number }>;
+  /** Dismiss one of this app's reviews. Branch protection can refuse it. */
+  dismissReview(token: string, repo: string, number: number, reviewId: number, message: string): Promise<void>;
   /** The review threads this app started on the PR that are still unresolved. */
   openThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
   replyToThread(token: string, threadId: string, body: string): Promise<void>;
