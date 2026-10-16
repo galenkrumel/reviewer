@@ -406,7 +406,7 @@ export function createApp(deps: {
     let verdicts: Verdict[] = [];
     let verifierFailed = false;
     try {
-      open = await github.openThreads(token, job.repo, job.pr);
+      open = (await github.reviewThreads(token, job.repo, job.pr)).filter((t) => !t.resolved);
     } catch (err) {
       logFailure(job, 'threads', err, false);
     }

@@ -60,7 +60,7 @@ export class FakeGitHub implements GitHubPort {
   repos = new Map<string, string>();
   reviews: { repo: string; number: number; review: NewReview; id: number; foreign?: boolean; dismissed?: string }[] = [];
   /** Threads this app started, per `repo#number`. */
-  threads = new Map<string, (ReviewThread & { resolved: boolean })[]>();
+  threads = new Map<string, ReviewThread[]>();
   /** Thread reads throw while set. */
   threadsDown = false;
   /** Resolving throws while set, as GitHub does without the permission it wants. */
@@ -130,7 +130,7 @@ export class FakeGitHub implements GitHubPort {
   addThread(repo: string, number: number, path: string, line: number | null, body: string) {
     const key = `${repo}#${number}`;
     const list = this.threads.get(key) ?? [];
-    const thread = {
+    const thread: ReviewThread = {
       id: `T${list.length}`, path, line, diffHunk: '@@ -1 +1 @@', resolved: false,
       comments: [{ byApp: true, byPrAuthor: false, association: 'NONE', body }],
     };
@@ -145,11 +145,15 @@ export class FakeGitHub implements GitHubPort {
     return t;
   }
 
-  async openThreads(token: string, repo: string, number: number) {
+  async reviewThreads(token: string, repo: string, number: number) {
     this.checkToken(token);
     if (this.threadsDown) throw new Error('GitHub GraphQL: 502');
-    return structuredClone((this.threads.get(`${repo}#${number}`) ?? []).filter((t) => !t.resolved))
-      .map(({ resolved, ...t }) => t);
+    return structuredClone(this.threads.get(`${repo}#${number}`) ?? []);
+  }
+
+  /** Someone resolves a thread in GitHub's UI. */
+  resolveAs(threadId: string, login: string, association: string) {
+    Object.assign(this.thread(threadId), { resolved: true, resolvedBy: { login, association } });
   }
 
   async replyToThread(token: string, threadId: string, body: string) {
