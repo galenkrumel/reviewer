@@ -153,7 +153,7 @@ Optional:
 
 **About `APPROVE_WHEN_CLEAN`:** the approval is a model's judgment over content the PR author controls. The author can resolve the App's threads without fixing anything, and the verifier, which resolves threads it judges fixed, reads the author's replies. Treat it as a signal, never as the review that branch protection requires: keep a human approval required, and turn on "Dismiss stale pull request approvals when new commits are pushed".
 
-When a later run doesn't approve, the App dismisses its own earlier approval. On a branch whose protection sets "Restrict who can dismiss pull request reviews", add the App to that allowlist, or the dismissal is refused and the App's review says the earlier approval could not be dismissed. "Dismiss stale pull request approvals when new commits are pushed" covers the common case on its own: a push clears the approval before the App's next run.
+When a later run doesn't approve, the App dismisses its own earlier approval. On a branch without protection, GitHub accepts the dismissal with the App's permissions from step 1. A protected branch is untested. "Restrict who can dismiss pull request reviews" exists only on organization repositories, and there it may refuse the dismissal unless the App is on that allowlist; if it does, the App's review says the earlier approval could not be dismissed. "Dismiss stale pull request approvals when new commits are pushed" covers the common case on its own: a push clears the approval before the App's next run.
 
 ## Per-repo config (`.github/ai-review.yml`)
 
