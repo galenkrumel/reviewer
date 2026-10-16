@@ -73,6 +73,11 @@ export function stillReported(thread: ReviewThread, findings: RecordedFinding[])
   return findings.some((f) => f.outcome === 'duplicate' && raises(thread, f));
 }
 
+/** Whether this run absorbed a re-report of the thread's finding into its waiver. */
+export function absorbed(thread: ReviewThread, findings: RecordedFinding[]): boolean {
+  return findings.some((f) => f.outcome === 'waived' && raises(thread, f));
+}
+
 /** The title of the finding a thread raised: the first line of the app's own first comment, unbolded. */
 export const threadTitle = (t: ReviewThread) => (t.comments[0]?.body.split('\n')[0] ?? '').replace(/^\*\*(.*)\*\*$/, '$1');
 

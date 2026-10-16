@@ -400,6 +400,16 @@ test('an approval lists a thread a maintainer resolved after it was verified fix
   assert.doesNotMatch(review.body, /Waived/);
 });
 
+test('a fixed, resolved thread whose finding comes back is listed as waived', async () => {
+  const { github, thread, push } = await withThread([report(f(5))]);
+  github.resolveRefused = true;
+  thread.comments.push({ byApp: true, byPrAuthor: false, association: 'NONE', body: 'Resolved: fixed.\n\n<!-- ai-review:verified -->' });
+  github.resolveAs(thread.id, 'octo-maint', 'OWNER');
+  const { review } = await push();
+  assert.equal(review.event, 'APPROVE');
+  assert.match(review.body, /issue at 5 \(`src\/app\.ts:5`\), waived by octo-maint/);
+});
+
 test('a thread resolved by someone who is not a maintainer stays a blocker', async () => {
   const { github, thread, model, push } = await withThread([noFindings()]);
   github.resolveAs(thread.id, 'drive-by', 'CONTRIBUTOR');

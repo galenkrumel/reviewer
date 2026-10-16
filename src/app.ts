@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { addedLines, openSource, ToolError } from './git.ts';
-import { sanitize, stillReported, threadTitle, toComment, validate, type Severity } from './findings.ts';
+import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
@@ -514,8 +514,12 @@ export function createApp(deps: {
       event: approve ? 'APPROVE' as const : 'COMMENT' as const,
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
-        blockers: config.approveWhenClean ? blockers : [], undismissed, // Fixed is the stronger end state: a maintainer tidying up a verified thread accepted no risk.
-        waivers: approve ? waivers.filter((w) => !threads?.some((t) => t.id === w.thread && isVerified(t))) : [],
+        blockers: config.approveWhenClean ? blockers : [], undismissed,
+        // Fixed is the stronger end state: a maintainer tidying up a verified thread accepted no risk, until it comes back.
+        waivers: approve ? waivers.filter((w) => {
+          const t = threads?.find((x) => x.id === w.thread);
+          return !t || !isVerified(t) || absorbed(t, findings);
+        }) : [],
       }),
       comments,
     };
