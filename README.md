@@ -1,11 +1,20 @@
 # reviewer
 
-Self-hostable GitHub code review agent. See `REQUIREMENTS.md`.
+This is my self-hostable GitHub code review agent. See `REQUIREMENTS.md`.
 
-Each deployment is single-tenant: one operator, one GitHub App, one OpenRouter bill. It runs as one service with a
+`reviewer` will listen for new pull requests on your repo, and then dispatch a few different special-purpose agents to review your code. These special purpose agents are *Correctness*, *Security*, *Architecture*, *Performance*, and *Conciseness*. Their feedback will then be applied back as comments on the PR. After you address those comments `reviewer` will then kick off another round of review. Once all the comments have been resolved, `reviewer` will approve the PR to be merged.
+
+You may notice that sometimes your coding agent and `reviewer` may disagree with the review. This is normal, and to be expected. When this happens you may need to step in and mediate the dispute.
+
+For now, there are a few assumptions about external resources baked into `reviewer`:
+1. Your source code is in GitHub.
+2. The `reviewer` deployment environment is running on `https://render.com` (note that `reviewer` has no opinion about your code's operating environment, as it does NOT inspect running code; this is strictly static code review). In the future I may add support for other deployment environments, such as Railway or EC2.
+3. `https://openrouter.ai` is the AI gateway in use. 
+
+Each `reviewer` deployment is single-tenant: one operator, one GitHub App, one OpenRouter bill. It runs as one service with a
 persistent disk, which holds SQLite (the job queue and run records) and a bare clone cache of the reviewed repositories.
 
-Requires Node ≥ 22.18 and `git` on the PATH. No runtime dependencies.
+When run locally, `reviewer` requires Node ≥ 22.18 and `git` on the PATH. No runtime dependencies.
 
 ```sh
 npm install        # dev tooling only (typescript)
