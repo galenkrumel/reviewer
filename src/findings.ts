@@ -21,25 +21,19 @@ const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu
  * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor, cross-reviewer
  * merge, cross-push dedup against `posted` (findings published at earlier heads), then cap.
  * A published finding names every focus merged into it.
- * A finding is waived when it raises a waived thread and no other of `threads` (this app's, as read this run).
- * ponytail: a genuinely new problem at a waived finding's place is absorbed too, if `raises` matches it.
  */
 export function validate(
   reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
   posted: Pick<Finding, 'path' | 'title' | 'line'>[], limits: Thresholds,
   threads: ReviewThread[] | undefined, waivers: Waiver[],
 ): RecordedFinding[] {
-  threads ??= [];
-  const waivedIds = new Set(waivers.map((w) => w.thread));
-  // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
-  const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
-  const others = threads.filter((t) => !waivedIds.has(t.id));
+  const isWaived = waivedBy(threads, waivers);
   const out: RecordedFinding[] = reported.map(({ focus, finding }) => {
     const added = changed.get(finding.path);
     const f: RecordedFinding = { ...finding, focus, outcome: 'published' };
     // Threshold first: every other outcome then means a finding worth posting, which approval relies on.
     if (rank(f.severity) < rank(limits.minSeverity) || f.confidence < limits.minConfidence) f.outcome = 'below_threshold';
-    else if (waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f))) f.outcome = 'waived';
+    else if (isWaived(f)) f.outcome = 'waived';
     else if (!added?.has(f.line)) f.outcome = 'unanchorable';
     return f;
   });
@@ -63,6 +57,19 @@ export function validate(
     else if (published++ >= limits.maxComments) f.outcome = 'over_cap';
   }
   return out;
+}
+
+/**
+ * Whether a waiver absorbs a finding: it raises a waived thread and no other of `threads` (this app's, as read).
+ * ponytail: a genuinely new problem at a waived finding's place is absorbed too, if `raises` matches it.
+ */
+export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[]) {
+  threads ??= [];
+  const waivedIds = new Set(waivers.map((w) => w.thread));
+  // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
+  const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
+  const others = threads.filter((t) => !waivedIds.has(t.id));
+  return (f: Pick<Finding, 'path' | 'line' | 'title'>) => waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f));
 }
 
 /**

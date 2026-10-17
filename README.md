@@ -35,7 +35,7 @@ On the account that owns the repositories, go to **Settings → Developer settin
   | Pull requests | Read and write | reading the PR and posting the review |
   | Metadata | Read-only | required for every App |
 
-- **Subscribe to events:** **Pull request** only.
+- **Subscribe to events:** **Pull request** and **Pull request review thread**. The second lets a maintainer's resolve of the App's thread update its approval within seconds.
 - **Where can this GitHub App be installed:** only on this account.
 
 Create the App, then:

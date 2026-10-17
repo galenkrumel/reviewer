@@ -1,15 +1,17 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
-import { addedLines, openSource, ToolError } from './git.ts';
-import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, type Severity } from './findings.ts';
+import { addedLines, openSource, ToolError, type Source } from './git.ts';
+import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
-import { openStore, type Finding, type Job, type RecordedFocus, type RecordedInvocation, type Waiver } from './store.ts';
+import {
+  isRedecision, openStore, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
+} from './store.ts';
 import { runVerifier, type Verdict } from './verifier.ts';
-import type { Clock, GitHubPort, ModelPort, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
+import type { Clock, GitHubPort, ModelPort, NewReview, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
 
 export const AGENTS = ['orchestrator', 'verifier', ...FOCUSES] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -183,6 +185,79 @@ export function createApp(deps: {
   }
 
   /**
+   * This app's threads (undefined when they couldn't be read) with only trusted comments, recording any new waiver,
+   * and the PR's waivers, read from the store, not GitHub's current state: unresolving a waived thread doesn't revoke it.
+   */
+  async function readThreads(job: Job, token: string) {
+    let threads: ReviewThread[] | undefined;
+    try {
+      threads = await github.reviewThreads(token, job.repo, job.pr);
+    } catch (err) {
+      logFailure(job, 'threads', err, false);
+    }
+    // Only people who could resolve a thread themselves get a say: the PR's author and those with write access.
+    // Anyone else's replies (anyone at all, on a public repo) never reach the verifier.
+    threads = threads?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
+    // The app can't resolve its own threads, so a maintainer's resolve is a human decision: a waiver, kept for good.
+    for (const t of threads ?? []) {
+      if (!t.resolved || !TRUSTED_AUTHORS.has(t.resolvedBy?.association ?? '')) continue;
+      const w: Waiver = { thread: t.id, by: t.resolvedBy!.login, how: 'resolve', path: t.path, line: t.line, title: threadTitle(t) };
+      if (store.recordWaiver(job.repo, job.pr, w)) progress(job, 'finding waived', { thread: w.thread, by: w.by, how: w.how });
+    }
+    const waivers = store.waivers(job.repo, job.pr);
+    const waivedIds = new Set(waivers.map((w) => w.thread));
+    return {
+      threads, waivers,
+      // Waived threads are closed: the verifier never sees them, and they never block.
+      open: threads?.filter((t) => !t.resolved && !waivedIds.has(t.id)),
+      // Resolved by someone who can't waive (an outside PR's author): still a blocker, unless verified fixed.
+      outsideResolved: threads?.filter((t) => t.resolved && !waivedIds.has(t.id)) ?? [],
+    };
+  }
+
+  // Fetching is idempotent, so a failed attempt is simply repeated.
+  const fetchSource = (job: Job, token: string) => oneAtATime(job.repo, () => retrying(job, 'fetch', () => openSource({
+    dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token, headSha: job.headSha, baseSha: job.baseSha,
+  })));
+
+  /** The verifier's verdicts on the threads, or undefined when it failed. */
+  async function verifyThreads(job: Job, source: Source, threads: ReviewThread[], invocations: RecordedInvocation[]) {
+    const verify = () => runVerifier({
+      chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads,
+    });
+    try {
+      // One retry for a malformed report, as reviewers get; a blown budget would only be spent again.
+      return await verify().catch((err) => {
+        if (!(err instanceof InvalidReport)) throw err;
+        logFailure(job, 'verifier', err, false);
+        return verify();
+      });
+    } catch (err) {
+      logFailure(job, 'verifier', err, false);
+    }
+  }
+
+  /** Post the review and finish the run published, or failed keeping its record. A superseded run posts nothing. */
+  async function publish(job: Job, token: string, review: NewReview, record: Parameters<typeof store.finish>[2]) {
+    let reviewId: number | undefined;
+    try {
+      // A failed POST may still have created the review, so every attempt checks the marker first.
+      reviewId = await retrying(job, 'publish', async () => {
+        if (store.superseded(job.id)) return;
+        const posted = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
+        if (posted) return posted.id;
+        // Another worker may have superseded this run while the list was loading.
+        if (store.superseded(job.id)) return;
+        return (await github.createReview(token, job.repo, job.pr, review)).id;
+      });
+    } catch (err) {
+      // Keep the findings and costs: only the post is missing.
+      return store.finish(job.id, 'failed', { ...record, error: errorMessage(err) });
+    }
+    if (reviewId !== undefined) store.finish(job.id, 'published', { reviewId, ...record });
+  }
+
+  /**
    * Dismiss this app's approvals still in force, so its approval always reflects its latest verdict. Only while the
    * run is current: called right before publishing. Returns the summary line when one may still be in force.
    */
@@ -274,7 +349,7 @@ export function createApp(deps: {
     const capped = store.countRuns(repo, pr.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
     store.enqueue({
       deliveryId: String(d.headers['x-github-delivery'] ?? ''),
-      event: `pull_request.${payload.action}`,
+      event: `${event}.${payload.action}`,
       repo,
       pr: pr.number,
       installationId: payload.installation.id,
@@ -304,11 +379,7 @@ export function createApp(deps: {
     // Before fetching: a late delivery's head may have been force-pushed away, and reviewing it would be wasted.
     const start = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(start, job)) return finishStale(job, start);
-    // Fetching is idempotent, so a failed attempt is simply repeated.
-    const source = await oneAtATime(job.repo, () => retrying(job, 'fetch', () => openSource({
-      dataDir: config.dataDir, repo: job.repo, url: github.cloneUrl(job.repo), token,
-      headSha: job.headSha, baseSha: job.baseSha,
-    })));
+    const source = await fetchSource(job, token);
     // Superseded runs keep that status and stop: checked between steps and right before publishing.
     if (store.superseded(job.id)) return;
     // Read at the base SHA only, so a PR cannot change its own review by editing the config.
@@ -403,51 +474,20 @@ export function createApp(deps: {
       }
     }
     // The verifier re-checks this app's open threads whether or not reviewers ran: a deletion can be the fix.
-    let threads: ReviewThread[] | undefined;
-    let verdicts: Verdict[] = [];
-    let verifierFailed = false;
-    try {
-      threads = await github.reviewThreads(token, job.repo, job.pr);
-    } catch (err) {
-      logFailure(job, 'threads', err, false);
-    }
-    // Only people who could resolve a thread themselves get a say: the PR's author and those with write access.
-    // Anyone else's replies (anyone at all, on a public repo) never reach the verifier.
-    threads = threads?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
-    // The app can't resolve its own threads, so a maintainer's resolve is a human decision: a waiver, kept for good.
-    for (const t of threads ?? []) {
-      if (!t.resolved || !TRUSTED_AUTHORS.has(t.resolvedBy?.association ?? '')) continue;
-      const w: Waiver = { thread: t.id, by: t.resolvedBy!.login, how: 'resolve', path: t.path, line: t.line, title: threadTitle(t) };
-      if (store.recordWaiver(job.repo, job.pr, w)) progress(job, 'finding waived', { thread: w.thread, by: w.by, how: w.how });
-    }
-    // Read from the store, not GitHub's current state: unresolving a waived thread doesn't revoke the waiver.
-    const waivers = store.waivers(job.repo, job.pr);
-    const waivedIds = new Set(waivers.map((w) => w.thread));
-    // Waived threads are closed: the verifier never sees them, and they never block.
-    const open = threads?.filter((t) => !t.resolved && !waivedIds.has(t.id));
-    // Resolved by someone who can't waive (an outside PR's author): still a blocker, unless verified fixed.
-    const outsideResolved = threads?.filter((t) => t.resolved && !waivedIds.has(t.id)) ?? [];
+    let { threads, waivers, open, outsideResolved } = await readThreads(job, token);
     // Verified on an earlier run (the app's VERIFIED reply is still the last word): not checked again.
     // ponytail: a later push can't reopen a verified thread; a reviewer reporting the issue again keeps it open.
-    const verified = open?.filter(isVerified) ?? [];
-    const unverified = open?.filter((t) => !verified.includes(t));
-    if (unverified?.length) {
-      const verify = () => runVerifier({
-        chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads: unverified,
-      });
-      try {
-        // One retry for a malformed report, as reviewers get; a blown budget would only be spent again.
-        verdicts = await verify().catch((err) => {
-          if (!(err instanceof InvalidReport)) throw err;
-          logFailure(job, 'verifier', err, false);
-          return verify();
-        });
-      } catch (err) {
-        verifierFailed = true;
-        logFailure(job, 'verifier', err, false);
-      }
-    }
+    const unverified = open?.filter((t) => !isVerified(t));
+    const verdicts = unverified?.length ? await verifyThreads(job, source, unverified, invocations) : [];
     if (store.superseded(job.id)) return;
+    // A maintainer may have waived a thread meanwhile. The re-decision that queued finds nothing published here yet,
+    // so this run reads the threads again to honour it.
+    // ponytail: a waiver between here and publishing is missed by both; defer re-decisions behind running runs if it bites.
+    if (threads) {
+      const again = await readThreads(job, token);
+      if (again.threads) ({ threads, waivers, open, outsideResolved } = again);
+    }
+    const verified = open?.filter(isVerified) ?? [];
     const fallbackUsed = orchestratorError !== undefined;
     const changed = addedLines(diff);
     const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
@@ -457,14 +497,13 @@ export function createApp(deps: {
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
 
-    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped };
     const oversized = scope.reviewableLines > maxLines;
     const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
     const unreviewed = scope.skipped.length + scope.binary.length;
 
     // A thread whose finding a reviewer reported again stays open, even if the verifier thinks otherwise.
     const { closed, resolved } = await settleThreads(job, token,
-      verdicts.filter((v) => !v.resolved || !stillReported(v.thread, findings)),
+      (verdicts ?? []).filter((v) => open?.some((t) => t.id === v.thread.id) && (!v.resolved || !stillReported(v.thread, findings))),
       verified.filter((t) => !stillReported(t, findings)));
     const stillOpen = open?.filter((t) => !closed.has(t.id));
     const outsideOpen = outsideResolved.filter((t) => !isVerified(t) || stillReported(t, findings));
@@ -474,12 +513,9 @@ export function createApp(deps: {
     // Any finding outcome but below_threshold is a problem someone still sees (published, unanchorable, ...).
     // On an incremental run, an earlier run may have dropped findings for the comment cap: they never became threads.
     // ponytail: that check reads run records, which are pruned after retentionDays; a PR busy for longer can lose them.
-    const count = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`;
-    // Locations are built here from the finding's path and line: code spans keep them inert.
-    const at = (hits: typeof findings) => ({ n: hits.length, where: pathList(hits.map((f) => `${f.path}:${f.line}`), ', ', 10) });
-    const duplicate = at(findings.filter((f) => f.outcome === 'duplicate'));
-    const outside = at(findings.filter((f) => f.outcome === 'unanchorable'));
-    const blockers = [
+    const overCap = findings.filter((f) => f.outcome === 'over_cap').length;
+    // What no waiver can lift, kept for re-decisions at this head.
+    const fixed = [
       // A push that runs no reviewers is never clean: a deleted check is what it would hide. Only after an earlier
       // review does the label help; a PR with nothing reviewable in it runs no reviewers on a full review either.
       focuses.length === 0 && (since !== undefined
@@ -487,18 +523,16 @@ export function createApp(deps: {
         : 'no reviewers ran: nothing reviewable changed'),
       failed.length > 0 && `the ${listed(failed)} review failed`,
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
-      comments.length > 0 && `${count(comments.length, 'new issue')} commented inline`,
-      duplicate.n > 0 && `a reviewer still reports ${count(duplicate.n, 'issue')} already commented on, at ${duplicate.where}`,
-      outside.n > 0 && `${count(outside.n, 'issue')} found outside the changed lines, at ${outside.where}`,
+      overCap > 0 && `${count(overCap, 'issue')} left uncommented over the comment cap`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
-      open === undefined && "this PR's review threads couldn't be read",
-      verifierFailed && `${count(unverified!.length, 'open review thread')} couldn't be re-checked`,
-      !verifierFailed && stillOpen?.length && `${count(stillOpen.length, 'review thread')} still open, on ${
-        pathList([...new Set(stillOpen.map((t) => t.path))], ', ', 10)}`,
-      outsideOpen.length > 0 && `${count(outsideOpen.length, 'review thread')} resolved by someone who can't waive it, on ${
-        pathList([...new Set(outsideOpen.map((t) => t.path))], ', ', 10)}`,
     ].filter((b): b is string => typeof b === 'string');
+    const blockers = [
+      ...fixed,
+      ...(comments.length > 0 ? [`${count(comments.length, 'new issue')} commented inline`] : []),
+      ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
+    ];
+    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped, blockers: fixed };
     const approve = config.approveWhenClean === true && blockers.length === 0;
     progress(job, 'review decided', { comments: comments.length, approve, blockers: blockers.length, findings: outcomes(findings) });
     // With approvals on, every run says where the PR stands, even when there is nothing else to post.
@@ -509,42 +543,90 @@ export function createApp(deps: {
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(live, job)) return finishStale(job, live, record);
     const undismissed = config.approveWhenClean && !approve ? await dismissApprovals(job, token, blockers) : undefined;
-    const newReview = {
+    await publish(job, token, {
       commit_id: job.headSha,
-      event: approve ? 'APPROVE' as const : 'COMMENT' as const,
+      event: approve ? 'APPROVE' : 'COMMENT',
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
         blockers: config.approveWhenClean ? blockers : [], undismissed,
-        // Fixed is the stronger end state: a maintainer tidying up a verified thread accepted no risk, until it comes back.
-        waivers: approve ? waivers.filter((w) => {
-          const t = threads?.find((x) => x.id === w.thread);
-          return !t || !isVerified(t) || absorbed(t, findings);
-        }) : [],
+        waivers: approve ? accepted(waivers, threads, findings) : [],
       }),
       comments,
-    };
-    let reviewId: number | undefined;
-    try {
-      // A failed POST may still have created the review, so every attempt checks the marker first.
-      reviewId = await retrying(job, 'publish', async () => {
-        if (store.superseded(job.id)) return;
-        const posted = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
-        if (posted) return posted.id;
-        // Another worker may have superseded this run while the list was loading.
-        if (store.superseded(job.id)) return;
-        return (await github.createReview(token, job.repo, job.pr, newReview)).id;
-      });
-    } catch (err) {
-      // Keep the findings and costs: only the post is missing.
-      return store.finish(job.id, 'failed', { ...record, error: errorMessage(err) });
+    }, record);
+  }
+
+  /**
+   * Decide approval again at the PR's head without running reviewers: from the latest full run published there, with
+   * waivers applied, and the threads as they are now. Posts only when the verdict changes.
+   */
+  async function redecideJob(job: Job) {
+    progress(job, 'run started', { event: job.event, head: job.headSha.slice(0, 7) });
+    const token = await github.mintToken(job.installationId);
+    const reviews = await github.listReviews(token, job.repo, job.pr);
+    const existing = reviews.find((r) => r.body.includes(marker(job)));
+    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
+    const start = await github.getPullRequest(token, job.repo, job.pr);
+    if (!isCurrent(start, job)) return finishStale(job, start);
+    // A re-decision never pays for a full review: with nothing published at this head, there is nothing to decide again.
+    const base = store.published(job.repo, job.pr, job.headSha, job.baseSha);
+    if (!base) {
+      progress(job, 'nothing to re-decide: no review published at this head');
+      return store.finish(job.id, 'skipped');
     }
-    if (reviewId !== undefined) store.finish(job.id, 'published', { reviewId, ...record });
+    const invocations: RecordedInvocation[] = [];
+    const { threads, waivers, open, outsideResolved } = await readThreads(job, token);
+    // Unsure where the PR stands: say nothing, rather than flip a verdict or dismiss an approval over a failed read.
+    if (!open) return store.finish(job.id, 'failed', { error: "threads: the PR's review threads couldn't be read" });
+    // The code is as it was reviewed, so only threads where someone spoke after the app need the verifier.
+    const spoken = open.filter((t) => t.comments.at(-1)?.byApp === false);
+    let verdicts: Verdict[] | undefined = [];
+    if (spoken.length) {
+      const source = await fetchSource(job, token);
+      if (store.superseded(job.id)) return;
+      verdicts = await verifyThreads(job, source, spoken, invocations);
+      if (!verdicts) return store.finish(job.id, 'failed', { invocations, error: "verifier: the threads couldn't be re-checked" });
+    }
+    if (store.superseded(job.id)) return;
+    // The run's published findings are threads now, decided by their state. Any other may be a newly waived re-report.
+    const isWaived = waivedBy(threads, waivers);
+    const findings = base.findings.filter((f) => f.outcome !== 'published' && f.outcome !== 'merged')
+      .map((f) => (f.outcome !== 'below_threshold' && isWaived(f) ? { ...f, outcome: 'waived' as const } : f));
+    const verified = open.filter(isVerified);
+    const { closed, resolved } = await settleThreads(job, token,
+      verdicts.filter((v) => !v.resolved || !stillReported(v.thread, findings)),
+      verified.filter((t) => !stillReported(t, findings)));
+    const stillOpen = open.filter((t) => !closed.has(t.id));
+    const outsideOpen = outsideResolved.filter((t) => !isVerified(t) || stillReported(t, findings));
+    progress(job, 'threads checked', { open: open.length, closed: closed.size, resolved });
+
+    const blockers = [...base.blockers, ...standing(findings, { open, stillOpen, outsideOpen })];
+    const approve = config.approveWhenClean === true && blockers.length === 0;
+    const approved = reviews.find((r) => r.id === base.reviewId)?.state === 'APPROVED';
+    progress(job, 'review decided', { approve, was: approved, blockers: blockers.length, findings: outcomes(findings) });
+    const record = { invocations };
+    if (approve === approved) return store.finish(job.id, 'nothing_to_publish', record);
+    const live = await github.getPullRequest(token, job.repo, job.pr);
+    if (!isCurrent(live, job)) return finishStale(job, live, record);
+    const undismissed = approve ? undefined : await dismissApprovals(job, token, blockers);
+    await publish(job, token, {
+      commit_id: job.headSha,
+      event: approve ? 'APPROVE' : 'COMMENT',
+      body: [
+        `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\`, decided again `
+          + `on its review threads: ${approve ? 'every comment is resolved, verified fixed or waived. Approved.' : 'no longer approved.'}`,
+        !approve && `**Not approved:** ${blockers.join('; ')}.`,
+        undismissed,
+        approve && waivedList(accepted(waivers, threads, findings), job.repo),
+        marker(job),
+      ].filter(Boolean).join('\n\n'),
+      comments: [],
+    }, record);
   }
 
   async function worker() {
     for (let job = store.claimNext(); job; job = store.claimNext()) {
       try {
-        await reviewJob(job);
+        await (isRedecision(job.event) ? redecideJob : reviewJob)(job);
       } catch (err) {
         // Errors come from git, GitHub or the model and carry no credentials.
         if (err instanceof StepError) store.finish(job.id, 'failed', { error: err.message });
@@ -588,11 +670,14 @@ const isCurrent = (live: PullRequest, job: Job) =>
 
 /** Why a delivery starts no review, or undefined when it should. Drafts are never reviewed. */
 function ignoreReason(event: unknown, payload: any, label: string): string | undefined {
-  if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
-  if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
+  if (event === 'pull_request_review_thread') {
+    // Resolving can waive a finding, so approval is decided again; unresolving revokes nothing.
+    if (payload.action !== 'resolved') return `action ${payload.action} is not a re-decision trigger`;
+  } else if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
+  else if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
   // changes.base holds the old base; the new one is pull_request.base.
-  if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
-  if (payload.action === 'labeled' && payload.label?.name !== label) {
+  else if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
+  else if (payload.action === 'labeled' && payload.label?.name !== label) {
     return `label ${payload.label?.name} is not the review label`;
   }
   if (!payload.pull_request) return 'no pull_request in payload';
@@ -622,6 +707,44 @@ function capped(items: string[], max: number): string[] {
 }
 
 const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
+const count = (n: number, what: string) => `${n} ${what}${n === 1 ? '' : 's'}`;
+// Locations are built here from the finding's path and line: code spans keep them inert.
+const at = (hits: RecordedFinding[]) => ({ n: hits.length, where: pathList(hits.map((f) => `${f.path}:${f.line}`), ', ', 10) });
+
+/**
+ * What stops an approval that a waiver or a thread can change: findings reported again or outside the changed lines,
+ * and this app's threads (`open` undefined when they couldn't be read). `unchecked` counts threads the verifier failed on.
+ */
+function standing(findings: RecordedFinding[], t: {
+  open?: ReviewThread[]; stillOpen?: ReviewThread[]; outsideOpen: ReviewThread[]; unchecked?: number;
+}): string[] {
+  const duplicate = at(findings.filter((f) => f.outcome === 'duplicate'));
+  const outside = at(findings.filter((f) => f.outcome === 'unanchorable'));
+  return [
+    duplicate.n > 0 && `a reviewer still reports ${count(duplicate.n, 'issue')} already commented on, at ${duplicate.where}`,
+    outside.n > 0 && `${count(outside.n, 'issue')} found outside the changed lines, at ${outside.where}`,
+    t.open === undefined && "this PR's review threads couldn't be read",
+    t.unchecked !== undefined && `${count(t.unchecked, 'open review thread')} couldn't be re-checked`,
+    t.unchecked === undefined && t.stillOpen?.length && `${count(t.stillOpen.length, 'review thread')} still open, on ${
+      pathList([...new Set(t.stillOpen.map((x) => x.path))], ', ', 10)}`,
+    t.outsideOpen.length > 0 && `${count(t.outsideOpen.length, 'review thread')} resolved by someone who can't waive it, on ${
+      pathList([...new Set(t.outsideOpen.map((x) => x.path))], ', ', 10)}`,
+  ].filter((b): b is string => typeof b === 'string');
+}
+
+/**
+ * The waivers an approval lists. Fixed is the stronger end state: a maintainer tidying up a verified thread accepted
+ * no risk, until it comes back.
+ */
+const accepted = (waivers: Waiver[], threads: ReviewThread[] | undefined, findings: RecordedFinding[]) => waivers.filter((w) => {
+  const t = threads?.find((x) => x.id === w.thread);
+  return !t || !isVerified(t) || absorbed(t, findings);
+});
+
+/** Titles are the app's own comments, sanitized again; logins are plain names, never mentions. */
+const waivedList = (waivers: Waiver[], repo: string) => waivers.length > 0 && `Waived by a maintainer:\n- ${capped(waivers.map((w) => `${
+  sanitize(w.title, repo)} (${pathList([w.line === null ? w.path : `${w.path}:${w.line}`], '', 1)}), waived by ${
+  w.by.replace(/[^\w-]/g, '')}`), 50).join('\n- ')}`;
 
 /** Findings counted by outcome, for the log. */
 function outcomes(findings: { outcome: string }[]): Record<string, number> {
@@ -656,10 +779,7 @@ function summary(job: Job, count: number, notes: {
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
     notes.undismissed,
-    // Titles are the app's own comments, sanitized again; logins are plain names, never mentions.
-    notes.waivers.length > 0 && `Waived by a maintainer:\n- ${capped(notes.waivers.map((w) => `${
-      sanitize(w.title, job.repo)} (${pathList([w.line === null ? w.path : `${w.path}:${w.line}`], '', 1)}), waived by ${
-      w.by.replace(/[^\w-]/g, '')}`), 50).join('\n- ')}`,
+    waivedList(notes.waivers, job.repo),
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),
@@ -679,6 +799,6 @@ function isVerified(t: ReviewThread): boolean {
   return t.comments.length > 1 && !!last?.byApp && last.body.endsWith(`\n\n${VERIFIED}`);
 }
 
-// A label re-review repeats a head/base pair on purpose, so its marker also names the run.
+// A label re-review and a re-decision repeat a head/base pair on purpose, so their markers also name the run.
 const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha}${
-  job.event === 'pull_request.labeled' ? `:run-${job.id}` : ''} -->`;
+  job.event === 'pull_request.labeled' || isRedecision(job.event) ? `:run-${job.id}` : ''} -->`;
