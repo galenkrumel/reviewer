@@ -96,6 +96,36 @@ test('a re-decision with no review published at the head is skipped and posts no
   ]);
 });
 
+test("a re-decision is skipped when the head's run recorded no decision, as when its review was found already posted", async () => {
+  const fx = gitFixture({ [PATH]: 'keep\n' }, { [PATH]: 'keep\n' + lines(60) });
+  const pr = { number: 7, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const github = new FakeGitHub();
+  github.addPullRequest(REPO, fx.url, pr);
+  // A review this run posted before a restart: the run finishes on it, with nothing else recorded.
+  const marker = `<!-- ai-review:${REPO}#7:${pr.headSha}:${pr.baseSha} -->`;
+  await github.createReview('ghs_fake_42', REPO, 7, { commit_id: pr.headSha, event: 'COMMENT', body: marker, comments: [] });
+  const thread = github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
+  const { app } = testApp({ model: new ScriptedModel({}), github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  github.resolveAs(thread.id, 'octo-maint', 'MEMBER');
+  await app.receive(threadEvent('resolved', pr));
+  await app.drain();
+  assert.deepEqual(app.runs().map((r) => r.status), ['published', 'skipped']);
+  assert.equal(github.reviews.length, 1);
+});
+
+test('with approvals off, a re-decision is skipped: no verdict can change', async () => {
+  const { app, github, pr, thread, calls } = await reviewed({ config: { approveWhenClean: false } });
+  thread.comments.push({ byApp: false, byPrAuthor: true, association: 'MEMBER', body: 'Not a bug.' });
+  const before = calls();
+  await app.receive(threadEvent('resolved', pr));
+  await app.drain();
+  assert.equal(app.runs().at(-1)!.status, 'skipped');
+  assert.equal(calls(), before);
+  assert.equal(github.reviews.length, 1);
+});
+
 test('resolves arriving together queue one re-decision', async () => {
   const { app, github, pr, thread } = await reviewed();
   const other = github.addThread(REPO, 7, PATH, 20, '**issue at 20**\n\nLine 20 is wrong.');

@@ -54,7 +54,7 @@ All other actions are ignored. Draft PRs are never reviewed.
 The App also subscribes to `pull_request_review_thread`. On `resolved`, which can waive a finding (§9.2), it queues a **re-decision** for the PR's current head; other actions are ignored. Gating (§3.2) and the rate limit (§3.4) apply as for a review.
 
 - A re-decision runs no orchestrator and no reviewers. It decides approval again from the latest full run published at that head and base, with waivers applied, and from the threads as they are now: the verifier runs only on unresolved threads where the PR's author or a maintainer spoke last.
-- It posts a review only when the approval verdict changes. Withdrawing an approval dismisses it as usual (§9.1). With no review published at that head, it is recorded `skipped` and nothing is posted. If the threads can't be read or the verifier fails, it posts nothing and the run is recorded `failed`.
+- It posts a review only when the approval verdict changes. Withdrawing an approval dismisses it as usual (§9.1). With no review published at that head (or one whose run recorded no decision, such as a review found already posted after a restart), or with approvals off, it is recorded `skipped` and nothing is posted. If the threads can't be read or the verifier fails, it posts nothing and the run is recorded `failed`.
 - It bypasses the duplicate check for its head and base, but a re-decision still queued for that head absorbs another. It never supersedes a review run.
 - A run already in flight reads the threads again before settling them, so it honours a waiver that lands while it runs.
 

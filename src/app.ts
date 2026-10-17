@@ -515,7 +515,7 @@ export function createApp(deps: {
     // ponytail: that check reads run records, which are pruned after retentionDays; a PR busy for longer can lose them.
     const overCap = findings.filter((f) => f.outcome === 'over_cap').length;
     // What no waiver can lift, kept for re-decisions at this head.
-    const fixed = [
+    const unwaivable = [
       // A push that runs no reviewers is never clean: a deleted check is what it would hide. Only after an earlier
       // review does the label help; a PR with nothing reviewable in it runs no reviewers on a full review either.
       focuses.length === 0 && (since !== undefined
@@ -523,16 +523,19 @@ export function createApp(deps: {
         : 'no reviewers ran: nothing reviewable changed'),
       failed.length > 0 && `the ${listed(failed)} review failed`,
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
-      overCap > 0 && `${count(overCap, 'issue')} left uncommented over the comment cap`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
     ].filter((b): b is string => typeof b === 'string');
     const blockers = [
-      ...fixed,
+      ...unwaivable,
       ...(comments.length > 0 ? [`${count(comments.length, 'new issue')} commented inline`] : []),
       ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
     ];
-    const record = { findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped, blockers: fixed };
+    const record = {
+      findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped,
+      // Here the inline comments block; once they are threads a waiver can close, the ones over the cap still do.
+      blockers: [...unwaivable, ...(overCap > 0 ? [`${count(overCap, 'issue')} left uncommented over the comment cap`] : [])],
+    };
     const approve = config.approveWhenClean === true && blockers.length === 0;
     progress(job, 'review decided', { comments: comments.length, approve, blockers: blockers.length, findings: outcomes(findings) });
     // With approvals on, every run says where the PR stands, even when there is nothing else to post.
@@ -567,10 +570,11 @@ export function createApp(deps: {
     if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
     const start = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(start, job)) return finishStale(job, start);
-    // A re-decision never pays for a full review: with nothing published at this head, there is nothing to decide again.
-    const base = store.published(job.repo, job.pr, job.headSha, job.baseSha);
+    // A re-decision never pays for a full review: with no decision published at this head, there is none to make again.
+    // With approvals off, no verdict can change.
+    const base = config.approveWhenClean ? store.redecisionBase(job.repo, job.pr, job.headSha, job.baseSha) : undefined;
     if (!base) {
-      progress(job, 'nothing to re-decide: no review published at this head');
+      progress(job, 'nothing to re-decide', { approvals: config.approveWhenClean === true });
       return store.finish(job.id, 'skipped');
     }
     const invocations: RecordedInvocation[] = [];
@@ -673,13 +677,19 @@ function ignoreReason(event: unknown, payload: any, label: string): string | und
   if (event === 'pull_request_review_thread') {
     // Resolving can waive a finding, so approval is decided again; unresolving revokes nothing.
     if (payload.action !== 'resolved') return `action ${payload.action} is not a re-decision trigger`;
-  } else if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
-  else if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
+    return prReason(payload);
+  }
+  if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
+  if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
   // changes.base holds the old base; the new one is pull_request.base.
-  else if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
-  else if (payload.action === 'labeled' && payload.label?.name !== label) {
+  if (payload.action === 'edited' && !payload.changes?.base) return 'edited without a base change';
+  if (payload.action === 'labeled' && payload.label?.name !== label) {
     return `label ${payload.label?.name} is not the review label`;
   }
+  return prReason(payload);
+}
+
+function prReason(payload: any): string | undefined {
   if (!payload.pull_request) return 'no pull_request in payload';
   if (payload.pull_request.draft) return 'pull request is a draft';
 }

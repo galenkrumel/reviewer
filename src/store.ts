@@ -138,9 +138,10 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       path TEXT NOT NULL
     );
-    CREATE TABLE IF NOT EXISTS blockers (
-      run_id INTEGER NOT NULL REFERENCES runs(id),
-      blocker TEXT NOT NULL
+    CREATE TABLE IF NOT EXISTS decisions (
+      run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+      -- JSON: what stopped approval that no waiver can lift.
+      blockers TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS invocations (
       run_id INTEGER NOT NULL REFERENCES runs(id),
@@ -248,21 +249,21 @@ export function openStore(dataDir: string, clock: Clock) {
     /**
      * What a re-decision decides from: the latest full run published at these SHAs, its findings and the blockers no
      * waiver can lift, and the latest review published there (a re-decision's included), whose verdict it may change.
-     * ponytail: a run whose review was found posted after a restart recorded no findings; re-reviewing would fix that.
+     * Undefined unless that run recorded its decision: one that found its review posted after a restart, or that ran
+     * before decisions were recorded, can't say what no waiver lifts.
      */
-    published(repo: string, pr: number, headSha: string, baseSha: string) {
+    redecisionBase(repo: string, pr: number, headSha: string, baseSha: string) {
       const at = `repo = ? AND pr = ? AND head_sha = ? AND base_sha = ? AND status = 'published'`;
-      const full = db.prepare(`SELECT id FROM runs WHERE ${at} AND ${FULL_RUN} ORDER BY id DESC LIMIT 1`)
-        .get(repo, pr, headSha, baseSha) as any;
-      if (!full) return;
+      const full = db.prepare(`SELECT r.id, d.blockers FROM runs r LEFT JOIN decisions d ON d.run_id = r.id
+        WHERE ${at} AND ${FULL_RUN} ORDER BY r.id DESC LIMIT 1`).get(repo, pr, headSha, baseSha) as any;
+      if (!full?.blockers) return;
       const latest = db.prepare(`SELECT review_id FROM runs WHERE ${at} ORDER BY id DESC LIMIT 1`)
         .get(repo, pr, headSha, baseSha) as any;
       return {
         reviewId: latest.review_id as number,
         findings: db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid').all(full.id)
           .map((row: any): RecordedFinding => JSON.parse(row.data)),
-        blockers: db.prepare('SELECT blocker FROM blockers WHERE run_id = ? ORDER BY rowid').all(full.id)
-          .map((row: any) => row.blocker as string),
+        blockers: JSON.parse(full.blockers) as string[],
       };
     },
 
@@ -312,8 +313,7 @@ export function openStore(dataDir: string, clock: Clock) {
       for (const path of opts.skipped ?? []) insertSkipped.run(id, path);
       const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
       for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
-      const insertBlocker = db.prepare('INSERT INTO blockers (run_id, blocker) VALUES (?, ?)');
-      for (const b of opts.blockers ?? []) insertBlocker.run(id, b);
+      if (opts.blockers) db.prepare('INSERT INTO decisions (run_id, blockers) VALUES (?, ?)').run(id, JSON.stringify(opts.blockers));
       if (opts.fallbackUsed !== undefined) {
         db.prepare('INSERT INTO orchestrations (run_id, fallback_used, error) VALUES (?, ?, ?)')
           .run(id, opts.fallbackUsed ? 1 : 0, opts.orchestratorError ?? null);
@@ -338,7 +338,7 @@ export function openStore(dataDir: string, clock: Clock) {
       // One transaction, so a crash can't leave a run with part of its record.
       db.exec('BEGIN');
       try {
-        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'blockers', 'orchestrations']) {
+        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations']) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
