@@ -125,7 +125,7 @@ export function createApp(deps: {
     const used: RecordedInvocation = { agent: name, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
     invocations.push(used);
     return async (messages, tools) => {
-      const res = await model.chat({ model: primary, models: fallbackModel ? [primary, fallbackModel] : undefined, messages, tools, session_id: `${job.repo}#${job.pr}` });
+      const res = await model.chat({ model: primary, models: fallbackModel ? [primary, fallbackModel] : undefined, messages, tools, session_id: `${job.repo.replace('/', '--')}--pr-${job.pr}` });
       if (!used.models.includes(res.model)) used.models.push(res.model);
       used.inputTokens += res.usage.inputTokens;
       used.outputTokens += res.usage.outputTokens;
