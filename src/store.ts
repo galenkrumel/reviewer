@@ -10,7 +10,7 @@ export type RunStatus =
   | 'superseded'
   /** The start or pre-publish check found the PR closed, a draft, or at other SHAs (a superseded job there is revived). */
   | 'stale'
-  /** Over the per-PR run cap: recorded, never claimed. */
+  /** Over the per-PR run cap: recorded, never claimed. A re-decision with no published review at its head. */
   | 'skipped';
 export type FindingOutcome =
   | 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
@@ -66,6 +66,10 @@ export interface RecordedInvocation {
   outputTokens: number;
   cost: number;
 }
+
+/** A re-decision runs no reviewers: it decides approval again from a published run's findings and the threads now. */
+export const isRedecision = (event: string) => !event.startsWith('pull_request.');
+const FULL_RUN = `event LIKE 'pull_request.%'`;
 
 export interface Job {
   id: number;
@@ -134,6 +138,11 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       path TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS decisions (
+      run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+      -- JSON: what stopped approval that no waiver can lift.
+      blockers TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS invocations (
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
@@ -165,11 +174,16 @@ export function openStore(dataDir: string, clock: Clock) {
     /**
      * No-op for a duplicate (repo, PR, head, base); otherwise supersedes the PR's in-flight jobs at other SHAs.
      * A label re-review is never a duplicate. A `skipped` job is only recorded.
+     * A re-decision is a duplicate only of one still queued at its SHAs, which will read the threads anyway, and
+     * supersedes nothing: a late delivery's old head must not stop the review of the new one.
      */
     enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued') {
-      if (status === 'queued') {
+      if (status === 'queued' && isRedecision(job.event)) {
+        if (db.prepare(`SELECT 1 FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
+          AND status = 'queued' AND NOT ${FULL_RUN}`).get(job.repo, job.pr, job.headSha, job.baseSha)) return;
+      } else if (status === 'queued') {
         const dup = job.event !== 'pull_request.labeled' && db.prepare(`SELECT 1 FROM runs
-          WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
+          WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ? AND ${FULL_RUN}
           AND status IN ('queued', 'running', 'published', 'nothing_to_publish')`)
           .get(job.repo, job.pr, job.headSha, job.baseSha);
         if (dup) return;
@@ -215,7 +229,7 @@ export function openStore(dataDir: string, clock: Clock) {
      */
     lastReviewed(repo: string, pr: number, headSha: string): { headSha: string; baseSha: string } | undefined {
       const row = db.prepare(`SELECT head_sha, base_sha FROM runs r WHERE repo = ? AND pr = ? AND head_sha != ?
-        AND status IN ('published', 'nothing_to_publish')
+        AND status IN ('published', 'nothing_to_publish') AND ${FULL_RUN}
         AND NOT EXISTS (SELECT 1 FROM focuses WHERE run_id = r.id AND json_extract(data, '$.status') = 'failed')
         AND NOT EXISTS (SELECT 1 FROM skipped_files WHERE run_id = r.id)
         ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha) as any;
@@ -228,8 +242,29 @@ export function openStore(dataDir: string, clock: Clock) {
      */
     revive(repo: string, pr: number, headSha: string, baseSha: string) {
       const row = db.prepare(`SELECT * FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
-        ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha, baseSha) as any;
+        AND ${FULL_RUN} ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha, baseSha) as any;
       if (row?.status === 'superseded') this.enqueue(toJob(row));
+    },
+
+    /**
+     * What a re-decision decides from: the latest full run published at these SHAs, its findings and the blockers no
+     * waiver can lift, and the latest review published there (a re-decision's included), whose verdict it may change.
+     * Undefined unless that run recorded its decision: one that found its review posted after a restart, or that ran
+     * before decisions were recorded, can't say what no waiver lifts.
+     */
+    redecisionBase(repo: string, pr: number, headSha: string, baseSha: string) {
+      const at = `repo = ? AND pr = ? AND head_sha = ? AND base_sha = ? AND status = 'published'`;
+      const full = db.prepare(`SELECT r.id, d.blockers FROM runs r LEFT JOIN decisions d ON d.run_id = r.id
+        WHERE ${at} AND ${FULL_RUN} ORDER BY r.id DESC LIMIT 1`).get(repo, pr, headSha, baseSha) as any;
+      if (!full?.blockers) return;
+      const latest = db.prepare(`SELECT review_id FROM runs WHERE ${at} ORDER BY id DESC LIMIT 1`)
+        .get(repo, pr, headSha, baseSha) as any;
+      return {
+        reviewId: latest.review_id as number,
+        findings: db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid').all(full.id)
+          .map((row: any): RecordedFinding => JSON.parse(row.data)),
+        blockers: JSON.parse(full.blockers) as string[],
+      };
     },
 
     superseded(id: number): boolean {
@@ -267,6 +302,8 @@ export function openStore(dataDir: string, clock: Clock) {
     finish(id: number, status: RunStatus, opts: {
       reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
       invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string; skipped?: string[];
+      /** What stops an approval whatever is waived later. */
+      blockers?: string[];
     } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
@@ -276,6 +313,7 @@ export function openStore(dataDir: string, clock: Clock) {
       for (const path of opts.skipped ?? []) insertSkipped.run(id, path);
       const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
       for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
+      if (opts.blockers) db.prepare('INSERT INTO decisions (run_id, blockers) VALUES (?, ?)').run(id, JSON.stringify(opts.blockers));
       if (opts.fallbackUsed !== undefined) {
         db.prepare('INSERT INTO orchestrations (run_id, fallback_used, error) VALUES (?, ?, ?)')
           .run(id, opts.fallbackUsed ? 1 : 0, opts.orchestratorError ?? null);
@@ -300,7 +338,7 @@ export function openStore(dataDir: string, clock: Clock) {
       // One transaction, so a crash can't leave a run with part of its record.
       db.exec('BEGIN');
       try {
-        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'orchestrations']) {
+        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations']) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
