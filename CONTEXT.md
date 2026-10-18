@@ -18,3 +18,11 @@ _Avoid_: Run, review run
 **Dashboard**:
 The operator's read-only view of Runs: their history and current status.
 _Avoid_: Admin panel, console
+
+**Focus**:
+One kind of review a Run can ask for: correctness, security, performance, architecture, conciseness or documentation. Each selected focus runs as its own reviewer. The orchestrator selects focuses; it cannot add new ones.
+_Avoid_: Reviewer type, authorize (for selecting a focus)
+
+**Doc drift**:
+A statement in the repository's documentation that a PR makes false: prose files or doc comments that still describe the behavior, names, paths, config or commands the PR changed. Documentation that was already wrong before the PR is not doc drift.
+_Avoid_: Stale docs (it doesn't separate what this PR broke from older debt)
