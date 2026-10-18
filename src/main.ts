@@ -80,6 +80,7 @@ const app = createApp({
     workerConcurrency: positiveInt('WORKER_CONCURRENCY'),
     retentionDays: positiveInt('RETENTION_DAYS'),
     approveWhenClean: flag('APPROVE_WHEN_CLEAN'),
+    adminPassword: process.env.ADMIN_PASSWORD || undefined,
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),
@@ -106,6 +107,13 @@ const kick = () => app.drain().catch((err) => log({ level: 'error', msg: 'worker
 const MAX_BODY = 25 * 1024 * 1024;
 
 createServer((req, res) => {
+  try {
+    const page = app.dashboard(req);
+    if (page) return res.writeHead(page.status, page.headers).end(req.method === 'HEAD' ? undefined : page.body);
+  } catch (err) {
+    log({ level: 'error', msg: 'dashboard error', path: req.url, error: errorMessage(err) });
+    return res.writeHead(500).end();
+  }
   if (req.method !== 'POST') return res.writeHead(404).end();
   const chunks: Buffer[] = [];
   let size = 0;
