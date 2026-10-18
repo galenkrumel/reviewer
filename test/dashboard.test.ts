@@ -27,6 +27,7 @@ test('the dashboard is not served without a password, and only under /admin', ()
   assert.equal(get(app, '/admin/runs/1')!.status, 404);
   assert.equal(get(app, '/administrator'), undefined);
   assert.equal(get(app, '/'), undefined);
+  assert.equal(get(app, 'http://x:99999/admin'), undefined, 'a malformed target does not throw');
 });
 
 test('the dashboard needs the password', () => {

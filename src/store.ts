@@ -149,6 +149,8 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
     );
+    -- The Dashboard sums every listed run's cost.
+    CREATE INDEX IF NOT EXISTS invocations_run_id ON invocations(run_id);
     CREATE TABLE IF NOT EXISTS waivers (
       repo TEXT NOT NULL,
       pr INTEGER NOT NULL,

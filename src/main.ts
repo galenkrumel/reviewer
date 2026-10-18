@@ -107,8 +107,13 @@ const kick = () => app.drain().catch((err) => log({ level: 'error', msg: 'worker
 const MAX_BODY = 25 * 1024 * 1024;
 
 createServer((req, res) => {
-  const page = app.dashboard(req);
-  if (page) return res.writeHead(page.status, page.headers).end(req.method === 'HEAD' ? undefined : page.body);
+  try {
+    const page = app.dashboard(req);
+    if (page) return res.writeHead(page.status, page.headers).end(req.method === 'HEAD' ? undefined : page.body);
+  } catch (err) {
+    log({ level: 'error', msg: 'dashboard error', path: req.url, error: errorMessage(err) });
+    return res.writeHead(500).end();
+  }
   if (req.method !== 'POST') return res.writeHead(404).end();
   const chunks: Buffer[] = [];
   let size = 0;

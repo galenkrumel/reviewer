@@ -169,6 +169,8 @@ const HEADERS = {
 /** Serves `/admin` (the Run list) and `/admin/runs/:id`, or undefined for any other path. 404 while no password is set. */
 export function createDashboard(store: Store, password: string | undefined, now: () => Date) {
   return (req: DashboardRequest): DashboardResponse | undefined => {
+    // A malformed request-target is not the Dashboard's; new URL would throw on it.
+    if (!URL.canParse(req.url ?? '/', 'http://localhost')) return;
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (url.pathname !== '/admin' && !url.pathname.startsWith('/admin/')) return;
     const respond = (status: number, body = '', headers: Record<string, string> = {}) =>
