@@ -40,7 +40,7 @@ export function validate(
 
   const ranked = out.filter((f) => f.outcome === 'published').sort((a, b) => score(b) - score(a));
   const kept: RecordedFinding[] = [];
-  // A stale doc is a different problem from a bug on the same line, so documentation findings merge only with each other.
+  // Doc drift is a different problem from a bug on the same line, so documentation findings never merge with other focuses.
   const isDoc = (x: RecordedFinding) => x.focus === 'documentation';
   for (const f of ranked) {
     const into = kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus)

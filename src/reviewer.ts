@@ -25,9 +25,9 @@ const SCOPE: Record<Focus, string> = {
 };
 
 /** Focus-specific rules, after the shared ones. */
-const EXTRA: Partial<Record<Focus, string>> = {
+const FOCUS_RULES: Partial<Record<Focus, string>> = {
   documentation: `
-Anchor a drift finding on the changed line that made the doc false, usually a code line. Its evidence names the stale doc as path:line and quotes the sentence. Anchor an accuracy finding on the edited doc line.
+Anchor a drift finding on the changed line that made the doc false, usually a code line. Its evidence names the drifted doc as path:line and quotes the sentence. Anchor an accuracy finding on the edited doc line.
 A doc statement this pull request made false is at least medium. It is high when it leads a reader into a broken or unsafe action (a wrong command, credential or setup step), or when it is agent instructions (AGENTS.md, CLAUDE.md) that now steer agents into broken changes.`,
 };
 
@@ -44,7 +44,7 @@ Judge severity by realistic impact, not the worst case imaginable:
 - high: breaks a feature or exposes data under realistic conditions.
 - medium: wrong behavior in an edge case, or under unusual but plausible conditions.
 - low: unlikely, cosmetic, or only matters at a much larger scale.
-When a changes-since-last-review block is present, the rest of the diff was already reviewed: read it for context, and focus on problems on lines that block adds.${EXTRA[focus] ?? ''}`;
+When a changes-since-last-review block is present, the rest of the diff was already reviewed: read it for context, and focus on problems on lines that block adds.${FOCUS_RULES[focus] ?? ''}`;
 
 const tool = (name: string, description: string, properties: object, required: string[] = []): ToolDef =>
   ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } });

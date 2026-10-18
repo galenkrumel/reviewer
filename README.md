@@ -4,9 +4,9 @@
 It only reads the code changes. It never runs your code, pushes commits, or merges.
 
 Each review runs a few focused AI reviewers: *Correctness*, *Security* and *Documentation* (docs the change made
-false) always, plus *Architecture*, *Performance* or *Conciseness* when the change calls for them. When you push new commits, it reviews again and checks whether its
-earlier comments were addressed. It never approves a PR unless you turn that on with
-[`APPROVE_WHEN_CLEAN`](#deployment-config-env-vars).
+false) always, plus *Architecture*, *Performance* or *Conciseness* when the change calls for them. When you push new
+commits, it reviews again and checks whether its earlier comments were addressed. It never approves a PR unless you
+turn that on with [`APPROVE_WHEN_CLEAN`](#deployment-config-env-vars).
 
 The reviewers will sometimes disagree with you or your coding agent. That's expected. Treat the comments as a second
 opinion, not a verdict.
@@ -161,7 +161,7 @@ When a later run doesn't approve, the App dismisses its own earlier approval. On
 Read from the PR's **base** SHA only, so a PR that edits it doesn't change its own review. It can only tighten the deployment's settings. Anything invalid, loosening or unknown (models, budgets, credentials, author gating) is ignored, and a warning goes in the run record.
 
 ```yaml
-disable_focuses: [performance, documentation] # correctness and security can't be disabled
+disable_focuses: [performance, documentation]  # correctness and security can't be disabled
 exclude:                                     # added to the built-in exclusions; globs match the full path
   - "legacy/"                                # a trailing slash means the whole directory
 path_hints:                                  # glob: note, given to the orchestrator for matching changed paths
