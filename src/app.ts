@@ -1,6 +1,7 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
+import { createDashboard } from './dashboard.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
@@ -59,6 +60,8 @@ export interface AppConfig {
   retentionDays?: number;
   /** Approve a clean run once every thread this app started is resolved. Off by default. */
   approveWhenClean?: boolean;
+  /** Basic-auth password for the read-only Dashboard at /admin. Unset, the Dashboard is not served. */
+  adminPassword?: string;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -656,7 +659,8 @@ export function createApp(deps: {
     return Promise.all(workers).then(() => {});
   }
 
-  return { receive, drain, checkModels, prune, runs: store.runs, close: store.close };
+  const dashboard = createDashboard(store, config.adminPassword, () => deps.clock.now());
+  return { receive, drain, checkModels, prune, dashboard, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);

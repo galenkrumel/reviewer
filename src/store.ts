@@ -70,6 +70,8 @@ export interface RecordedInvocation {
 /** A re-decision runs no reviewers: it decides approval again from a published run's findings and the threads now. */
 export const isRedecision = (event: string) => !event.startsWith('pull_request.');
 const FULL_RUN = `event LIKE 'pull_request.%'`;
+/** A run's cost, summed over its invocations, as a column of `runs`. */
+const COST = `(SELECT COALESCE(SUM(json_extract(data, '$.cost')), 0) FROM invocations WHERE run_id = runs.id)`;
 
 export interface Job {
   id: number;
@@ -168,6 +170,27 @@ export function openStore(dataDir: string, clock: Clock) {
     id: r.id, deliveryId: r.delivery_id, event: r.event, repo: r.repo, pr: r.pr,
     installationId: r.installation_id, headSha: r.head_sha, baseSha: r.base_sha, title: r.title, body: r.body,
   });
+  const findings = db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid');
+  const focuses = db.prepare('SELECT data FROM focuses WHERE run_id = ? ORDER BY rowid');
+  const invocations = db.prepare('SELECT data FROM invocations WHERE run_id = ? ORDER BY rowid');
+  const orchestration = db.prepare('SELECT fallback_used, error FROM orchestrations WHERE run_id = ?');
+  const warnings = db.prepare('SELECT warning FROM config_warnings WHERE run_id = ? ORDER BY rowid');
+  const toRecord = (r: any): RunRecord => {
+    const { installationId, title, body, ...job } = toJob(r);
+    const o: any = orchestration.get(r.id);
+    return {
+      ...job,
+      status: r.status,
+      reviewId: r.review_id,
+      error: r.error,
+      findings: findings.all(r.id).map((f: any) => JSON.parse(f.data)),
+      focuses: focuses.all(r.id).map((f: any) => JSON.parse(f.data)),
+      invocations: invocations.all(r.id).map((i: any) => JSON.parse(i.data)),
+      fallbackUsed: o?.fallback_used === 1,
+      orchestratorError: o?.error ?? null,
+      configWarnings: warnings.all(r.id).map((w: any) => w.warning),
+    };
+  };
 
   return {
     // ponytail: no transaction; DatabaseSync calls can't interleave in one process. Wrap in BEGIN IMMEDIATE if a second process ever writes.
@@ -326,7 +349,7 @@ export function openStore(dataDir: string, clock: Clock) {
     /** A run's status, review and error, with the cost summed over its invocations: what the end-of-run log line says. */
     outcome(id: number): { status: RunStatus; reviewId: number | null; error: string | null; cost: number } {
       const r: any = db.prepare(`SELECT status, review_id, error,
-        (SELECT COALESCE(SUM(json_extract(data, '$.cost')), 0) FROM invocations WHERE run_id = runs.id) AS cost
+        ${COST} AS cost
         FROM runs WHERE id = ?`).get(id);
       return { status: r.status, reviewId: r.review_id, error: r.error, cost: r.cost };
     },
@@ -338,7 +361,7 @@ export function openStore(dataDir: string, clock: Clock) {
       // One transaction, so a crash can't leave a run with part of its record.
       db.exec('BEGIN');
       try {
-        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations']) {
+        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings']) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
@@ -350,28 +373,52 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     /** The run-record query interface. */
-    runs(): RunRecord[] {
-      const findings = db.prepare('SELECT data FROM findings WHERE run_id = ? ORDER BY rowid');
-      const focuses = db.prepare('SELECT data FROM focuses WHERE run_id = ? ORDER BY rowid');
-      const invocations = db.prepare('SELECT data FROM invocations WHERE run_id = ? ORDER BY rowid');
-      const orchestration = db.prepare('SELECT fallback_used, error FROM orchestrations WHERE run_id = ?');
-      const warnings = db.prepare('SELECT warning FROM config_warnings WHERE run_id = ? ORDER BY rowid');
-      return db.prepare('SELECT * FROM runs ORDER BY id').all().map((r: any) => {
-        const { installationId, title, body, ...job } = toJob(r);
-        const o: any = orchestration.get(r.id);
-        return {
-          ...job,
-          status: r.status,
-          reviewId: r.review_id,
-          error: r.error,
-          findings: findings.all(r.id).map((f: any) => JSON.parse(f.data)),
-          focuses: focuses.all(r.id).map((f: any) => JSON.parse(f.data)),
-          invocations: invocations.all(r.id).map((i: any) => JSON.parse(i.data)),
-          fallbackUsed: o?.fallback_used === 1,
-          orchestratorError: o?.error ?? null,
-          configWarnings: warnings.all(r.id).map((w: any) => w.warning),
-        };
-      });
+    runs: (): RunRecord[] => db.prepare('SELECT * FROM runs ORDER BY id').all().map(toRecord),
+
+    /**
+     * The Dashboard's list: newest first, at most `limit` below id `before`. The cost is summed over every run that
+     * matches, not just this page; `ahead` counts the queued runs a queued one waits behind.
+     */
+    listRuns(f: { repo?: string; pr?: number; status?: string; kind?: 'full' | 'redecision'; before?: number }, limit: number) {
+      const where: string[] = [];
+      const params: (string | number)[] = [];
+      if (f.repo) where.push('repo = ? COLLATE NOCASE'), params.push(f.repo);
+      if (f.pr) where.push('pr = ?'), params.push(f.pr);
+      if (f.status) where.push('status = ?'), params.push(f.status);
+      if (f.kind) where.push(f.kind === 'full' ? FULL_RUN : `NOT ${FULL_RUN}`);
+      const match = where.length ? `WHERE ${where.join(' AND ')}` : '';
+      const total = (db.prepare(`SELECT COALESCE(SUM(${COST}), 0) AS cost FROM runs ${match}`).get(...params) as any).cost;
+      const page = f.before ? `${match ? `${match} AND` : 'WHERE'} id < ?` : match;
+      const rows = db.prepare(`SELECT id, event, repo, pr, title, head_sha, status, review_id, created_at, updated_at,
+        ${COST} AS cost, CASE WHEN status = 'queued' THEN
+          (SELECT COUNT(*) FROM runs q WHERE q.status = 'queued' AND q.id < runs.id) END AS ahead
+        FROM runs ${page} ORDER BY id DESC LIMIT ?`).all(...params, ...(f.before ? [f.before] : []), limit);
+      return {
+        total: total as number,
+        runs: rows.map((r: any) => ({
+          id: r.id as number, event: r.event as string, repo: r.repo as string, pr: r.pr as number,
+          title: r.title as string, headSha: r.head_sha as string, status: r.status as RunStatus,
+          reviewId: r.review_id as number | null, createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+          cost: r.cost as number, ahead: r.ahead as number | null,
+        })),
+      };
+    },
+
+    /** Everything the Dashboard shows for one run, with the waivers recorded on its PR so far. */
+    runDetail(id: number) {
+      const r: any = db.prepare('SELECT * FROM runs WHERE id = ?').get(id);
+      if (!r) return;
+      const d: any = db.prepare('SELECT blockers FROM decisions WHERE run_id = ?').get(id);
+      return {
+        ...toRecord(r),
+        title: r.title as string,
+        createdAt: r.created_at as string,
+        updatedAt: r.updated_at as string,
+        skipped: db.prepare('SELECT path FROM skipped_files WHERE run_id = ? ORDER BY rowid').all(id).map((s: any) => s.path as string),
+        /** Null when the run recorded no decision. */
+        blockers: d ? JSON.parse(d.blockers) as string[] : null,
+        waivers: this.waivers(r.repo, r.pr),
+      };
     },
 
     close: () => db.close(),

@@ -34,3 +34,6 @@ projects:
                 sync: false
               - key: REVIEW_MODEL
                 sync: false
+              # Optional: turns on the read-only dashboard at /admin.
+              - key: ADMIN_PASSWORD
+                sync: false
