@@ -438,7 +438,8 @@ export function openStore(dataDir: string, clock: Clock) {
       const page = f.before ? `${match ? `${match} AND` : 'WHERE'} id < ?` : match;
       const rows = db.prepare(`SELECT id, event, repo, pr, title, head_sha, status, review_id, created_at, updated_at,
         ${COST} AS cost, CASE WHEN status = 'queued' THEN
-          (SELECT COUNT(*) FROM runs q WHERE q.status = 'queued' AND q.id < runs.id) END AS ahead
+          (SELECT COUNT(*) FROM runs q WHERE q.status = 'queued' AND q.id < runs.id) END AS ahead,
+        (SELECT json_group_array(json(data)) FROM (SELECT data FROM focuses WHERE run_id = runs.id ORDER BY rowid)) AS focuses
         FROM runs ${page} ORDER BY id DESC LIMIT ?`).all(...params, ...(f.before ? [f.before] : []), limit);
       return {
         total: total as number,
@@ -447,6 +448,8 @@ export function openStore(dataDir: string, clock: Clock) {
           title: r.title as string, headSha: r.head_sha as string, status: r.status as RunStatus,
           reviewId: r.review_id as number | null, createdAt: r.created_at as string, updatedAt: r.updated_at as string,
           cost: r.cost as number, ahead: r.ahead as number | null,
+          /** The reviewers the run picked; empty for a re-decision or a run that hasn't picked yet. */
+          focuses: JSON.parse(r.focuses) as RecordedFocus[],
         })),
       };
     },

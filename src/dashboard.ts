@@ -118,13 +118,15 @@ ${runTable(runs, now)}
 ${runs.length === PAGE && html`<p><a href="/admin/runs?${older.toString()}">Older</a></p>`}`, true);
 }
 
-function runTable(runs: ReturnType<Store['listRuns']>['runs'], now: Date) {
+/** Runs as table rows; `withPr` false on a PR's own page, whose heading names it. */
+function runTable(runs: ReturnType<Store['listRuns']>['runs'], now: Date, withPr = true) {
   return html`<table>
-<tr><th>Run</th><th>PR</th><th>Kind</th><th>Status</th><th>Head</th><th>Created</th><th>Cost</th><th></th></tr>
+<tr><th>Run</th>${withPr && html`<th>PR</th>`}<th>Kind</th><th>Reviewers</th><th>Status</th><th>Head</th><th>Created</th><th>Cost</th><th></th></tr>
 ${runs.map((r) => html`<tr>
   <td><a href="/admin/runs/${r.id}">${r.id}</a></td>
-  <td><a href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</td>
+  ${withPr && html`<td><a href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</td>`}
   <td>${kind(r.event)}</td>
+  <td>${r.focuses.length ? r.focuses.map((f, i) => html`${i > 0 && ', '}${f.status === 'failed' ? html`<span class="err">${f.focus} (failed)</span>` : f.focus}`) : '—'}</td>
   <td>${status(r, now)}</td>
   <td><code>${r.headSha.slice(0, 7)}</code></td>
   <td>${since(r.createdAt, now)} ago</td>
@@ -170,7 +172,7 @@ function prDetail(store: Store, repo: string, pr: number, q: URLSearchParams, no
   return page(`${latest.repo}#${pr}`, html`${NAV}
 <h1><a href="${prUrl(latest.repo, pr)}">${latest.repo}#${pr}</a> ${latest.title}</h1>
 <p>Verdict: ${verdict(latest.reviewId, latest.approved)} ${reviewLink(latest.repo, pr, latest.reviewId)} · total cost ${usd(total)}</p>
-${runTable(runs, now)}
+${runTable(runs, now, false)}
 ${runs.length === PAGE && html`<p><a href="${prPath(repo, pr)}?before=${runs.at(-1)!.id}">Older</a></p>`}
 ${waivers.length > 0 && html`<h2>Waived on this PR</h2>
 <ul>${waivers.map((w) => html`<li>${w.title} (<code>${w.path}${w.line !== null ? `:${w.line}` : ''}</code>), waived by ${w.by}</li>`)}</ul>`}`, true);
