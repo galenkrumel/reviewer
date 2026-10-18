@@ -288,7 +288,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
   - Publish: retry with backoff, guarded by the marker check (§9.5).
   - All failures are written to structured logs and run metadata.
 - **Restart safety:** jobs left `running` at startup are re-queued. The idempotency marker prevents double-posting.
-- **Dashboard:** a read-only HTML view of runs at `/admin`, served only when an admin password is set and behind HTTP Basic auth. It lists runs newest first (filter by repo, PR, status, and full run or re-decision; total cost of the matches) and shows one run's recorded metadata, skipped files, blockers, and the PR's waivers. Everything from the PR or a model is escaped, and no script runs on the page.
+- **Dashboard:** a read-only HTML view of runs at `/admin`, served only when an admin password is set and behind HTTP Basic auth. Its home page lists PRs by their latest run (that run's status, the PR's verdict: whether its latest published review approved or only commented, its run count and cost; filter by repo or active PRs). A PR's page lists its runs and waivers; a run's page shows its recorded metadata, skipped files and blockers; a flat run list filters across PRs by status and full run or re-decision. Everything from the PR or a model is escaped, and no script runs on the page.
 
 ## 13. Acceptance criteria
 

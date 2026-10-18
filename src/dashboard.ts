@@ -60,6 +60,11 @@ const usd = (n: number) => `$${n.toFixed(n > 0 && n < 0.01 ? 4 : 2)}`;
 const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${pr}`;
 const reviewLink = (repo: string, pr: number, reviewId: number | null) =>
   reviewId !== null && html`<a href="${prUrl(repo, pr)}#pullrequestreview-${reviewId}">review</a>`;
+/** The Dashboard's page for a PR. Repo names are [A-Za-z0-9._-] and one slash, so they need no encoding. */
+const prPath = (repo: string, pr: number) => `/admin/prs/${repo}/${pr}`;
+const verdict = (reviewId: number | null, approved: boolean | null) =>
+  reviewId === null ? '—' : html`${approved ? 'approved' : 'commented'}`;
+const NAV = html`<p><a href="/admin">PRs</a> · <a href="/admin/runs">All runs</a></p>`;
 const kind = (event: string) => (isRedecision(event) ? html`re-decision · ${event}` : event.replace(/^pull_request\./, ''));
 
 function status(r: { status: RunStatus; createdAt: string; updatedAt: string; ahead?: number | null }, now: Date) {
@@ -99,21 +104,26 @@ function list(store: Store, q: URLSearchParams, now: Date) {
   older.set('before', String(runs.at(-1)?.id));
   const option = (value: string, current: string | undefined, label = value) =>
     html`<option value="${value}"${value === (current ?? '') ? new Html(' selected') : ''}>${label}</option>`;
-  return page('Runs', html`
-<h1>Runs</h1>
-<form method="get" action="/admin">
+  return page('Runs', html`${NAV}
+<h1>All runs</h1>
+<form method="get" action="/admin/runs">
   <label>Repo <input name="repo" value="${f.repo}" placeholder="owner/repo"></label>
   <label>PR <input name="pr" type="number" min="1" value="${f.pr}"></label>
   <label>Status <select name="status">${option('', f.status, 'any')}${STATUSES.map((s) => option(s, f.status))}</select></label>
   <label>Kind <select name="kind">${option('', f.kind, 'any')}${option('full', f.kind)}${option('redecision', f.kind, 're-decision')}</select></label>
-  <button>Filter</button> <a href="/admin">Clear</a>
+  <button>Filter</button> <a href="/admin/runs">Clear</a>
 </form>
 <p>Total cost of matching runs: ${usd(total)}</p>
-<table>
+${runTable(runs, now)}
+${runs.length === PAGE && html`<p><a href="/admin/runs?${older.toString()}">Older</a></p>`}`, true);
+}
+
+function runTable(runs: ReturnType<Store['listRuns']>['runs'], now: Date) {
+  return html`<table>
 <tr><th>Run</th><th>PR</th><th>Kind</th><th>Status</th><th>Head</th><th>Created</th><th>Cost</th><th></th></tr>
 ${runs.map((r) => html`<tr>
   <td><a href="/admin/runs/${r.id}">${r.id}</a></td>
-  <td><a href="${prUrl(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</td>
+  <td><a href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</td>
   <td>${kind(r.event)}</td>
   <td>${status(r, now)}</td>
   <td><code>${r.headSha.slice(0, 7)}</code></td>
@@ -121,8 +131,50 @@ ${runs.map((r) => html`<tr>
   <td>${usd(r.cost)}</td>
   <td>${reviewLink(r.repo, r.pr, r.reviewId)}</td>
 </tr>`)}
+</table>`;
+}
+
+/** The home page: PRs by their latest run. */
+function prList(store: Store, q: URLSearchParams, now: Date) {
+  const f = { repo: q.get('repo')?.trim() || undefined, active: q.get('active') === '1' || undefined };
+  const prs = store.listPrs({ ...f, before: positiveInt(q.get('before')) }, PAGE);
+  const older = new URLSearchParams(Object.entries(f).flatMap(([k, v]) => (v === undefined ? [] : [[k, v === true ? '1' : v]])));
+  older.set('before', String(prs.at(-1)?.id));
+  return page('PRs', html`${NAV}
+<h1>PRs</h1>
+<form method="get" action="/admin">
+  <label>Repo <input name="repo" value="${f.repo}" placeholder="owner/repo"></label>
+  <label><input type="checkbox" name="active" value="1"${f.active ? new Html(' checked') : ''}> Active only</label>
+  <button>Filter</button> <a href="/admin">Clear</a>
+</form>
+<table>
+<tr><th>PR</th><th>Latest run</th><th>Verdict</th><th>Last active</th><th>Runs</th><th>Cost</th></tr>
+${prs.map((p) => html`<tr>
+  <td><a href="${prPath(p.repo, p.pr)}">${p.repo}#${p.pr}</a> ${p.title}</td>
+  <td><a href="/admin/runs/${p.id}">${p.id}</a> ${kind(p.event)} · ${status(p, now)}</td>
+  <td>${verdict(p.reviewId, p.approved)} ${reviewLink(p.repo, p.pr, p.reviewId)}</td>
+  <td>${since(p.updatedAt, now)} ago</td>
+  <td>${p.runs}</td>
+  <td>${usd(p.cost)}</td>
+</tr>`)}
 </table>
-${runs.length === PAGE && html`<p><a href="/admin?${older.toString()}">Older</a></p>`}`, true);
+${prs.length === PAGE && html`<p><a href="/admin?${older.toString()}">Older</a></p>`}`, true);
+}
+
+/** One PR: its runs, newest first, and the waivers recorded on it so far. */
+function prDetail(store: Store, repo: string, pr: number, q: URLSearchParams, now: Date) {
+  const { total, runs } = store.listRuns({ repo, pr, before: positiveInt(q.get('before')) }, PAGE);
+  if (!runs.length) return;
+  const waivers = store.waivers(runs[0]!.repo, pr);
+  const latest = store.listPrs({ repo, pr }, 1)[0];
+  return page(`${repo}#${pr}`, html`${NAV}
+<h1><a href="${prUrl(runs[0]!.repo, pr)}">${runs[0]!.repo}#${pr}</a> ${runs[0]!.title}</h1>
+<p>Verdict: ${latest ? html`${verdict(latest.reviewId, latest.approved)} ${reviewLink(latest.repo, pr, latest.reviewId)}` : '—'}
+ · total cost ${usd(total)}</p>
+${runTable(runs, now)}
+${runs.length === PAGE && html`<p><a href="${prPath(repo, pr)}?before=${runs.at(-1)!.id}">Older</a></p>`}
+${waivers.length > 0 && html`<h2>Waived on this PR</h2>
+<ul>${waivers.map((w) => html`<li>${w.title} (<code>${w.path}${w.line !== null ? `:${w.line}` : ''}</code>), waived by ${w.by}</li>`)}</ul>`}`, true);
 }
 
 function detail(store: Store, id: number, now: Date) {
@@ -131,10 +183,11 @@ function detail(store: Store, id: number, now: Date) {
   const cost = r.invocations.reduce((sum, i) => sum + i.cost, 0);
   const section = (title: string, items: unknown[], body: Html) => items.length > 0 && html`<h2>${title}</h2>${body}`;
   return page(`Run ${r.id}`, html`
-<p><a href="/admin">← Runs</a></p>
-<h1>Run ${r.id}: <a href="${prUrl(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</h1>
+${NAV}
+<h1>Run ${r.id}: <a href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</h1>
 <table>
-<tr><th>Status</th><td>${status(r, now)} ${reviewLink(r.repo, r.pr, r.reviewId)}</td></tr>
+<tr><th>Status</th><td>${status(r, now)}</td></tr>
+<tr><th>Review</th><td>${verdict(r.reviewId, r.approved)} ${reviewLink(r.repo, r.pr, r.reviewId)}</td></tr>
 <tr><th>Event</th><td>${kind(r.event)} · delivery <code>${r.deliveryId}</code></td></tr>
 <tr><th>Head</th><td><code>${r.headSha}</code></td></tr>
 <tr><th>Base</th><td><code>${r.baseSha}</code></td></tr>
@@ -154,8 +207,7 @@ ${r.findings.map((f) => html`<tr><td>${f.outcome}</td><td>${f.severity}</td><td>
 ${section('Agents', r.invocations, html`<table><tr><th>Agent</th><th>Models</th><th>Input tokens</th><th>Output tokens</th><th>Cost</th></tr>
 ${r.invocations.map((i) => html`<tr><td>${i.agent}</td><td>${i.models.join(' → ')}</td><td>${i.inputTokens}</td><td>${i.outputTokens}</td><td>${usd(i.cost)}</td></tr>`)}</table>`)}
 ${section('Config warnings', r.configWarnings, html`<ul>${r.configWarnings.map((w) => html`<li>${w}</li>`)}</ul>`)}
-${section('Skipped files (over the review budget)', r.skipped, html`<ul>${r.skipped.map((p) => html`<li><code>${p}</code></li>`)}</ul>`)}
-${section('Waived on this PR so far', r.waivers, html`<ul>${r.waivers.map((w) => html`<li>${w.title} (<code>${w.path}${w.line !== null ? `:${w.line}` : ''}</code>), waived by ${w.by}</li>`)}</ul>`)}`,
+${section('Skipped files (over the review budget)', r.skipped, html`<ul>${r.skipped.map((p) => html`<li><code>${p}</code></li>`)}</ul>`)}`,
   r.status === 'queued' || r.status === 'running');
 }
 
@@ -166,7 +218,10 @@ const HEADERS = {
   'Referrer-Policy': 'no-referrer',
 };
 
-/** Serves `/admin` (the Run list) and `/admin/runs/:id`, or undefined for any other path. 404 while no password is set. */
+/**
+ * Serves `/admin` (PRs), `/admin/prs/:owner/:repo/:pr`, `/admin/runs` and `/admin/runs/:id`, or undefined for any
+ * other path. 404 while no password is set.
+ */
 export function createDashboard(store: Store, password: string | undefined, now: () => Date) {
   return (req: DashboardRequest): DashboardResponse | undefined => {
     // A malformed request-target is not the Dashboard's; new URL would throw on it.
@@ -180,9 +235,14 @@ export function createDashboard(store: Store, password: string | undefined, now:
       return respond(401, '', { 'WWW-Authenticate': 'Basic realm="reviewer", charset="UTF-8"' });
     }
     if (req.method !== 'GET' && req.method !== 'HEAD') return respond(405, '', { Allow: 'GET, HEAD' });
-    if (url.pathname === '/admin') return respond(200, list(store, url.searchParams, now()));
-    const id = positiveInt(/^\/admin\/runs\/([^/]+)$/.exec(url.pathname)?.[1] ?? null);
-    const body = id && detail(store, id, now());
+    const q = url.searchParams;
+    if (url.pathname === '/admin') return respond(200, prList(store, q, now()));
+    if (url.pathname === '/admin/runs') return respond(200, list(store, q, now()));
+    const run = /^\/admin\/runs\/([^/]+)$/.exec(url.pathname);
+    const pr = /^\/admin\/prs\/([^/]+\/[^/]+)\/([^/]+)$/.exec(url.pathname);
+    const id = positiveInt(run?.[1] ?? null);
+    const number = positiveInt(pr?.[2] ?? null);
+    const body = id ? detail(store, id, now()) : pr && number ? prDetail(store, decodeURIComponent(pr[1]!), number, q, now()) : undefined;
     return body ? respond(200, body) : respond(404);
   };
 }
