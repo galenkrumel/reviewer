@@ -83,12 +83,15 @@ export function fallbackPicks(paths: string[]): Pick[] {
   return picks;
 }
 
-/** Always-on focuses first when code changed, then picks in order, deduplicated and capped. */
-export function selectFocuses(picks: Pick[], paths: string[], maxReviewers: number): Pick[] {
+/**
+ * Always-on focuses first when code changed, then picks in order, deduplicated and capped.
+ * Disabled focuses leave before the cap, so they take no slot; only documentation, of the always-on ones, can be disabled.
+ */
+export function selectFocuses(picks: Pick[], paths: string[], maxReviewers: number, disabled: ReadonlySet<Focus> = new Set()): Pick[] {
   const out: Pick[] = [];
-  const add = (p: Pick) => out.some((o) => o.focus === p.focus) || out.push(p);
+  const add = (p: Pick) => disabled.has(p.focus) || out.some((o) => o.focus === p.focus) || out.push(p);
   if (paths.some((p) => !NON_CODE.test(p))) {
-    for (const focus of ['correctness', 'security'] as const) {
+    for (const focus of ['correctness', 'security', 'documentation'] as const) {
       add(picks.find((p) => p.focus === focus) ?? { focus, reason: 'always runs when code changes' });
     }
   }

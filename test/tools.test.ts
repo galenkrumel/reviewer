@@ -150,6 +150,7 @@ test('credentials never appear in prompts, tool results, logs or run records', a
       toolCall('report_findings', { findings: [] }),
     ],
     security: [noFindings()],
+    documentation: [noFindings()],
   };
   const prompts: unknown[] = [];
   const auth: string[] = [];
@@ -169,13 +170,13 @@ test('credentials never appear in prompts, tool results, logs or run records', a
 
   await app.receive(delivery('pull_request', openedPayload(REPO, pr))); // reviewed with every tool
   await app.receive(delivery('pull_request', openedPayload('acme/broken', { ...pr, number: 9 }))); // git fetch fails
-  // OpenRouter fails: fallback selection, both reviewers fail, and a summary-only review names them (their errors are recorded).
+  // OpenRouter fails: fallback selection, every reviewer fails, and a summary-only review names them (their errors are recorded).
   await app.receive(delivery('pull_request', openedPayload(REPO, { ...pr, number: 10 })));
   await app.drain();
 
   assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish', 'failed', 'published']);
   assert.ok(app.runs()[2]!.fallbackUsed);
-  assert.deepEqual(app.runs()[2]!.focuses.map((f) => f.status), ['failed', 'failed']);
+  assert.deepEqual(app.runs()[2]!.focuses.map((f) => f.status), ['failed', 'failed', 'failed']);
   assert.ok(auth.includes(`Bearer ${OPENROUTER_KEY}`)); // the sentinels really were in play
   const recorded = JSON.stringify([prompts, app.runs(), logged]);
   const basic = Buffer.from(`x-access-token:${TOKEN}`).toString('base64');

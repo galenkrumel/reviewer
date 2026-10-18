@@ -43,7 +43,7 @@ export interface AppConfig {
   reviewLabel?: string;
   /** Runs per PR per rolling 24 hours. Default 10. */
   runCap?: number;
-  /** Reviewers per run. Default 3; at least 2, so the always-on correctness and security reviewers both fit. */
+  /** Reviewers per run. Default 4; at least 3, so the always-on correctness, security and documentation reviewers fit. */
   maxReviewers?: number;
   /** Above this many reviewable changed lines the summary recommends splitting the PR. Default 800. */
   maxReviewableLines?: number;
@@ -87,9 +87,11 @@ export function createApp(deps: {
   log: Log;
 }) {
   const { config, github, model, log } = deps;
-  const maxReviewers = config.maxReviewers ?? 3;
-  // Below 2, the cap would drop the always-on security reviewer.
-  if (!Number.isInteger(maxReviewers) || maxReviewers < 2) throw new Error('maxReviewers must be an integer >= 2');
+  const maxReviewers = config.maxReviewers ?? 4;
+  // Below 3, the cap would drop an always-on reviewer.
+  if (!Number.isInteger(maxReviewers) || maxReviewers < 3) {
+    throw new Error('maxReviewers must be an integer >= 3, so the always-on correctness, security and documentation reviewers fit');
+  }
   const concurrency = config.workerConcurrency ?? 2;
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('workerConcurrency must be an integer >= 1');
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -444,9 +446,7 @@ export function createApp(deps: {
       }
 
       // Sequential: one reviewer's failure never stops the others.
-      // Disabled focuses leave before the cap, so they take no slot. The always-on ones can't be disabled.
-      const enabled = picks.filter((p) => !settings.disabledFocuses.has(p.focus));
-      const selected = selectFocuses(enabled, scope.reviewed.map((f) => f.path), settings.maxReviewers);
+      const selected = selectFocuses(picks, scope.reviewed.map((f) => f.path), settings.maxReviewers, settings.disabledFocuses);
       progress(job, 'reviewers picked', { focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined });
       for (const { focus, reason } of selected) {
         if (store.superseded(job.id)) return;

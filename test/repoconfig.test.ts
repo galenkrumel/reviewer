@@ -30,7 +30,14 @@ async function review(
 test('config at the base SHA applies: a disabled focus does not run and takes no reviewer slot', async () => {
   const { reviewers, run } = await review({ ...CODE, [CONFIG]: 'disable_focuses: [performance]\n' }, CHANGED);
 
-  assert.deepEqual(reviewers, ['correctness', 'security', 'architecture']);
+  assert.deepEqual(reviewers, ['correctness', 'security', 'documentation', 'architecture']);
+  assert.deepEqual(run.configWarnings, []);
+});
+
+test('documentation can be disabled, and its slot goes to a pick', async () => {
+  const { reviewers, run } = await review({ ...CODE, [CONFIG]: 'disable_focuses: [documentation]\n' }, CHANGED);
+
+  assert.deepEqual(reviewers, ['correctness', 'security', 'performance', 'architecture']);
   assert.deepEqual(run.configWarnings, []);
 });
 
@@ -40,7 +47,7 @@ test('a PR that edits .github/ai-review.yml does not change its own review', asy
     { ...CHANGED, [CONFIG]: 'disable_focuses: []\nmax_reviewers: 2\n' },
   );
 
-  assert.deepEqual(reviewers, ['correctness', 'security', 'architecture']);
+  assert.deepEqual(reviewers, ['correctness', 'security', 'documentation', 'architecture']);
   assert.deepEqual(run.configWarnings, []);
 });
 
@@ -59,7 +66,7 @@ review_outside_prs: always
   const { reviewers, run } = await review({ ...CODE, [CONFIG]: config }, CHANGED,
     { orchestrator: [select('performance', 'architecture', 'conciseness')], ...quiet() });
 
-  assert.deepEqual(reviewers, ['correctness', 'security', 'architecture']);
+  assert.deepEqual(reviewers, ['correctness', 'security', 'documentation', 'architecture']);
   assert.equal(run.status, 'nothing_to_publish');
   const w = run.configWarnings;
   for (const pattern of [/correctness.*cannot be disabled/, /security.*cannot be disabled/, /severity/, /confidence/,
@@ -72,7 +79,7 @@ review_outside_prs: always
 test('malformed YAML is ignored with a warning and the review proceeds with defaults', async () => {
   const { reviewers, run } = await review({ ...CODE, [CONFIG]: 'disable_focuses: [performance\nmax_reviewers: {2}\n' }, CHANGED);
 
-  assert.deepEqual(reviewers, ['correctness', 'security', 'performance']);
+  assert.deepEqual(reviewers, ['correctness', 'security', 'documentation', 'performance']);
   assert.equal(run.configWarnings.length, 1);
   assert.match(run.configWarnings[0]!, /malformed/);
 });
@@ -80,7 +87,7 @@ test('malformed YAML is ignored with a warning and the review proceeds with defa
 test('a symlinked config is ignored with a warning', async () => {
   const { reviewers, run } = await review({ ...CODE, 'other.yml': 'disable_focuses: [performance]\n', [CONFIG]: { symlink: '../other.yml' } }, CHANGED);
 
-  assert.deepEqual(reviewers, ['correctness', 'security', 'performance']);
+  assert.deepEqual(reviewers, ['correctness', 'security', 'documentation', 'performance']);
   assert.match(run.configWarnings.join(), /symlink/);
 });
 
@@ -122,13 +129,13 @@ test('raised thresholds and a lowered comment cap from the base config apply to 
   ]);
 });
 
-const DEFAULTS ={ minSeverity: 'medium', minConfidence: 0.7, maxReviewers: 3, maxComments: 10, maxReviewableLines: 800 } as const;
+const DEFAULTS ={ minSeverity: 'medium', minConfidence: 0.7, maxReviewers: 4, maxComments: 10, maxReviewableLines: 800 } as const;
 
 test('the YAML subset: comments, quotes, block and flow lists, maps, document marker, CRLF', () => {
   const { settings, warnings } = parseRepoConfig([
     '---', '# tighten', 'disable_focuses:', '  - performance', "  - 'conciseness'  # nah", '',
     'exclude: ["gen/**", build/*.js]', 'thresholds:', '  severity: high', '  confidence: 0.85',
-    'max_reviewers: 2', 'max_comments: 4', 'max_reviewable_lines: "400"',
+    'max_reviewers: 3', 'max_comments: 4', 'max_reviewable_lines: "400"',
   ].join('\r\n'), DEFAULTS);
 
   assert.deepEqual(warnings, []);
@@ -136,13 +143,14 @@ test('the YAML subset: comments, quotes, block and flow lists, maps, document ma
   assert.deepEqual(settings.exclude, ['gen/**', 'build/*.js']);
   assert.equal(settings.minSeverity, 'high');
   assert.equal(settings.minConfidence, 0.85);
-  assert.deepEqual([settings.maxReviewers, settings.maxComments, settings.maxReviewableLines], [2, 4, 400]);
+  assert.deepEqual([settings.maxReviewers, settings.maxComments, settings.maxReviewableLines], [3, 4, 400]);
 });
 
 test('a bad value ignores only that key; a cap that would drop an always-on reviewer is refused', () => {
-  const { settings, warnings } = parseRepoConfig('max_reviewers: 1\nmax_comments: lots\nthresholds:\n  severity: huge\n  confidence: 0.9\n', DEFAULTS);
+  const { settings, warnings } = parseRepoConfig('max_reviewers: 2\nmax_comments: lots\nthresholds:\n  severity: huge\n  confidence: 0.9\n', DEFAULTS);
 
-  assert.equal(settings.maxReviewers, 3);
+  assert.equal(settings.maxReviewers, 4);
+  assert.match(warnings[0]!, /max_reviewers: expected an integer >= 3/);
   assert.equal(settings.maxComments, 10);
   assert.equal(settings.minSeverity, 'medium');
   assert.equal(settings.minConfidence, 0.9);
@@ -153,7 +161,7 @@ test('no config, or an empty one, means deployment defaults and no warnings', ()
   for (const text of [undefined, '', '# nothing yet\n']) {
     const { settings, warnings } = parseRepoConfig(text, DEFAULTS);
     assert.deepEqual(warnings, []);
-    assert.equal(settings.maxReviewers, 3);
+    assert.equal(settings.maxReviewers, 4);
   }
 });
 

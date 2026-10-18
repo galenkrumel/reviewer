@@ -219,6 +219,8 @@ export class ScriptedModel implements ModelPort {
     const agent = agentOf(req);
     if (this.correctnessOnly && agent === 'orchestrator') return select('correctness');
     if (this.correctnessOnly && agent === 'security') return noFindings();
+    // Documentation is always on; a test that doesn't script it gets a clean report.
+    if (agent === 'documentation' && !this.turns.documentation) return noFindings();
     const turn = this.turns[agent]?.shift();
     if (!turn) throw new Error(`scripted model has no turn for ${agent}`);
     return typeof turn === 'function' ? turn() : turn;

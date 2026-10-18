@@ -63,6 +63,24 @@ test('two reviewers flagging lines within ±3 produce one comment naming both fo
   ]);
 });
 
+test('a documentation finding next to another focus\'s finding is published separately, not merged', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness')],
+    correctness: [report(f(10, { title: 'off by one' }))],
+    security: [noFindings()],
+    documentation: [report(f(10, { title: 'README still says 10', evidence: 'README.md:4 says "v10 is 10".' }))],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  assert.deepEqual(github.reviews[0]!.review.comments.map((c) => c.line), [10, 10]);
+  assert.deepEqual(app.runs()[0]!.findings.map((x) => [x.focus, x.outcome, x.focuses]), [
+    ['correctness', 'published', ['correctness']], ['documentation', 'published', ['documentation']],
+  ]);
+});
+
 test('a finding already posted on an earlier head is not posted again after a push', async () => {
   const { fx, pr, github } = setup();
   const model = new ScriptedModel({

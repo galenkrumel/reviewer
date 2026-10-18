@@ -12,7 +12,7 @@ export class BudgetExceeded extends Error {}
 /** The reviewer's report failed the schema check. */
 export class InvalidReport extends Error {}
 
-export const FOCUSES = ['correctness', 'security', 'performance', 'architecture', 'conciseness'] as const;
+export const FOCUSES = ['correctness', 'security', 'performance', 'architecture', 'conciseness', 'documentation'] as const;
 export type Focus = (typeof FOCUSES)[number];
 
 const SCOPE: Record<Focus, string> = {
@@ -21,6 +21,14 @@ const SCOPE: Record<Focus, string> = {
   performance: 'hot paths, data access, concurrency, large allocations and scaling risks',
   architecture: 'public interfaces, module boundaries, dependencies and cross-cutting behavior',
   conciseness: 'unnecessary complexity that materially reduces clarity. Subjective style preferences are out of scope: never report naming, formatting or taste',
+  documentation: 'doc drift: documentation this pull request makes false. Check prose files (README, docs/**, *.md and *.mdx, ADRs, AGENTS.md, CLAUDE.md, CONTEXT.md) and doc comments (JSDoc, docstrings) that still describe behavior, names, paths, flags, config, env vars, commands or architecture the pull request changed, and the accuracy of doc lines it adds or edits. Missing docs, CHANGELOGs, generated docs, external sites and docs that were already wrong before this pull request are out of scope. Never report wording, typos or style',
+};
+
+/** Focus-specific rules, after the shared ones. */
+const FOCUS_RULES: Partial<Record<Focus, string>> = {
+  documentation: `
+Anchor a drift finding on the changed line that made the doc false, usually a code line. Its evidence names the drifted doc as path:line and quotes the sentence. Anchor an accuracy finding on the edited doc line.
+A doc statement this pull request made false is at least medium. It is high when it leads a reader into a broken or unsafe action (a wrong command, credential or setup step), or when it is agent instructions (AGENTS.md, CLAUDE.md) that now steer agents into broken changes.`,
 };
 
 const prompt = (focus: Focus) => `You are the ${focus} reviewer. Review only for ${SCOPE[focus]}.
@@ -36,7 +44,7 @@ Judge severity by realistic impact, not the worst case imaginable:
 - high: breaks a feature or exposes data under realistic conditions.
 - medium: wrong behavior in an edge case, or under unusual but plausible conditions.
 - low: unlikely, cosmetic, or only matters at a much larger scale.
-When a changes-since-last-review block is present, the rest of the diff was already reviewed: read it for context, and focus on problems on lines that block adds.`;
+When a changes-since-last-review block is present, the rest of the diff was already reviewed: read it for context, and focus on problems on lines that block adds.${FOCUS_RULES[focus] ?? ''}`;
 
 const tool = (name: string, description: string, properties: object, required: string[] = []): ToolDef =>
   ({ type: 'function', function: { name, description, parameters: { type: 'object', properties, required } } });
