@@ -15,6 +15,10 @@ A Run that runs no reviewers and decides approval again from an earlier publishe
 The GitHub pull request review a Run publishes. Not every Run has one.
 _Avoid_: Run, review run
 
+**Verdict**:
+Whether a published Review approved the PR or only commented. A PR's Verdict is that of its latest Run that published one.
+_Avoid_: Decision (the blockers a full Run records), status
+
 **Dashboard**:
-The operator's read-only view of Runs: their history and current status.
+The operator's read-only view of PRs and their Runs: history, current status and Verdicts.
 _Avoid_: Admin panel, console

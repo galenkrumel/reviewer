@@ -159,6 +159,11 @@ export function openStore(dataDir: string, clock: Clock) {
       created_at TEXT NOT NULL,
       PRIMARY KEY (repo, pr, thread_id)
     );
+    CREATE TABLE IF NOT EXISTS verdicts (
+      run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+      -- Whether the run's published review approved, or only commented.
+      approved INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS orchestrations (
       run_id INTEGER PRIMARY KEY REFERENCES runs(id),
       fallback_used INTEGER NOT NULL,
@@ -329,6 +334,8 @@ export function openStore(dataDir: string, clock: Clock) {
       invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string; skipped?: string[];
       /** What stops an approval whatever is waived later. */
       blockers?: string[];
+      /** Whether the published review approved. */
+      approved?: boolean;
     } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
@@ -338,6 +345,7 @@ export function openStore(dataDir: string, clock: Clock) {
       for (const path of opts.skipped ?? []) insertSkipped.run(id, path);
       const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
       for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
+      if (opts.approved !== undefined) db.prepare('INSERT INTO verdicts (run_id, approved) VALUES (?, ?)').run(id, opts.approved ? 1 : 0);
       if (opts.blockers) db.prepare('INSERT INTO decisions (run_id, blockers) VALUES (?, ?)').run(id, JSON.stringify(opts.blockers));
       if (opts.fallbackUsed !== undefined) {
         db.prepare('INSERT INTO orchestrations (run_id, fallback_used, error) VALUES (?, ?, ?)')
@@ -363,7 +371,9 @@ export function openStore(dataDir: string, clock: Clock) {
       // One transaction, so a crash can't leave a run with part of its record.
       db.exec('BEGIN');
       try {
-        for (const table of ['findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings']) {
+        for (const table of [
+          'findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings', 'verdicts',
+        ]) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
@@ -376,6 +386,41 @@ export function openStore(dataDir: string, clock: Clock) {
 
     /** The run-record query interface. */
     runs: (): RunRecord[] => db.prepare('SELECT * FROM runs ORDER BY id').all().map(toRecord),
+
+    /**
+     * The Dashboard's PR list: PRs by their latest run, newest first, at most `limit` whose latest run id is below
+     * `before`. Each has its latest run, its run count and cost, and the verdict of its latest run that recorded one.
+     */
+    listPrs(f: { repo?: string; pr?: number; active?: boolean; before?: number }, limit: number) {
+      const match: string[] = [];
+      const matchParams: (string | number)[] = [];
+      if (f.repo) match.push('repo = ? COLLATE NOCASE'), matchParams.push(f.repo);
+      if (f.pr) match.push('pr = ?'), matchParams.push(f.pr);
+      const where: string[] = [];
+      const params: (string | number)[] = [];
+      if (f.active) where.push(`r.status IN ('queued', 'running')`);
+      if (f.before) where.push('l.id < ?'), params.push(f.before);
+      const rows = db.prepare(`SELECT l.repo, l.pr, l.runs, l.cost, r.id, r.title, r.event, r.status, r.created_at, r.updated_at,
+        CASE WHEN r.status = 'queued' THEN
+          (SELECT COUNT(*) FROM runs q WHERE q.status = 'queued' AND q.id < r.id) END AS ahead,
+        v.review_id, vd.approved
+        FROM (SELECT repo, pr, MAX(id) AS id, COUNT(*) AS runs, SUM(${COST}) AS cost FROM runs
+          ${match.length ? `WHERE ${match.join(' AND ')}` : ''} GROUP BY repo, pr) l
+        JOIN runs r ON r.id = l.id
+        LEFT JOIN runs v ON v.id = (SELECT MAX(p.id) FROM runs p JOIN verdicts ON verdicts.run_id = p.id
+          WHERE p.repo = l.repo AND p.pr = l.pr)
+        LEFT JOIN verdicts vd ON vd.run_id = v.id
+        ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+        ORDER BY l.id DESC LIMIT ?`).all(...matchParams, ...params, limit);
+      return rows.map((r: any) => ({
+        repo: r.repo as string, pr: r.pr as number, runs: r.runs as number, cost: r.cost as number,
+        /** The latest run. */
+        id: r.id as number, title: r.title as string, event: r.event as string, status: r.status as RunStatus,
+        createdAt: r.created_at as string, updatedAt: r.updated_at as string, ahead: r.ahead as number | null,
+        /** From the latest run with a verdict; null before any. */
+        reviewId: r.review_id as number | null, approved: r.approved === null ? null : r.approved === 1,
+      }));
+    },
 
     /**
      * The Dashboard's list: newest first, at most `limit` below id `before`. The cost is summed over every run that
@@ -406,11 +451,12 @@ export function openStore(dataDir: string, clock: Clock) {
       };
     },
 
-    /** Everything the Dashboard shows for one run, with the waivers recorded on its PR so far. */
+    /** Everything the Dashboard shows for one run. */
     runDetail(id: number) {
       const r: any = db.prepare('SELECT * FROM runs WHERE id = ?').get(id);
       if (!r) return;
       const d: any = db.prepare('SELECT blockers FROM decisions WHERE run_id = ?').get(id);
+      const v: any = db.prepare('SELECT approved FROM verdicts WHERE run_id = ?').get(id);
       return {
         ...toRecord(r),
         title: r.title as string,
@@ -419,7 +465,8 @@ export function openStore(dataDir: string, clock: Clock) {
         skipped: db.prepare('SELECT path FROM skipped_files WHERE run_id = ? ORDER BY rowid').all(id).map((s: any) => s.path as string),
         /** Null when the run recorded no decision. */
         blockers: d ? JSON.parse(d.blockers) as string[] : null,
-        waivers: this.waivers(r.repo, r.pr),
+        /** Null when the run recorded no verdict: it published nothing, or did before verdicts were recorded. */
+        approved: v ? v.approved === 1 : null,
       };
     },
 

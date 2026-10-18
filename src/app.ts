@@ -257,7 +257,7 @@ export function createApp(deps: {
       // Keep the findings and costs: only the post is missing.
       return store.finish(job.id, 'failed', { ...record, error: errorMessage(err) });
     }
-    if (reviewId !== undefined) store.finish(job.id, 'published', { reviewId, ...record });
+    if (reviewId !== undefined) store.finish(job.id, 'published', { reviewId, approved: review.event === 'APPROVE', ...record });
   }
 
   /**
@@ -378,7 +378,7 @@ export function createApp(deps: {
     const token = await github.mintToken(job.installationId);
     // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
     const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
-    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
+    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id, approved: existing.state === 'APPROVED' });
     // Before fetching: a late delivery's head may have been force-pushed away, and reviewing it would be wasted.
     const start = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(start, job)) return finishStale(job, start);
@@ -570,7 +570,7 @@ export function createApp(deps: {
     const token = await github.mintToken(job.installationId);
     const reviews = await github.listReviews(token, job.repo, job.pr);
     const existing = reviews.find((r) => r.body.includes(marker(job)));
-    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id });
+    if (existing) return store.finish(job.id, 'published', { reviewId: existing.id, approved: existing.state === 'APPROVED' });
     const start = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(start, job)) return finishStale(job, start);
     // A re-decision never pays for a full review: with no decision published at this head, there is none to make again.
