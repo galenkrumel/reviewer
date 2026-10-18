@@ -90,20 +90,21 @@ Each PR has a configurable cap on runs per rolling 24 hours (default 10). Events
 
 ### 5.1 Focus areas
 
-The orchestrator selects from a fixed enum of five focuses:
+The orchestrator selects from a fixed enum of six focuses:
 
 - **Correctness:** logic errors, edge cases, state handling, error handling.
 - **Security:** authentication, authorization, input handling, secrets, dependencies, network boundaries, sensitive data.
 - **Performance:** hot paths, data access, concurrency, large allocations, scaling risks.
 - **Architecture:** public interfaces, module boundaries, dependencies, cross-cutting behavior.
 - **Conciseness:** unnecessary complexity that materially reduces clarity. Subjective style preferences are excluded.
+- **Documentation:** doc drift, documentation the PR makes false: prose files (README, `docs/**`, `*.md`/`*.mdx`, ADRs, AGENTS.md/CLAUDE.md, `CONTEXT.md`) and doc comments (JSDoc, docstrings) that still describe behavior, names, paths, flags, config, env vars, commands or architecture the PR changed, plus the accuracy of doc lines the PR adds or edits. Missing docs, CHANGELOGs, generated docs, external sites and docs already wrong before the PR are excluded, as are wording, typos and style. A statement the PR made false is at least medium; it is high when it leads a reader into a broken or unsafe action (a wrong command, credential or setup step) or is agent instructions that now steer agents into broken changes. A drift finding anchors on the changed line that made the doc false and names the stale doc by `path:line`, quoting it; an accuracy finding anchors on the edited doc line. Documentation findings merge only with other documentation findings (§7.2).
 
 ### 5.2 Selection
 
 - The orchestrator receives the changed file list, diff stats, the PR title and body (as untrusted data, §6.1), and the repository's per-repo config. It returns a list of selected focuses, each with a one-line reason.
 - Its output is schema-validated against the enum. It cannot add reviewers, change budgets, or alter reviewer instructions.
-- **Always-on minimum:** when any non-excluded code file changes, correctness and security always run, whatever the orchestrator outputs. They count toward the cap.
-- **Cap:** `max_reviewers` defaults to 3 and is configurable. The always-on reviewers fill slots first, and orchestrator picks fill the rest in its stated priority order.
+- **Always-on minimum:** when any non-excluded code file changes, correctness, security and documentation always run, whatever the orchestrator outputs. They count toward the cap. A repo can disable documentation (§11.2), but not the other two. On a docs-only PR the orchestrator may still pick documentation.
+- **Cap:** `max_reviewers` defaults to 4 and is configurable, with a minimum of 3. A deployment set below 3 refuses to start. The always-on reviewers fill slots first, and orchestrator picks fill the rest in its stated priority order.
 - Reviewers cannot invoke other reviewers or the orchestrator. There is no recursion.
 - **Orchestrator failure:** fall back to correctness, plus security if dependency manifests or auth-related paths changed (path match). Record that the fallback was used.
 
@@ -115,7 +116,7 @@ The orchestrator selects from a fixed enum of five focuses:
 
 ### 5.4 Models
 
-- Every agent (orchestrator, verifier, and each of the five focuses) has its own `model` and an optional `fallback_model` in deployment config. Models are addressed by OpenRouter ID.
+- Every agent (orchestrator, verifier, and each of the six focuses) has its own `model` and an optional `fallback_model` in deployment config. Models are addressed by OpenRouter ID.
 - Calls go through OpenRouter's chat completions API. Fallback uses OpenRouter's `models: [...]` array.
 - **Startup validation:** the service checks every configured model against OpenRouter's `/models` endpoint. Each one's `supported_parameters` must include `tools`. If any model fails the check, the service refuses to start.
 - Findings come back as a call to the `report_findings` tool, not through `response_format`. Arguments are schema-validated, and invalid output is retried once.
@@ -167,7 +168,7 @@ Before publishing, comment text is sanitized: `@`-mentions are neutralized, and 
 2. The anchor falls on a line added or modified in the reviewed diff.
    - **Incremental after a push:** when an earlier head was reviewed, against this base or one of its ancestors (main merged in or rebased onto), with no failed focus and no file skipped for budget, reviewers see the full diff for context plus the changes since that head (and any file the base changed since that review: merging main in can undo one of main's changes on a line the PR didn't touch since), and are told to focus on those. A **late finding**, on a line an earlier review saw, is still posted inline under the rules below like any other finding, so it blocks approval as a thread someone can fix, disprove or waive rather than by being held back. A push that adds no lines runs no reviewers. A label re-review, a base that isn't a descendant of the earlier one (a retarget), an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
 3. `severity ≥ medium` **and** `confidence ≥ 0.7`. Both thresholds are configurable.
-4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one. The higher severity × confidence finding is kept, and all contributing focuses are noted.
+4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one, except that documentation findings merge only with other documentation findings. The higher severity × confidence finding is kept, and all contributing focuses are noted.
 5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff.
 6. **Cap:** at most `max_comments` (default 10) per review, ranked by severity × confidence.
 
@@ -260,11 +261,11 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 
 - Lives at `.github/ai-review.yml`, **read from the base SHA only**. A PR that edits this file has no effect on its own review.
 - It may only tighten or narrow settings:
-  - disable non-mandatory focuses;
+  - disable non-mandatory focuses (any but correctness and security, documentation included);
   - add exclusions or path hints that bias selection;
   - raise thresholds;
   - lower the caps.
-- It cannot set models, budgets, credentials, or author-gating policy, and it cannot disable the always-on reviewers.
+- It cannot set models, budgets, credentials, or author-gating policy, and it cannot disable correctness or security.
 - Invalid per-repo config is ignored with a recorded warning, and deployment defaults apply.
 
 ## 12. Operations
@@ -297,7 +298,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 3. A new commit pushed to a non-draft PR triggers a review of the new head SHA.
 4. Reopening a non-draft PR triggers a review.
 5. Reopening or updating a draft PR does not start a review until it is ready.
-6. The orchestrator can select a subset of the five focuses and records a reason for each.
+6. The orchestrator can select a subset of the six focuses and records a reason for each.
 7. No code from the PR is executed during review.
 8. Published findings are inline comments anchored to changed lines.
 9. An empty result with no summary-worthy notes produces no review.
@@ -315,7 +316,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 21. A PR above `max_reviewable_lines` receives a summary recommending a split.
 22. If one reviewer fails, the other reviewers' findings are still published, and the summary names the failed focus.
 23. Each run records the model, tokens, and cost for every agent invocation.
-24. Correctness and security run on every PR that changes code, regardless of orchestrator output.
+24. Correctness, security and documentation run on every PR that changes code, regardless of orchestrator output, unless the repo disables documentation.
 
 Every criterion must have a deterministic test using a fake GitHub client and a stubbed model.
 
@@ -324,7 +325,7 @@ Every criterion must have a deterministic test using a fake GitHub client and a 
 | Setting | Default |
 |---|---|
 | Publish threshold | severity ≥ medium, confidence ≥ 0.7 |
-| `max_reviewers` | 3 (correctness and security always included for code changes) |
+| `max_reviewers` | 4, at least 3 (correctness, security and documentation always included for code changes) |
 | `max_comments` | 10 |
 | `max_reviewable_lines` | 800 |
 | Merge window for cross-reviewer duplicates | ±3 lines |

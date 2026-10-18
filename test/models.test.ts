@@ -65,6 +65,7 @@ test('every agent invocation records the model that served it, its tokens and it
     { agent: 'orchestrator', models: ['served/model'], inputTokens: 100, outputTokens: 20, cost: 0.001 },
     { agent: 'correctness', models: ['served/model'], inputTokens: 200, outputTokens: 40, cost: 0.002 },
     { agent: 'security', models: ['served/model'], inputTokens: 100, outputTokens: 20, cost: 0.001 },
+    { agent: 'documentation', models: ['served/model'], inputTokens: 100, outputTokens: 20, cost: 0.001 },
   ]);
 });
 

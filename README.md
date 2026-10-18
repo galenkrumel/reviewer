@@ -3,8 +3,8 @@
 `reviewer` is a self-hosted GitHub App that reviews your pull requests and posts its findings as review comments.
 It only reads the code changes. It never runs your code, pushes commits, or merges.
 
-Each review runs a few focused AI reviewers: *Correctness* and *Security* always, plus *Architecture*, *Performance*
-or *Conciseness* when the change calls for them. When you push new commits, it reviews again and checks whether its
+Each review runs a few focused AI reviewers: *Correctness*, *Security* and *Documentation* (docs the change made
+false) always, plus *Architecture*, *Performance* or *Conciseness* when the change calls for them. When you push new commits, it reviews again and checks whether its
 earlier comments were addressed. It never approves a PR unless you turn that on with
 [`APPROVE_WHEN_CLEAN`](#deployment-config-env-vars).
 
@@ -133,10 +133,10 @@ Optional:
 | Variable | Default | Meaning |
 |---|---|---|
 | `REVIEW_FALLBACK_MODEL` | none | Default fallback model, passed in OpenRouter's `models` array |
-| `<AGENT>_MODEL`, `<AGENT>_FALLBACK_MODEL` | `REVIEW_MODEL`, `REVIEW_FALLBACK_MODEL` | Per-agent overrides; `<AGENT>` is `ORCHESTRATOR`, `VERIFIER`, `CORRECTNESS`, `SECURITY`, `PERFORMANCE`, `ARCHITECTURE` or `CONCISENESS`. Startup fails if any configured model lacks tool support on OpenRouter |
+| `<AGENT>_MODEL`, `<AGENT>_FALLBACK_MODEL` | `REVIEW_MODEL`, `REVIEW_FALLBACK_MODEL` | Per-agent overrides; `<AGENT>` is `ORCHESTRATOR`, `VERIFIER`, `CORRECTNESS`, `SECURITY`, `PERFORMANCE`, `ARCHITECTURE`, `CONCISENESS` or `DOCUMENTATION`. Startup fails if any configured model lacks tool support on OpenRouter |
 | `<AGENT>_MAX_TURNS` | `20` | Model calls per reviewer or verifier invocation; over it, the agent fails |
 | `<AGENT>_MAX_TOKENS` | `2000000` | Input plus output tokens per invocation, summed over its calls; each call resends the whole conversation, so this grows with every turn. Over it, the agent fails |
-| `MAX_REVIEWERS` | `3` | Reviewer cap per run, at least 2 (correctness and security always run on code changes) |
+| `MAX_REVIEWERS` | `4` | Reviewer cap per run, at least 3 (correctness, security and documentation always run on code changes). Startup fails below 3 |
 | `REVIEW_OUTSIDE_PRS` | `label` | PRs from authors other than OWNER/MEMBER/COLLABORATOR: `label` (only while labelled), `always`, `never` |
 | `REVIEW_LABEL` | `ai-review` | Label that opts a PR in and triggers a (re-)review |
 | `RUN_CAP` | `10` | Max runs per PR per rolling 24 hours; further events are recorded as `skipped` |
@@ -161,7 +161,7 @@ When a later run doesn't approve, the App dismisses its own earlier approval. On
 Read from the PR's **base** SHA only, so a PR that edits it doesn't change its own review. It can only tighten the deployment's settings. Anything invalid, loosening or unknown (models, budgets, credentials, author gating) is ignored, and a warning goes in the run record.
 
 ```yaml
-disable_focuses: [performance, conciseness]  # correctness and security can't be disabled
+disable_focuses: [performance, documentation] # correctness and security can't be disabled
 exclude:                                     # added to the built-in exclusions; globs match the full path
   - "legacy/"                                # a trailing slash means the whole directory
 path_hints:                                  # glob: note, given to the orchestrator for matching changed paths
@@ -169,7 +169,7 @@ path_hints:                                  # glob: note, given to the orchestr
 thresholds:                                  # can only be raised
   severity: high
   confidence: 0.8
-max_reviewers: 2                             # caps can only be lowered (max_reviewers at least 2)
+max_reviewers: 3                             # caps can only be lowered (max_reviewers at least 3)
 max_comments: 5
 max_reviewable_lines: 400
 ```

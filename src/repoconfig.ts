@@ -4,7 +4,8 @@ import { FOCUSES, type Focus } from './reviewer.ts';
 
 export const REPO_CONFIG_PATH = '.github/ai-review.yml';
 
-const ALWAYS_ON: readonly Focus[] = ['correctness', 'security'];
+/** Always on for code changes and never disabled. Documentation is always on too, but can be disabled. */
+const MANDATORY: readonly Focus[] = ['correctness', 'security'];
 const MAX_HINTS = 20;
 
 /** The deployment's values: the loosest a repo can have. */
@@ -53,7 +54,7 @@ export function parseRepoConfig(text: string | undefined, limits: Limits): { set
       case 'disable_focuses':
         for (const f of list(key, v) ?? []) {
           if (!FOCUSES.includes(f as Focus)) warn(key, `unknown focus "${f.slice(0, 50)}"`);
-          else if (ALWAYS_ON.includes(f as Focus)) warn(key, `${f} cannot be disabled`);
+          else if (MANDATORY.includes(f as Focus)) warn(key, `${f} cannot be disabled`);
           else settings.disabledFocuses.add(f as Focus);
         }
         break;
@@ -85,8 +86,8 @@ export function parseRepoConfig(text: string | undefined, limits: Limits): { set
           } else warn(k, 'unknown threshold');
         }
         break;
-      // Below 2 the always-on security reviewer would be dropped.
-      case 'max_reviewers': settings.maxReviewers = cap(key, v, limits.maxReviewers, 2); break;
+      // Below 3 an always-on reviewer would be dropped.
+      case 'max_reviewers': settings.maxReviewers = cap(key, v, limits.maxReviewers, 3); break;
       case 'max_comments': settings.maxComments = cap(key, v, limits.maxComments); break;
       case 'max_reviewable_lines': settings.maxReviewableLines = cap(key, v, limits.maxReviewableLines); break;
       // Models, budgets, credentials, author gating and everything else belong to the deployment.
