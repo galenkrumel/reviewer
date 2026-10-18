@@ -456,6 +456,7 @@ export function openStore(dataDir: string, clock: Clock) {
       const r: any = db.prepare('SELECT * FROM runs WHERE id = ?').get(id);
       if (!r) return;
       const d: any = db.prepare('SELECT blockers FROM decisions WHERE run_id = ?').get(id);
+      const v: any = db.prepare('SELECT approved FROM verdicts WHERE run_id = ?').get(id);
       return {
         ...toRecord(r),
         title: r.title as string,
@@ -464,7 +465,8 @@ export function openStore(dataDir: string, clock: Clock) {
         skipped: db.prepare('SELECT path FROM skipped_files WHERE run_id = ? ORDER BY rowid').all(id).map((s: any) => s.path as string),
         /** Null when the run recorded no decision. */
         blockers: d ? JSON.parse(d.blockers) as string[] : null,
-        approved: (db.prepare('SELECT approved FROM verdicts WHERE run_id = ?').get(id) as any)?.approved === 1,
+        /** Null when the run recorded no verdict: it published nothing, or did before verdicts were recorded. */
+        approved: v ? v.approved === 1 : null,
       };
     },
 

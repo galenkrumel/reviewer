@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 import { delivery, gitFixture, noFindings, prPayload, ScriptedModel, testApp, toolCall } from './harness.ts';
 
@@ -125,4 +127,17 @@ test('an approving review shows as approved', async () => {
   assert.equal(app.runs()[0]!.status, 'published');
   assert.ok(get(app, '/admin')!.body.includes('<td>approved <a'));
   assert.ok(get(app, '/admin/runs/1')!.body.includes('<td>approved <a'));
+});
+
+test('a run published before verdicts were recorded shows no verdict', async () => {
+  const { app, pr, dataDir } = setup();
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  const db = new DatabaseSync(join(dataDir, 'reviewer.db'));
+  db.exec('DELETE FROM verdicts');
+  db.close();
+  assert.ok(get(app, '/admin/runs/1')!.body.includes('<tr><th>Review</th><td>— <a'));
+  assert.ok(get(app, '/admin')!.body.includes('<td>— </td>'));
+  assert.equal(get(app, '/admin/prs/acme/widgets/7?before=1')!.status, 200, 'paging past the last run is not a 404');
+  assert.equal(get(app, '/admin/prs/acme/widgets%zz/7')!.status, 404);
 });

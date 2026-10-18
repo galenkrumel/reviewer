@@ -63,7 +63,7 @@ const reviewLink = (repo: string, pr: number, reviewId: number | null) =>
 /** The Dashboard's page for a PR. Repo names are [A-Za-z0-9._-] and one slash, so they need no encoding. */
 const prPath = (repo: string, pr: number) => `/admin/prs/${repo}/${pr}`;
 const verdict = (reviewId: number | null, approved: boolean | null) =>
-  reviewId === null ? '—' : html`${approved ? 'approved' : 'commented'}`;
+  reviewId === null || approved === null ? '—' : html`${approved ? 'approved' : 'commented'}`;
 const NAV = html`<p><a href="/admin">PRs</a> · <a href="/admin/runs">All runs</a></p>`;
 const kind = (event: string) => (isRedecision(event) ? html`re-decision · ${event}` : event.replace(/^pull_request\./, ''));
 
@@ -163,14 +163,13 @@ ${prs.length === PAGE && html`<p><a href="/admin?${older.toString()}">Older</a><
 
 /** One PR: its runs, newest first, and the waivers recorded on it so far. */
 function prDetail(store: Store, repo: string, pr: number, q: URLSearchParams, now: Date) {
-  const { total, runs } = store.listRuns({ repo, pr, before: positiveInt(q.get('before')) }, PAGE);
-  if (!runs.length) return;
-  const waivers = store.waivers(runs[0]!.repo, pr);
   const latest = store.listPrs({ repo, pr }, 1)[0];
-  return page(`${repo}#${pr}`, html`${NAV}
-<h1><a href="${prUrl(runs[0]!.repo, pr)}">${runs[0]!.repo}#${pr}</a> ${runs[0]!.title}</h1>
-<p>Verdict: ${latest ? html`${verdict(latest.reviewId, latest.approved)} ${reviewLink(latest.repo, pr, latest.reviewId)}` : '—'}
- · total cost ${usd(total)}</p>
+  if (!latest) return;
+  const { total, runs } = store.listRuns({ repo, pr, before: positiveInt(q.get('before')) }, PAGE);
+  const waivers = store.waivers(latest.repo, pr);
+  return page(`${latest.repo}#${pr}`, html`${NAV}
+<h1><a href="${prUrl(latest.repo, pr)}">${latest.repo}#${pr}</a> ${latest.title}</h1>
+<p>Verdict: ${verdict(latest.reviewId, latest.approved)} ${reviewLink(latest.repo, pr, latest.reviewId)} · total cost ${usd(total)}</p>
 ${runTable(runs, now)}
 ${runs.length === PAGE && html`<p><a href="${prPath(repo, pr)}?before=${runs.at(-1)!.id}">Older</a></p>`}
 ${waivers.length > 0 && html`<h2>Waived on this PR</h2>
@@ -242,7 +241,7 @@ export function createDashboard(store: Store, password: string | undefined, now:
     const pr = /^\/admin\/prs\/([^/]+\/[^/]+)\/([^/]+)$/.exec(url.pathname);
     const id = positiveInt(run?.[1] ?? null);
     const number = positiveInt(pr?.[2] ?? null);
-    const body = id ? detail(store, id, now()) : pr && number ? prDetail(store, decodeURIComponent(pr[1]!), number, q, now()) : undefined;
+    const body = id ? detail(store, id, now()) : pr && number ? prDetail(store, pr[1]!, number, q, now()) : undefined;
     return body ? respond(200, body) : respond(404);
   };
 }
