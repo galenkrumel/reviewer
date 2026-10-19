@@ -175,6 +175,28 @@ test('after a push, a focus that did not run on the last review reviews the whol
     + 'which did not run on that review and covered the whole PR.'));
 });
 
+test('a push that ran no reviewers does not make every focus review the whole PR on the next push', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness')],
+    correctness: [noFindings(), noFindings()], security: [noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  // A deletion only: no line to review, so no reviewer runs.
+  for (const content of ['keep\n' + lines(59), 'keep\n' + lines(59) + 'const extra = 1;\n']) {
+    const pushed = { ...pr, headSha: fx.push({ [PATH]: content }) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await app.drain();
+  }
+
+  assert.deepEqual(app.runs()[1]!.focuses, []);
+  const content = String(model.requestsFor('correctness').at(-1)!.messages[1]!.content);
+  assert.ok(content.includes('changes-since-last-review'));
+});
+
 for (const kind of ['merged from main', 'retargeted'] as const) {
   test(`after a push with the base ${kind}, the review ${kind === 'retargeted' ? 'covers the whole PR' : 'focuses on new lines'}`, async () => {
     const { fx, pr, github } = setup();
