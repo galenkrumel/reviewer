@@ -175,7 +175,7 @@ function prDetail(store: Store, repo: string, pr: number, q: URLSearchParams, no
 ${runTable(runs, now, false)}
 ${runs.length === PAGE && html`<p><a href="${prPath(repo, pr)}?before=${runs.at(-1)!.id}">Older</a></p>`}
 ${waivers.length > 0 && html`<h2>Waived on this PR</h2>
-<ul>${waivers.map((w) => html`<li>${w.title} (<code>${w.path}${w.line !== null ? `:${w.line}` : ''}</code>), waived by ${w.by}</li>`)}</ul>`}`, true);
+<ul>${waivers.map((w) => html`<li>${w.title} (<code>${w.path}${w.line !== null ? `:${w.line}` : ''}</code>), waived by ${w.by}${w.reason ? `: ${w.reason}` : ''}</li>`)}</ul>`}`, true);
 }
 
 function detail(store: Store, id: number, now: Date) {

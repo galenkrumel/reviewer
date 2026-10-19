@@ -42,7 +42,9 @@ export interface Waiver {
   thread: string;
   /** The maintainer's login. */
   by: string;
-  how: 'resolve';
+  how: 'resolve' | 'reply';
+  /** A `Waive:` reply's text after the prefix, sanitized. */
+  reason?: string;
   path: string;
   /** The thread's line when it was waived; null once the code it was posted on had changed. */
   line: number | null;

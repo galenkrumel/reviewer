@@ -35,7 +35,7 @@ On the account that owns the repositories, go to **Settings → Developer settin
   | Pull requests | Read and write | reading the PR and posting the review |
   | Metadata | Read-only | required for every App |
 
-- **Subscribe to events:** **Pull request** and **Pull request review thread**. The second lets a maintainer's resolve of the App's thread update its approval within seconds.
+- **Subscribe to events:** **Pull request**, **Pull request review thread** and **Pull request review comment**. The last two let a maintainer waive a finding and have the App's approval follow within seconds, in either of two ways: resolve the App's thread, or reply on it with a comment starting `Waive: <reason>`, which keeps the reason in the PR's record.
 - **Where can this GitHub App be installed:** only on this account.
 
 Create the App, then:
