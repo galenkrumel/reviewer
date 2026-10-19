@@ -29,6 +29,7 @@ The reviewers will sometimes disagree with you or your coding agent. That's ok! 
 6. When new changes are pushed to the PR, `reviewer` receives the webhook from GitHub, and steps two through 5 repeat.
 7. The cycle continues until there are no more pending issues to be resolved in the PR, at which point `reviewer` marks the PR as `approved`.
 
+![Diagram: a code author creates a PR on GitHub, GitHub notifies reviewer, and reviewer's orchestrator pulls the latest changes to disk, hands them to the review agents, and posts their reviews back to GitHub](docs/how-it-works.png)
 
 ## Get your first review
 
