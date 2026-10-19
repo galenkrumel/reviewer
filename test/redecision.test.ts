@@ -16,6 +16,15 @@ const verdict = (resolved: boolean, thread = 0) =>
 const threadEvent = (action: string, pr: PullRequest, prExtra: Record<string, unknown> = {}) =>
   delivery('pull_request_review_thread', prPayload(action, REPO, pr, { thread: { node_id: 'T0' } }, prExtra));
 
+/** Someone replies on the app's thread: the comment lands on it, then GitHub sends the delivery. */
+function reply(github: FakeGitHub, thread: { id: string }, pr: PullRequest, body: string, login: string, association: string) {
+  const t = github.thread(thread.id);
+  t.comments.push({ byApp: false, byPrAuthor: false, login, association, body });
+  return delivery('pull_request_review_comment', prPayload('created', REPO, pr, {
+    comment: { body, author_association: association, user: { login } },
+  }));
+}
+
 /** A first run posts a finding at line 5; its thread is then added, as GitHub would. */
 async function reviewed(opts: { correctness?: Turn[]; verifier?: Turn[]; config?: Partial<AppConfig> } = {}) {
   const fx = gitFixture({ [PATH]: 'keep\n' }, { [PATH]: 'keep\n' + lines(60) });
@@ -55,6 +64,58 @@ test('a maintainer resolving a thread re-decides at once: approved, the waiver l
   assert.equal(run.event, 'pull_request_review_thread.resolved');
   assert.equal(run.status, 'published');
   assert.ok(logs.some((l) => l.msg === 'finding waived' && l.by === 'octo-maint' && l.run === run.id));
+});
+
+test('a maintainer replying "Waive:" re-decides at once: approved, the waiver and its reason recorded', async () => {
+  const { app, github, pr, thread, calls, logs } = await reviewed({ config: { adminPassword: 'pw' } });
+  const before = calls();
+
+  const res = await app.receive(reply(github, thread, pr, '  waive: we accept the [risk](https://evil.example) for now', 'octo-maint', 'COLLABORATOR'));
+  assert.equal(res.ignored, undefined);
+  await app.drain();
+
+  assert.equal(calls(), before);
+  assert.equal(github.reviews.length, 2);
+  const { review } = github.reviews[1]!;
+  assert.equal(review.event, 'APPROVE');
+  assert.match(review.body, /Waived by a maintainer:\n- issue at 5 \(`src\/app\.ts:5`\), waived by octo-maint/);
+  const run = app.runs().at(-1)!;
+  assert.equal(run.event, 'pull_request_review_comment.created');
+  assert.ok(logs.some((l) => l.msg === 'finding waived' && l.by === 'octo-maint' && l.how === 'reply' && l.run === run.id));
+  // The reason, sanitized, is on the PR's record.
+  const page = app.dashboard({ method: 'GET', url: `/admin/prs/${REPO}/7`, headers: {
+    authorization: `Basic ${Buffer.from('admin:pw').toString('base64')}` } })!;
+  assert.match(String(page.body), /waived by octo-maint: we accept the risk for now/);
+});
+
+test("a review comment queues nothing unless it is a maintainer's Waive:", async () => {
+  const { app, github, pr, thread } = await reviewed();
+  const ignored = async (d: ReturnType<typeof delivery>) => (await app.receive(d)).ignored;
+  assert.match(await ignored(reply(github, thread, pr, 'We accept this risk.', 'octo-maint', 'OWNER')) ?? '', /comment is not a maintainer's Waive:/);
+  assert.match(await ignored(reply(github, thread, pr, 'Waive: mine now', 'drive-by', 'CONTRIBUTOR')) ?? '', /comment is not a maintainer's Waive:/);
+  assert.match(await ignored(reply(github, thread, pr, 'Please waive: this', 'octo-maint', 'MEMBER')) ?? '', /comment is not a maintainer's Waive:/);
+  const edited = delivery('pull_request_review_comment', prPayload('edited', REPO, pr, {
+    comment: { body: 'Waive: ok', author_association: 'MEMBER', user: { login: 'octo-maint' } },
+  }));
+  assert.match(await ignored(edited) ?? '', /edited is not a re-decision trigger/);
+  await app.drain();
+  assert.equal(app.runs().length, 1);
+});
+
+test("Waive: from an outsider or in the app's own replies never waives", async () => {
+  const { app, github, pr, thread, logs } = await reviewed();
+  const t = github.thread(thread.id);
+  t.comments.push(
+    { byApp: false, byPrAuthor: true, login: 'drive-by', association: 'CONTRIBUTOR', body: 'Waive: not my problem' },
+    { byApp: true, byPrAuthor: false, login: 'reviewer[bot]', association: 'MEMBER', body: 'Waive: steered model' },
+  );
+  // An outsider's resolve still re-decides, and finds no waiver.
+  github.resolveAs(thread.id, 'drive-by', 'CONTRIBUTOR');
+  await app.receive(threadEvent('resolved', pr));
+  await app.drain();
+  assert.equal(app.runs().at(-1)!.status, 'nothing_to_publish');
+  assert.equal(github.reviews.length, 1);
+  assert.ok(!logs.some((l) => l.msg === 'finding waived'));
 });
 
 test('an outsider resolving a thread changes nothing: the re-decision posts nothing', async () => {
@@ -117,7 +178,7 @@ test("a re-decision is skipped when the head's run recorded no decision, as when
 
 test('with approvals off, a re-decision is skipped: no verdict can change', async () => {
   const { app, github, pr, thread, calls } = await reviewed({ config: { approveWhenClean: false } });
-  thread.comments.push({ byApp: false, byPrAuthor: true, association: 'MEMBER', body: 'Not a bug.' });
+  thread.comments.push({ byApp: false, byPrAuthor: true, login: 'octo-author', association: 'MEMBER', body: 'Not a bug.' });
   const before = calls();
   await app.receive(threadEvent('resolved', pr));
   await app.drain();
@@ -142,7 +203,7 @@ test('the verifier sees only open threads where someone spoke after the app', as
   const { app, github, pr, thread, model } = await reviewed({ verifier: [verdict(true)] });
   github.resolveAs(thread.id, 'octo-maint', 'MEMBER');
   const argued = github.addThread(REPO, 7, PATH, 30, '**issue at 30**\n\nLine 30 is wrong.');
-  argued.comments.push({ byApp: false, byPrAuthor: true, association: 'MEMBER', body: 'v30 is meant to be 30.' });
+  argued.comments.push({ byApp: false, byPrAuthor: true, login: 'octo-author', association: 'MEMBER', body: 'v30 is meant to be 30.' });
   github.addThread(REPO, 7, PATH, 40, '**issue at 40**\n\nLine 40 is wrong.');
   await app.receive(threadEvent('resolved', pr));
   await app.drain();
@@ -161,7 +222,7 @@ test('a run in flight when a maintainer resolves a thread honours the waiver', a
   const github = new FakeGitHub();
   github.addPullRequest(REPO, fx.url, pr);
   const thread = github.addThread(REPO, 7, PATH, 5, '**issue at 5**\n\nLine 5 is wrong.');
-  thread.comments.push({ byApp: false, byPrAuthor: true, association: 'MEMBER', body: 'We accept this.' });
+  thread.comments.push({ byApp: false, byPrAuthor: true, login: 'octo-author', association: 'MEMBER', body: 'We accept this.' });
   let app: ReturnType<typeof testApp>['app'];
   const model = new ScriptedModel({
     orchestrator: [select('correctness')], correctness: [noFindings()], security: [noFindings()],
@@ -188,7 +249,7 @@ test('a re-decision that finds a thread reopened withdraws the approval', async 
   const { app, github, pr, thread } = await reviewed({ correctness: [noFindings()], verifier: [verdict(false)] });
   // The first run approved: the thread was added after it.
   assert.equal(github.reviews[0]!.review.event, 'APPROVE');
-  thread.comments.push({ byApp: false, byPrAuthor: true, association: 'MEMBER', body: 'Is line 5 right?' });
+  thread.comments.push({ byApp: false, byPrAuthor: true, login: 'octo-author', association: 'MEMBER', body: 'Is line 5 right?' });
   github.resolveAs(github.addThread(REPO, 7, PATH, 50, 'x').id, 'octo-maint', 'MEMBER');
   await app.receive(threadEvent('resolved', pr));
   await app.drain();
