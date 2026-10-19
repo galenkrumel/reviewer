@@ -3,13 +3,32 @@
 `reviewer` is a self-hosted GitHub App that reviews your pull requests and posts its findings as review comments.
 It only reads the code changes. It never runs your code, pushes commits, or merges.
 
-Each review runs a few focused AI reviewers: *Correctness*, *Security* and *Documentation* (docs the change made
+## Tell me more ...
+
+### The problem
+
+Over the last few months I've worked on any number of early prototypes of product concepts. Naturally, I lean heavily on my coding agent to do the grunt work, but since these are explorations of new ideas they never really justify getting my full attention for an in-depth code review. I do know, however, how quickly a new project can turn into unmaintainable legacy code and I want to avoid running into that problem. This brought me to creating a small swarm of agentic reviewers that perform an adversarial inspection of all of my PRs. I pretty quickly saw how many bugs, performance problems, and document creep issues were being caught, and made the decision to run _everything_ through `reviewer`.
+
+## What does it do?
+
+Each review spawns a few focused AI reviewers: *Correctness*, *Security* and *Documentation* (docs the change made
 false) always, plus *Architecture*, *Performance* or *Conciseness* when the change calls for them. When you push new
 commits, it reviews again and checks whether its earlier comments were addressed. It never approves a PR unless you
 turn that on with [`APPROVE_WHEN_CLEAN`](#deployment-config-env-vars).
 
-The reviewers will sometimes disagree with you or your coding agent. That's expected. Treat the comments as a second
-opinion, not a verdict.
+The reviewers will sometimes disagree with you or your coding agent. That's ok! Remember, as the person responsible for these agents, you're responsible for their output. They can fight it out, but you'll want to be ready to break ties where necessary.
+
+## How does it work?
+
+`reviewer` picks up where your coding agent leaves off. As soon as your coding agent (or you, if you prefer) publishes a new PR, the following chain of events happens:
+1. GitHub triggers a webhook to `reviewer`, enqueueing the review job.
+2. `reviewer`'s `orchestrator` agent picks up the job and fetches the changes to the persistent disk.
+3. `orchestrator` inspects the PR title, list of modified files, and number of lines.
+4. To select which agents to spawn, `orchestrator` first kicks off `correctness`, `security`, and `documentation` agents. If `MAX_REVIEWERS` has not yet been met, `orchestrator` then uses its discretion to select the remaining review agents to spawn.
+5. After all review findings are complete, `orchestrator` then posts the review, openining threaded issues for each of the agent findings.
+6. When new changes are pushed to the PR, `reviewer` receives the webhook from GitHub, and steps two through 5 repeat.
+7. The cycle continues until there are no more pending issues to be resolved in the PR, at which point `reviewer` marks the PR as `approved`.
+
 
 ## Get your first review
 
