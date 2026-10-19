@@ -450,7 +450,8 @@ export function createApp(deps: {
       const selected = selectFocuses(picks, scope.reviewed.map((f) => f.path), settings.maxReviewers, settings.disabledFocuses);
       progress(job, 'reviewers picked', { focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined });
       // A focus that didn't run on the last review never saw its lines, so it reviews the whole PR.
-      // ponytail: compares with the last review only; a focus that ran two reviews ago redoes the whole PR too.
+      // ponytail: compares with the last reviewed run only; a focus that ran two runs ago redoes the whole PR too. Track a
+      // last-reviewed head per focus if that cost shows up.
       if (since !== undefined) newcomers.push(...selected.map((s) => s.focus).filter((f) => !last!.focuses.has(f)));
       for (const { focus, reason } of selected) {
         if (store.superseded(job.id)) return;

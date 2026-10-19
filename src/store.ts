@@ -254,13 +254,14 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     /**
-     * The head and base of the PR's latest run where every reviewer finished and no file was skipped for budget,
-     * unless it is this head. Otherwise a PR could pad one push to get a file skipped, then never have it reviewed.
-     * With the focuses that run reviewed for.
+     * The head, base and focuses of the PR's latest run where reviewers ran, every one finished and no file was skipped
+     * for budget, unless it is this head. Otherwise a PR could pad one push to get a file skipped, then never have it
+     * reviewed. A run with no reviewers (a deletion-only push) would make every focus look new on the next push.
      */
     lastReviewed(repo: string, pr: number, headSha: string): { headSha: string; baseSha: string; focuses: Set<string> } | undefined {
       const row = db.prepare(`SELECT id, head_sha, base_sha FROM runs r WHERE repo = ? AND pr = ? AND head_sha != ?
         AND status IN ('published', 'nothing_to_publish') AND ${FULL_RUN}
+        AND EXISTS (SELECT 1 FROM focuses WHERE run_id = r.id)
         AND NOT EXISTS (SELECT 1 FROM focuses WHERE run_id = r.id AND json_extract(data, '$.status') = 'failed')
         AND NOT EXISTS (SELECT 1 FROM skipped_files WHERE run_id = r.id)
         ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha) as any;
