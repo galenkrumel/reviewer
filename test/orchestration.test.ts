@@ -190,3 +190,12 @@ test('a PR-steered reason stays out of the summary', async () => {
 test('a reviewer cap below 3 is refused, since it would drop an always-on reviewer', () => {
   assert.throws(() => testApp({ model: new ScriptedModel({}), config: { maxReviewers: 2 } }), /maxReviewers must be an integer >= 3/);
 });
+
+test('the orchestrator is told what each focus covers, so it can weigh data access as a performance signal', async () => {
+  const { model } = await review({
+    orchestrator: [select('performance')], correctness: [noFindings()], security: [noFindings()], performance: [noFindings()],
+  });
+  const system = String(model.requestsFor('orchestrator')[0]!.messages[0]!.content);
+  assert.match(system, /performance: hot paths, data access/);
+  assert.match(system, /architecture: public interfaces, module boundaries/);
+});

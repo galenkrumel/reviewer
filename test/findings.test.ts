@@ -150,6 +150,31 @@ test('after a push, a late finding on a line an earlier review saw is commented 
   assert.match(content, /<untrusted-data name="changes-since-last-review">[^]*\+const extra = 1;/);
 });
 
+test('after a push, a focus that did not run on the last review reviews the whole PR', async () => {
+  const { fx, pr, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: [select('architecture'), select('performance')],
+    correctness: [noFindings(), noFindings()], security: [noFindings(), noFindings()],
+    architecture: [noFindings()], performance: [report(f(5, { title: 'missing index' }))],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + 'const extra = 1;\n' }) };
+  github.addPullRequest(REPO, fx.url, pushed);
+  await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+  await app.drain();
+
+  const since = (agent: string) => String(model.requestsFor(agent).at(-1)!.messages[1]!.content).includes('changes-since-last-review');
+  assert.equal(since('correctness'), true);
+  assert.equal(since('performance'), false);
+  assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'published']]);
+  assert.ok(github.reviews[0]!.review.body.includes(
+    `Focused on changes since \`head@${pr.headSha.slice(0, 7)}\`, which was already reviewed, except performance, `
+    + 'which did not run on that review and covered the whole PR.'));
+});
+
 for (const kind of ['merged from main', 'retargeted'] as const) {
   test(`after a push with the base ${kind}, the review ${kind === 'retargeted' ? 'covers the whole PR' : 'focuses on new lines'}`, async () => {
     const { fx, pr, github } = setup();

@@ -101,7 +101,7 @@ The orchestrator selects from a fixed enum of six focuses:
 
 ### 5.2 Selection
 
-- The orchestrator receives the changed file list, diff stats, the PR title and body (as untrusted data, §6.1), and the repository's per-repo config. It returns a list of selected focuses, each with a one-line reason.
+- The orchestrator receives what each focus reviews for, the changed file list, diff stats, the PR title and body (as untrusted data, §6.1), and the repository's per-repo config. It returns a list of selected focuses, each with a one-line reason.
 - Its output is schema-validated against the enum. It cannot add reviewers, change budgets, or alter reviewer instructions.
 - **Always-on minimum:** when any non-excluded code file changes, correctness, security and documentation always run, whatever the orchestrator outputs. They count toward the cap. A repo can disable documentation (§11.2), but not the other two. On a docs-only PR the orchestrator may still pick documentation.
 - **Cap:** `max_reviewers` defaults to 4 and is configurable, with a minimum of 3. A deployment set below 3 refuses to start. The always-on reviewers fill slots first, and orchestrator picks fill the rest in its stated priority order.
@@ -166,7 +166,7 @@ Before publishing, comment text is sanitized: `@`-mentions are neutralized, and 
 
 1. Schema-valid.
 2. The anchor falls on a line added or modified in the reviewed diff.
-   - **Incremental after a push:** when an earlier head was reviewed, against this base or one of its ancestors (main merged in or rebased onto), with no failed focus and no file skipped for budget, reviewers see the full diff for context plus the changes since that head (and any file the base changed since that review: merging main in can undo one of main's changes on a line the PR didn't touch since), and are told to focus on those. A **late finding**, on a line an earlier review saw, is still posted inline under the rules below like any other finding, so it blocks approval as a thread someone can fix, disprove or waive rather than by being held back. A push that adds no lines runs no reviewers. A label re-review, a base that isn't a descendant of the earlier one (a retarget), an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
+   - **Incremental after a push:** when an earlier head was reviewed, against this base or one of its ancestors (main merged in or rebased onto), with no failed focus and no file skipped for budget, reviewers see the full diff for context plus the changes since that head (and any file the base changed since that review: merging main in can undo one of main's changes on a line the PR didn't touch since), and are told to focus on those. A focus that didn't run on that review never saw its lines, so it gets the full review instead. A **late finding**, on a line an earlier review saw, is still posted inline under the rules below like any other finding, so it blocks approval as a thread someone can fix, disprove or waive rather than by being held back. A push that adds no lines runs no reviewers. A label re-review, a base that isn't a descendant of the earlier one (a retarget), an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
 3. `severity ≥ medium` **and** `confidence ≥ 0.7`. Both thresholds are configurable.
 4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one, except that a documentation finding never merges with another focus's finding. The higher severity × confidence finding is kept, and all contributing focuses are noted.
 5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff.
@@ -209,7 +209,7 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 - The reviewed revisions: `head@<sha7>`, `base@<sha7>`, followed by the result (how many issues were commented inline).
 - The names of the focuses that ran. Fallback selection is noted where used.
-- On an incremental review, the earlier head whose changes were already reviewed. Selection reasons stay in the run record: they are PR-influenced, and the names are enough for a reader.
+- On an incremental review, the earlier head whose changes were already reviewed, and any focus that reviewed the whole PR because it didn't run on that review. Selection reasons stay in the run record: they are PR-influenced, and the names are enough for a reader.
 - Any focuses that failed.
 - Any skipped files or oversized-PR note.
 - A hidden marker: `<!-- ai-review:{owner}/{repo}#{pr}:{head}:{base} -->`.

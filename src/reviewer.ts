@@ -15,7 +15,8 @@ export class InvalidReport extends Error {}
 export const FOCUSES = ['correctness', 'security', 'performance', 'architecture', 'conciseness', 'documentation'] as const;
 export type Focus = (typeof FOCUSES)[number];
 
-const SCOPE: Record<Focus, string> = {
+/** What each focus reviews for. The orchestrator chooses from these too. */
+export const SCOPE: Record<Focus, string> = {
   correctness: 'logic errors, edge cases, state handling and error handling',
   security: 'authentication, authorization, input handling, secrets, dependencies, network boundaries and sensitive data',
   performance: 'hot paths, data access, concurrency, large allocations and scaling risks',
