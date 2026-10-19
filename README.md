@@ -21,13 +21,13 @@ The reviewers will sometimes disagree with you or your coding agent. That's ok! 
 ## How does it work?
 
 `reviewer` picks up where your coding agent leaves off. As soon as your coding agent (or you, if you prefer) publishes a new PR, the following chain of events happens:
-1. GitHub sends a webhook to `reviewer`. If the repo is in `REPO_ALLOWLIST`, the PR isn't a draft, its author is eligible and `RUN_CAP` hasn't been hit, `reviewer` enqueues a review job.
-2. A worker picks up the job and fetches the PR's commits into a clone on the persistent disk.
-3. After dropping excluded files and anything past `REVIEW_TOKEN_BUDGET`, `reviewer` hands the `orchestrator` agent the PR title, description and the list of changed files with per-file line counts.
-4. `orchestrator` ranks which review agents this PR needs. `correctness`, `security` and `documentation` always run when code changed; `orchestrator`'s remaining picks fill whatever is left of `MAX_REVIEWERS`. The reviewers then run one after another.
-5. `reviewer` filters the findings by `MIN_SEVERITY`, `MIN_CONFIDENCE` and `MAX_COMMENTS`, then posts one review with an inline comment thread for each finding that made the cut.
-6. When new commits are pushed, steps 1 through 5 repeat, with the reviewers looking only at what changed since the last review. A `verifier` agent also re-checks the App's open threads, and replies to and resolves the ones it judges fixed. A maintainer can waive a finding by resolving its thread or replying `Waive: <reason>`.
-7. If you've turned on `APPROVE_WHEN_CLEAN`, `reviewer` approves the PR once a run finds nothing new, every reviewer finished, and every thread it opened is fixed or waived.
+1. GitHub triggers a webhook to `reviewer`, enqueueing the review job.
+2. `reviewer` picks up the job and fetches the changes to its persistent disk.
+3. `reviewer`'s `orchestrator` agent inspects the PR title, description, and list of modified files.
+4. `correctness`, `security`, and `documentation` agents always run. On top of those, `orchestrator` uses its discretion to pick any other specialists the change calls for.
+5. After all the agents are done, `reviewer` posts the review, opening a comment thread for each finding worth raising.
+6. When new changes are pushed to the PR, the cycle repeats: the agents review what's new, and a `verifier` agent checks whether the earlier comments were addressed, resolving the ones that were.
+7. The cycle continues until every comment has been fixed or waived by a person, at which point `reviewer` can approve the PR (if you've turned that on).
 
 ![Diagram: a code author creates a PR on GitHub, GitHub notifies reviewer, and reviewer's orchestrator pulls the latest changes to disk, hands them to the review agents, and posts their reviews back to GitHub](docs/how-it-works.png)
 
