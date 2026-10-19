@@ -2,6 +2,9 @@
 import type { ReviewComment, ReviewThread } from './ports.ts';
 import type { Finding, RecordedFinding, Waiver } from './store.ts';
 
+/** Maintainers: the GitHub author_associations that can waive a finding and whose replies reach the verifier. */
+export const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
+
 export type Severity = Finding['severity'];
 /** Severities, lowest first; the rank of each is its index + 1. */
 export const SEVERITIES = ['low', 'medium', 'high', 'critical'] as const satisfies Severity[];
