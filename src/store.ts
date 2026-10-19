@@ -16,6 +16,8 @@ export type FindingOutcome =
   | 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
   /** A re-report of a finding a maintainer waived: never posted, never blocks. */
   | 'waived';
+/** Whether a PR is open, a draft, merged or closed, as GitHub last reported it. */
+export type PrState = 'open' | 'draft' | 'merged' | 'closed';
 
 export interface Finding {
   title: string;
@@ -171,6 +173,14 @@ export function openStore(dataDir: string, clock: Clock) {
       fallback_used INTEGER NOT NULL,
       error TEXT
     );
+    CREATE TABLE IF NOT EXISTS pr_states (
+      repo TEXT NOT NULL,
+      pr INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      -- The PR's updated_at in the delivery that set it, so a late older delivery can't win.
+      at TEXT NOT NULL,
+      PRIMARY KEY (repo, pr)
+    );
   `);
   const now = () => clock.now().toISOString();
   // Restart safety: whatever was running died with the last process. The marker check prevents double-posting.
@@ -234,6 +244,13 @@ export function openStore(dataDir: string, clock: Clock) {
       const row = db.prepare(`SELECT COUNT(*) AS n FROM runs
         WHERE repo = ? AND pr = ? AND status != 'skipped' AND created_at > ?`).get(repo, pr, since.toISOString()) as any;
       return row.n;
+    },
+
+    /** Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order. */
+    recordPrState(repo: string, pr: number, state: PrState, at: Date) {
+      db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
+        ON CONFLICT (repo, pr) DO UPDATE SET state = excluded.state, at = excluded.at WHERE excluded.at >= pr_states.at`)
+        .run(repo, pr, state, at.toISOString());
     },
 
     /** Mark every queued or running job for the PR superseded. */
@@ -384,6 +401,8 @@ export function openStore(dataDir: string, clock: Clock) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
+        db.prepare(`DELETE FROM pr_states WHERE at < ? AND NOT EXISTS
+          (SELECT 1 FROM runs WHERE runs.repo = pr_states.repo AND runs.pr = pr_states.pr)`).run(cutoff);
         db.exec('COMMIT');
       } catch (err) {
         db.exec('ROLLBACK');
@@ -398,7 +417,7 @@ export function openStore(dataDir: string, clock: Clock) {
      * The Dashboard's PR list: PRs by their latest run, newest first, at most `limit` whose latest run id is below
      * `before`. Each has its latest run, its run count and cost, and the verdict of its latest run that recorded one.
      */
-    listPrs(f: { repo?: string; pr?: number; active?: boolean; before?: number }, limit: number) {
+    listPrs(f: { repo?: string; pr?: number; active?: boolean; state?: PrState; before?: number }, limit: number) {
       const match: string[] = [];
       const matchParams: (string | number)[] = [];
       if (f.repo) match.push('repo = ? COLLATE NOCASE'), matchParams.push(f.repo);
@@ -406,17 +425,19 @@ export function openStore(dataDir: string, clock: Clock) {
       const where: string[] = [];
       const params: (string | number)[] = [];
       if (f.active) where.push(`r.status IN ('queued', 'running')`);
+      if (f.state) where.push('s.state = ?'), params.push(f.state);
       if (f.before) where.push('l.id < ?'), params.push(f.before);
       const rows = db.prepare(`SELECT l.repo, l.pr, l.runs, l.cost, r.id, r.title, r.event, r.status, r.created_at, r.updated_at,
         CASE WHEN r.status = 'queued' THEN
           (SELECT COUNT(*) FROM runs q WHERE q.status = 'queued' AND q.id < r.id) END AS ahead,
-        v.review_id, vd.approved
+        v.review_id, vd.approved, s.state AS pr_state, s.at AS pr_state_at
         FROM (SELECT repo, pr, MAX(id) AS id, COUNT(*) AS runs, SUM(${COST}) AS cost FROM runs
           ${match.length ? `WHERE ${match.join(' AND ')}` : ''} GROUP BY repo, pr) l
         JOIN runs r ON r.id = l.id
         LEFT JOIN runs v ON v.id = (SELECT MAX(p.id) FROM runs p JOIN verdicts ON verdicts.run_id = p.id
           WHERE p.repo = l.repo AND p.pr = l.pr)
         LEFT JOIN verdicts vd ON vd.run_id = v.id
+        LEFT JOIN pr_states s ON s.repo = l.repo AND s.pr = l.pr
         ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
         ORDER BY l.id DESC LIMIT ?`).all(...matchParams, ...params, limit);
       return rows.map((r: any) => ({
@@ -426,6 +447,8 @@ export function openStore(dataDir: string, clock: Clock) {
         createdAt: r.created_at as string, updatedAt: r.updated_at as string, ahead: r.ahead as number | null,
         /** From the latest run with a verdict; null before any. */
         reviewId: r.review_id as number | null, approved: r.approved === null ? null : r.approved === 1,
+        /** Null for a PR whose state was never recorded. */
+        prState: r.pr_state as PrState | null, prStateAt: r.pr_state_at as string | null,
       }));
     },
 
@@ -446,7 +469,9 @@ export function openStore(dataDir: string, clock: Clock) {
       const rows = db.prepare(`SELECT id, event, repo, pr, title, head_sha, status, review_id, created_at, updated_at,
         ${COST} AS cost, CASE WHEN status = 'queued' THEN
           (SELECT COUNT(*) FROM runs q WHERE q.status = 'queued' AND q.id < runs.id) END AS ahead,
-        (SELECT json_group_array(json(data)) FROM (SELECT data FROM focuses WHERE run_id = runs.id ORDER BY rowid)) AS focuses
+        (SELECT json_group_array(json(data)) FROM (SELECT data FROM focuses WHERE run_id = runs.id ORDER BY rowid)) AS focuses,
+        (SELECT approved FROM verdicts WHERE run_id = runs.id) AS approved,
+        (SELECT state FROM pr_states s WHERE s.repo = runs.repo AND s.pr = runs.pr) AS pr_state
         FROM runs ${page} ORDER BY id DESC LIMIT ?`).all(...params, ...(f.before ? [f.before] : []), limit);
       return {
         total: total as number,
@@ -457,6 +482,9 @@ export function openStore(dataDir: string, clock: Clock) {
           cost: r.cost as number, ahead: r.ahead as number | null,
           /** The reviewers the run picked; empty for a re-decision or a run that hasn't picked yet. */
           focuses: JSON.parse(r.focuses) as RecordedFocus[],
+          /** Null when the run recorded no verdict. */
+          approved: r.approved === null ? null : r.approved === 1,
+          prState: r.pr_state as PrState | null,
         })),
       };
     },
