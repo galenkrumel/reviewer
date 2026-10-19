@@ -282,7 +282,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
   - per-agent model, tokens, cost, and status;
   - every finding with its validation outcome;
   - publish status and the review ID.
-- **Retention:** metadata is pruned on startup and daily, past the retention window.
+- **Retention:** metadata is pruned on startup and daily, past the retention window. A PR's waivers go only once GitHub last reported it merged or closed and none of its runs are left.
 - **Failure handling:**
   - Source fetch: retry with backoff.
   - Reviewer: retry once, then mark the focus failed and continue with the others.
