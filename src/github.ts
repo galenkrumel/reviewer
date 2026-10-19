@@ -98,7 +98,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
             id: t.id, resolved: t.isResolved, ...(t.isResolved && { resolvedBy: resolver(t.resolvedBy?.login) }),
             path: t.path, line: t.line ?? null, diffHunk: comments[0].diffHunk ?? '',
             comments: comments.map((c: any) => ({
-              byApp: byApp(c.author?.login), byPrAuthor: !!prAuthor && c.author?.login === prAuthor,
+              byApp: byApp(c.author?.login), login: c.author?.login ?? 'ghost', byPrAuthor: !!prAuthor && c.author?.login === prAuthor,
               association: c.authorAssociation ?? 'NONE', body: c.body ?? '',
             })),
           });

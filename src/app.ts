@@ -204,9 +204,15 @@ export function createApp(deps: {
     // Anyone else's replies (anyone at all, on a public repo) never reach the verifier.
     threads = threads?.map((t) => ({ ...t, comments: t.comments.filter((c) => c.byApp || c.byPrAuthor || TRUSTED_AUTHORS.has(c.association)) }));
     // The app can't resolve its own threads, so a maintainer's resolve is a human decision: a waiver, kept for good.
+    // So is a maintainer's `Waive:` reply, which carries its reason; the app's own comments never waive.
     for (const t of threads ?? []) {
-      if (!t.resolved || !TRUSTED_AUTHORS.has(t.resolvedBy?.association ?? '')) continue;
-      const w: Waiver = { thread: t.id, by: t.resolvedBy!.login, how: 'resolve', path: t.path, line: t.line, title: threadTitle(t) };
+      const reply = t.comments.find((c) => !c.byApp && TRUSTED_AUTHORS.has(c.association) && isWaive(c.body));
+      const resolver = t.resolved && TRUSTED_AUTHORS.has(t.resolvedBy?.association ?? '') ? t.resolvedBy!.login : undefined;
+      if (!reply && !resolver) continue;
+      const w: Waiver = {
+        thread: t.id, path: t.path, line: t.line, title: threadTitle(t),
+        ...(reply ? { by: reply.login, how: 'reply', reason: sanitize(reply.body.replace(WAIVE, ''), job.repo) } : { by: resolver!, how: 'resolve' }),
+      };
       if (store.recordWaiver(job.repo, job.pr, w)) progress(job, 'finding waived', { thread: w.thread, by: w.by, how: w.how });
     }
     const waivers = store.waivers(job.repo, job.pr);
@@ -671,6 +677,9 @@ export function createApp(deps: {
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
 const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 const DAY_MS = 24 * 3600_000;
+/** A comment that waives: `Waive:` first, ignoring case and leading whitespace. */
+const WAIVE = /^\s*waive:\s*/i;
+const isWaive = (body: string) => WAIVE.test(body);
 /** Fetch and publish: four attempts, 2s, 8s and 32s apart. */
 const RETRY_ATTEMPTS = 4;
 const BACKOFF_MS = 2000;
@@ -686,6 +695,14 @@ function ignoreReason(event: unknown, payload: any, label: string): string | und
   if (event === 'pull_request_review_thread') {
     // Resolving can waive a finding, so approval is decided again; unresolving revokes nothing.
     if (payload.action !== 'resolved') return `action ${payload.action} is not a re-decision trigger`;
+    return prReason(payload);
+  }
+  if (event === 'pull_request_review_comment') {
+    // The one comment command: a maintainer's `Waive:` reply waives the thread's finding, so approval is decided again.
+    const c = payload.comment;
+    if (payload.action !== 'created' || !isWaive(c?.body ?? '') || !TRUSTED_AUTHORS.has(c?.author_association)) {
+      return `action ${payload.action} is not a maintainer's Waive: comment`;
+    }
     return prReason(payload);
   }
   if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
