@@ -171,6 +171,24 @@ test('prune() applies the configured retention period at the current time', asyn
   assert.deepEqual(app.runs().map((r) => r.pr), [8]);
 });
 
+test("a closed PR's waivers are pruned with its runs; an open PR's never are", async () => {
+  const { restart, dataDir } = await aging();
+  const db = new DatabaseSync(join(dataDir, 'reviewer.db'));
+  const waive = db.prepare("INSERT INTO waivers (repo, pr, thread_id, data, created_at) VALUES (?, ?, 't', '{}', '2000-01-01T00:00:00Z')");
+  const state = db.prepare("INSERT OR REPLACE INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, '2000-01-01T00:00:00Z')");
+  for (const [pr, s] of [[7, 'closed'], [9, 'open']] as const) {
+    waive.run(REPO, pr);
+    state.run(REPO, pr, s);
+  }
+  const waived = () => db.prepare('SELECT pr FROM waivers ORDER BY pr').all().map((r: any) => r.pr);
+
+  restart(89);
+  assert.deepEqual(waived(), [7, 9]);
+  restart(91);
+  assert.deepEqual(waived(), [9]);
+  db.close();
+});
+
 test('with a concurrency of 2, two queued jobs run at the same time', async () => {
   const { fx, pr, github } = setup();
   github.addPullRequest(REPO, fx.url, { ...pr, number: 8 });

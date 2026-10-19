@@ -147,7 +147,7 @@ Optional:
 | `REVIEW_TOKEN_BUDGET` | `50000` | Estimated diff tokens given to reviewers; files past it are skipped and listed |
 | `WORKER_CONCURRENCY` | `2` | Jobs reviewed at once |
 | `RETENTION_DAYS` | `90` | Finished run records older than this are deleted, at startup and daily |
-| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when a run finds nothing new, every reviewer finished, nothing went unreviewed, and every thread the App started is verified fixed or waived by a maintainer (the App tries to resolve threads it verifies; GitHub may refuse, and the threads stay visibly open). Otherwise every run posts a review whose **Not approved:** line names what blocks it. See the note below |
+| `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when every finding a run reports is below the publish threshold or already waived, every reviewer finished, nothing went unreviewed, and every thread the App started is verified fixed or disproved, or waived by a maintainer (the App tries to resolve threads it verifies; GitHub may refuse, and the threads stay visibly open). Otherwise every run posts a review whose **Not approved:** line names what blocks it. See the note below |
 | `ADMIN_PASSWORD` | unset | Turns on the read-only dashboard of PRs and their runs at `/admin` (HTTP Basic auth, any username, this password). Unset, `/admin` is 404. Run records quote PR code, so use a long random value |
 | `DATA_DIR` | `./data` | Persistent volume for SQLite and bare clones |
 | `PORT` | `3000` | HTTP port; Render sets it |
