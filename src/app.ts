@@ -6,7 +6,7 @@ import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
-import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat } from './reviewer.ts';
+import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat, type Focus } from './reviewer.ts';
 import { selectFiles, type Scope } from './scope.ts';
 import {
   isRedecision, openStore, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
@@ -426,6 +426,7 @@ export function createApp(deps: {
     if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
     const since = newDiff === undefined ? undefined : last!.headSha;
     const fresh = newDiff === undefined ? undefined : addedLines(newDiff);
+    const newcomers: Focus[] = [];
     progress(job, 'scope', {
       changed: files.length, reviewed: scope.reviewed.length, excluded: excluded.size, skipped: scope.skipped.length,
       binary: scope.binary.length, lines: scope.reviewableLines, ...(since !== undefined && { since: since.slice(0, 7) }),
@@ -448,11 +449,14 @@ export function createApp(deps: {
       // Sequential: one reviewer's failure never stops the others.
       const selected = selectFocuses(picks, scope.reviewed.map((f) => f.path), settings.maxReviewers, settings.disabledFocuses);
       progress(job, 'reviewers picked', { focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined });
+      // A focus that didn't run on the last review never saw its lines, so it reviews the whole PR.
+      // ponytail: compares with the last review only; a focus that ran two reviews ago redoes the whole PR too.
+      if (since !== undefined) newcomers.push(...selected.map((s) => s.focus).filter((f) => !last!.focuses.has(f)));
       for (const { focus, reason } of selected) {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
           focus, chat: meteredChat(job, focus, invocations), maxTurns: agentConfig(focus).maxTurns,
-          source, diff, newDiff, title: job.title, body: job.body,
+          source, diff, newDiff: newcomers.includes(focus) ? undefined : newDiff, title: job.title, body: job.body,
         });
         const failed = (err: unknown, final: boolean) =>
           logFailure(job, err instanceof InvalidReport ? 'validation' : 'reviewer', err, final, { focus });
@@ -553,7 +557,7 @@ export function createApp(deps: {
       commit_id: job.headSha,
       event: approve ? 'APPROVE' : 'COMMENT',
       body: summary(job, comments.length, {
-        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, approve,
+        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, newcomers, approve,
         blockers: config.approveWhenClean ? blockers : [], undismissed,
         waivers: approve ? accepted(waivers, threads, findings) : [],
       }),
@@ -769,6 +773,8 @@ function outcomes(findings: { outcome: string }[]): Record<string, number> {
 
 function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
+  /** Focuses that reviewed the whole PR though `since` is set: they didn't run on that review. */
+  newcomers?: Focus[];
   /** Why this run didn't approve, when approvals are on. */
   blockers: string[];
   /** Why an earlier approval by this app may still be in force, when it may. */
@@ -788,7 +794,8 @@ function summary(job: Job, count: number, notes: {
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,
-    notes.since && `Focused on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed.`,
+    notes.since && `Focused on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed${
+      notes.newcomers?.length ? `, except ${listed(notes.newcomers)}, which did not run on that review and covered the whole PR` : ''}.`,
     // Focus names only; error detail stays in the run record.
     failed.length > 0 && `Failed focuses: ${failed.join(', ')}. Their findings are missing from this review.`,
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
