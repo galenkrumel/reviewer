@@ -31,7 +31,7 @@ The MVP is read-only with respect to source code: it must not build, test, impor
 - Multi-tenant hosting, billing, or a registration UI.
 - Horizontal scaling (more than one instance).
 - A judge/verifier agent pass (deferred until real-world noise justifies it).
-- Comment commands such as `@bot review`.
+- Comment commands such as `@bot review`. The one exception is a maintainer's `Waive: <reason>` reply on the App's thread (§9.2).
 
 ## 3. Triggers and eligibility
 
@@ -51,7 +51,7 @@ The GitHub App subscribes to `pull_request` events and acts on these actions:
 
 All other actions are ignored. Draft PRs are never reviewed.
 
-The App also subscribes to `pull_request_review_thread`. On `resolved`, which can waive a finding (§9.2), it queues a **re-decision** for the PR's current head; other actions are ignored. Gating (§3.2) and the rate limit (§3.4) apply as for a review.
+The App also subscribes to `pull_request_review_thread` and `pull_request_review_comment`, which can waive a finding (§9.2). A thread's `resolved`, or a review comment's `created` when the comment starts with `Waive:` (ignoring case and leading whitespace) and its author is a maintainer (OWNER, MEMBER or COLLABORATOR), queues a **re-decision** for the PR's current head; anything else on those events is ignored. Gating (§3.2) and the rate limit (§3.4) apply as for a review.
 
 - A re-decision runs no orchestrator and no reviewers. It decides approval again from the latest full run published at that head and base, with waivers applied, and from the threads as they are now: the verifier runs only on unresolved threads where the PR's author or a maintainer spoke last.
 - It posts a review only when the approval verdict changes. Withdrawing an approval dismisses it as usual (§9.1). With no review published at that head (or one whose run recorded no decision, such as a review found already posted after a restart), or with approvals off, it is recorded `skipped` and nothing is posted. If the threads can't be read or the verifier fails, it posts nothing and the run is recorded `failed`.
@@ -196,7 +196,7 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 ### 9.2 Re-checking the App's threads
 
 - Every run reads every review thread the App started, resolved or not, whether or not reviewers ran (a deletion can be the fix).
-- **Waivers:** the App can't resolve its own threads, so a resolved App thread always means a human decided. A thread resolved by a **maintainer** (OWNER, MEMBER or COLLABORATOR, the PR's author included) is **waived**: the first run that sees it records the waiver durably (who, how, and the thread's path, line and title) and logs it with run, repo, PR and who waived. A waiver is never revoked: later runs read waivers from the store, not GitHub, so unresolving the thread changes nothing. A waived thread counts as closed and never reaches the verifier. A finding a reviewer reports again that matches a waived thread (same path, and a nearby line or the same title) gets the `waived` outcome: it isn't posted and doesn't block. If it also matches a thread that isn't waived, it is handled as usual and blocks. A thread resolved by anyone else isn't waived: it stays a blocker, never reaches the verifier, and counts as closed only if the App had verified it fixed.
+- **Waivers:** the App can't resolve its own threads, so a resolved App thread always means a human decided. A thread resolved by a **maintainer** (OWNER, MEMBER or COLLABORATOR, the PR's author included), or where a maintainer replied with a comment starting `Waive: <reason>` (ignoring case and leading whitespace), is **waived**: the first run that sees it records the waiver durably (who, how, the reply's reason sanitized, and the thread's path, line and title) and logs it with run, repo, PR and who waived. A waiver is never revoked: later runs read waivers from the store, not GitHub, so unresolving the thread changes nothing. A waived thread counts as closed and never reaches the verifier. A finding a reviewer reports again that matches a waived thread (same path, and a nearby line or the same title) gets the `waived` outcome: it isn't posted and doesn't block. If it also matches a thread that isn't waived, it is handled as usual and blocks. `Waive:` from anyone else, or in the App's own comments and replies, never waives. A thread resolved by anyone else isn't waived: it stays a blocker, never reaches the verifier, and counts as closed only if the App had verified it fixed.
 - When unresolved, unwaived threads remain, the verifier agent judges each at the current head, with the read-only repository tools (§6.2) and each thread's original diff hunk, comments and replies as untrusted data. It finishes with one `report_threads` call: per thread, resolved or open, and a short reply.
 - Only comments from the App, the PR's author, and OWNER, MEMBER or COLLABORATOR authors reach the verifier: the people who could resolve the thread themselves. Anyone else's replies are dropped, and don't count as the author speaking last.
 - If the verifier's report is malformed it is retried once, as reviewers are.
@@ -241,7 +241,7 @@ Confidence is not shown to readers. It is stored in metadata only.
 
 The App must not request contents write, workflows, administration, or any permission that allows merging or pushing.
 
-**Events:** `pull_request` and `pull_request_review_thread`, filtered in code to the actions in §3.1.
+**Events:** `pull_request`, `pull_request_review_thread` and `pull_request_review_comment`, filtered in code to the actions in §3.1.
 
 Webhook signatures are verified with the App's webhook secret. Unsigned or invalid deliveries are rejected.
 

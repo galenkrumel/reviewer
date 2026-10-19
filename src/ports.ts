@@ -39,7 +39,7 @@ export interface ReviewThread {
   /** The diff hunk the first comment was posted on, as it was then. */
   diffHunk: string;
   /** `association` is GitHub's author_association (OWNER, MEMBER, COLLABORATOR, NONE, ...). */
-  comments: { byApp: boolean; byPrAuthor: boolean; association: string; body: string }[];
+  comments: { byApp: boolean; byPrAuthor: boolean; login: string; association: string; body: string }[];
 }
 
 export interface GitHubPort {
