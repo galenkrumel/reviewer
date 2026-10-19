@@ -3,7 +3,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { createDashboard } from './dashboard.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
-import { absorbed, sanitize, stillReported, threadTitle, toComment, validate, waivedBy, type Severity } from './findings.ts';
+import { absorbed, sanitize, stillReported, threadTitle, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat, type Focus } from './reviewer.ts';
@@ -675,7 +675,6 @@ export function createApp(deps: {
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
-const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 const DAY_MS = 24 * 3600_000;
 /** A comment that waives: `Waive:` first, ignoring case and leading whitespace. */
 const WAIVE = /^\s*waive:\s*/i;
