@@ -19,6 +19,10 @@ _Avoid_: Run, review run
 Whether a published Review approved the PR or only commented. A PR's Verdict is that of its latest Run that published one.
 _Avoid_: Decision (the blockers a full Run records), status
 
+**PR state**:
+Whether a PR is open, a draft, merged or closed, as GitHub last reported it.
+_Avoid_: Status (a Run's), disposition
+
 **Dashboard**:
 The operator's read-only view of PRs and their Runs: history, current status and Verdicts.
 _Avoid_: Admin panel, console
