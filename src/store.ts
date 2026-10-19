@@ -332,8 +332,8 @@ export function openStore(dataDir: string, clock: Clock) {
     },
 
     /**
-     * Record a waiver the first time any run sees it; returns whether this was that time.
-     * ponytail: never pruned (a row per waived thread); prune with the PR's runs if the table ever matters.
+     * Record a waiver the first time any run sees it; returns whether this was that time. Pruned only once the PR is
+     * closed and its runs are gone.
      */
     recordWaiver(repo: string, pr: number, w: Waiver): boolean {
       return db.prepare('INSERT OR IGNORE INTO waivers (repo, pr, thread_id, data, created_at) VALUES (?, ?, ?, ?, ?)')
@@ -401,6 +401,9 @@ export function openStore(dataDir: string, clock: Clock) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }
         db.prepare(`DELETE FROM runs WHERE id IN (${old})`).run(cutoff);
+        // A waiver outlives its runs while the PR could still be pushed to: only a closed PR's go, before its state does.
+        db.prepare(`DELETE FROM waivers WHERE EXISTS (SELECT 1 FROM pr_states s WHERE s.repo = waivers.repo AND s.pr = waivers.pr
+          AND s.state IN ('merged', 'closed')) AND NOT EXISTS (SELECT 1 FROM runs WHERE runs.repo = waivers.repo AND runs.pr = waivers.pr)`).run();
         db.prepare(`DELETE FROM pr_states WHERE at < ? AND NOT EXISTS
           (SELECT 1 FROM runs WHERE runs.repo = pr_states.repo AND runs.pr = pr_states.pr)`).run(cutoff);
         db.exec('COMMIT');
