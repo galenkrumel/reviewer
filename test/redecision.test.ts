@@ -18,7 +18,7 @@ const threadEvent = (action: string, pr: PullRequest, prExtra: Record<string, un
 
 /** Someone replies on the app's thread: the comment lands on it, then GitHub sends the delivery. */
 function reply(github: FakeGitHub, thread: { id: string }, pr: PullRequest, body: string, login: string, association: string) {
-  const t = github.threads.get(`${REPO}#7`)!.find((x) => x.id === thread.id)!;
+  const t = github.thread(thread.id);
   t.comments.push({ byApp: false, byPrAuthor: false, login, association, body });
   return delivery('pull_request_review_comment', prPayload('created', REPO, pr, {
     comment: { body, author_association: association, user: { login } },
@@ -91,20 +91,20 @@ test('a maintainer replying "Waive:" re-decides at once: approved, the waiver an
 test("a review comment queues nothing unless it is a maintainer's Waive:", async () => {
   const { app, github, pr, thread } = await reviewed();
   const ignored = async (d: ReturnType<typeof delivery>) => (await app.receive(d)).ignored;
-  assert.match(await ignored(reply(github, thread, pr, 'We accept this risk.', 'octo-maint', 'OWNER')) ?? '', /not a maintainer's Waive: comment/);
-  assert.match(await ignored(reply(github, thread, pr, 'Waive: mine now', 'drive-by', 'CONTRIBUTOR')) ?? '', /not a maintainer's Waive: comment/);
-  assert.match(await ignored(reply(github, thread, pr, 'Please waive: this', 'octo-maint', 'MEMBER')) ?? '', /not a maintainer's Waive: comment/);
+  assert.match(await ignored(reply(github, thread, pr, 'We accept this risk.', 'octo-maint', 'OWNER')) ?? '', /comment is not a maintainer's Waive:/);
+  assert.match(await ignored(reply(github, thread, pr, 'Waive: mine now', 'drive-by', 'CONTRIBUTOR')) ?? '', /comment is not a maintainer's Waive:/);
+  assert.match(await ignored(reply(github, thread, pr, 'Please waive: this', 'octo-maint', 'MEMBER')) ?? '', /comment is not a maintainer's Waive:/);
   const edited = delivery('pull_request_review_comment', prPayload('edited', REPO, pr, {
     comment: { body: 'Waive: ok', author_association: 'MEMBER', user: { login: 'octo-maint' } },
   }));
-  assert.match(await ignored(edited) ?? '', /edited is not a maintainer's Waive: comment/);
+  assert.match(await ignored(edited) ?? '', /edited is not a re-decision trigger/);
   await app.drain();
   assert.equal(app.runs().length, 1);
 });
 
 test("Waive: from an outsider or in the app's own replies never waives", async () => {
   const { app, github, pr, thread, logs } = await reviewed();
-  const t = github.threads.get(`${REPO}#7`)!.find((x) => x.id === thread.id)!;
+  const t = github.thread(thread.id);
   t.comments.push(
     { byApp: false, byPrAuthor: true, login: 'drive-by', association: 'CONTRIBUTOR', body: 'Waive: not my problem' },
     { byApp: true, byPrAuthor: false, login: 'reviewer[bot]', association: 'MEMBER', body: 'Waive: steered model' },

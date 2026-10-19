@@ -83,6 +83,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
         const prAuthor = data.repository.pullRequest.author?.login;
         // GraphQL gives no association for a thread's resolver. Only the PR's author or someone with write access
         // can resolve, so anyone else resolving is a collaborator at least.
+        // ponytail: a thread's first 50 comments only, so a `Waive:` reply past them is never seen; page comments if it bites.
         // ponytail: OWNER/MEMBER/COLLABORATOR inferred, not read; REST collaborators/{login}/permission if it matters.
         const resolver = (login = 'ghost') => ({
           login,

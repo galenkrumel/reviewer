@@ -700,9 +700,8 @@ function ignoreReason(event: unknown, payload: any, label: string): string | und
   if (event === 'pull_request_review_comment') {
     // The one comment command: a maintainer's `Waive:` reply waives the thread's finding, so approval is decided again.
     const c = payload.comment;
-    if (payload.action !== 'created' || !isWaive(c?.body ?? '') || !TRUSTED_AUTHORS.has(c?.author_association)) {
-      return `action ${payload.action} is not a maintainer's Waive: comment`;
-    }
+    if (payload.action !== 'created') return `action ${payload.action} is not a re-decision trigger`;
+    if (!isWaive(c?.body ?? '') || !TRUSTED_AUTHORS.has(c?.author_association)) return "comment is not a maintainer's Waive:";
     return prReason(payload);
   }
   if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;

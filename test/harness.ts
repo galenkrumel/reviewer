@@ -139,7 +139,7 @@ export class FakeGitHub implements GitHubPort {
     return thread;
   }
 
-  private thread(id: string) {
+  thread(id: string) {
     const t = [...this.threads.values()].flat().find((x) => x.id === id);
     if (!t) throw new Error(`no thread ${id}`);
     return t;
