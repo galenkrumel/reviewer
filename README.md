@@ -24,12 +24,12 @@ The reviewers will sometimes disagree with you or your coding agent. That's ok! 
 1. GitHub triggers a webhook to `reviewer`, enqueueing the review job.
 2. `reviewer` picks up the job and fetches the changes to its persistent disk.
 3. `reviewer`'s `orchestrator` agent inspects the PR title, description, and list of modified files.
-4. `correctness`, `security`, and `documentation` agents always run. On top of those, `orchestrator` uses its discretion to pick any other specialists the change calls for.
+4. For code changes, `correctness`, `security`, and `documentation` agents always run. On top of those, `orchestrator` uses its discretion to pick any other specialists the change calls for.
 5. After all the agents are done, `reviewer` posts the review, opening a comment thread for each finding worth raising.
 6. When new changes are pushed to the PR, the cycle repeats: the agents review what's new, and a `verifier` agent checks whether the earlier comments were addressed, resolving the ones that were.
 7. The cycle continues until every comment has been fixed or waived by a person, at which point `reviewer` can approve the PR (if you've turned that on).
 
-![Diagram: a code author creates a PR on GitHub, GitHub notifies reviewer, and reviewer's orchestrator pulls the latest changes to disk, hands them to the review agents, and posts their reviews back to GitHub](docs/how-it-works.png)
+![Diagram: a code author creates a PR on GitHub, GitHub notifies reviewer, and reviewer pulls the latest changes to disk, its orchestrator picks the review agents, and reviewer posts their reviews back to GitHub](docs/how-it-works.png)
 
 ## Get your first review
 
