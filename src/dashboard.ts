@@ -1,6 +1,6 @@
 // The operator's read-only Dashboard of Runs: server-rendered HTML behind Basic auth, no client script.
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { isRedecision, type openStore, type RunStatus } from './store.ts';
+import { isRedecision, type openStore, type PrState, type RunStatus } from './store.ts';
 
 type Store = ReturnType<typeof openStore>;
 
@@ -22,6 +22,21 @@ const STATUSES: RunStatus[] = [
 ];
 /** Pill colour per status; the rest are neutral. */
 const TONE: Partial<Record<RunStatus, string>> = { queued: 'blue', running: 'amber live', published: 'green', failed: 'red' };
+/** Statuses named for what happened on GitHub; the rest read as they are. */
+const LABEL: Partial<Record<RunStatus, string>> = {
+  published: 'review posted', nothing_to_publish: 'nothing posted', superseded: 'cancelled',
+};
+/** Runs that did nothing on GitHub, shown muted. */
+const QUIET: RunStatus[] = ['nothing_to_publish', 'superseded', 'stale', 'skipped'];
+const PR_STATES: PrState[] = ['open', 'draft', 'merged', 'closed'];
+const PR_TONE: Record<PrState, string> = { open: 'green', draft: '', merged: 'purple', closed: 'red' };
+/** What started a run, in plain words; re-decisions are tagged as such. */
+const KIND: Record<string, string> = {
+  'pull_request.opened': 'opened', 'pull_request.synchronize': 'push', 'pull_request.reopened': 'reopened',
+  'pull_request.ready_for_review': 'ready for review', 'pull_request.edited': 'base changed',
+  'pull_request.labeled': 're-review label', 'pull_request_review_thread.resolved': 'thread resolved',
+  'pull_request_review_comment.created': '"Waive:" reply',
+};
 
 /** Markup whose interpolations are already escaped. */
 class Html {
@@ -59,19 +74,34 @@ function since(iso: string, now: Date): string {
 }
 
 const usd = (n: number) => `$${n.toFixed(n > 0 && n < 0.01 ? 4 : 2)}`;
-const label = (s: RunStatus) => s.replaceAll('_', ' ');
+const label = (s: RunStatus) => LABEL[s] ?? s.replaceAll('_', ' ');
 const pill = (tone: string | undefined, text: unknown) => html`<span class="pill ${tone}">${text}</span>`;
 const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${pr}`;
-const reviewLink = (repo: string, pr: number, reviewId: number | null) =>
-  reviewId !== null && html`<a class="ext" href="${prUrl(repo, pr)}#pullrequestreview-${reviewId}">review ↗</a>`;
+const reviewUrl = (repo: string, pr: number, reviewId: number) => `${prUrl(repo, pr)}#pullrequestreview-${reviewId}`;
 /** The Dashboard's page for a PR. Repo names are [A-Za-z0-9._-] and one slash, so they need no encoding. */
 const prPath = (repo: string, pr: number) => `/admin/prs/${repo}/${pr}`;
-const verdict = (reviewId: number | null, approved: boolean | null) =>
-  reviewId === null || approved === null ? '—' : approved ? pill('green', 'approved') : pill('', 'commented');
-const kind = (event: string) => (isRedecision(event) ? html`re-decision · ${event}` : event.replace(/^pull_request\./, ''));
+/** The Verdict as a pill linking to its Review. */
+const verdict = (repo: string, pr: number, reviewId: number | null, approved: boolean | null) =>
+  reviewId === null || approved === null ? '—'
+  : html`<a class="pill ${approved ? 'green' : ''}" href="${reviewUrl(repo, pr, reviewId)}">${approved ? 'approved' : 'commented'} ↗</a>`;
+const kind = (event: string) => {
+  const text = KIND[event] ?? event.replace(/^pull_request\./, '');
+  return isRedecision(event) ? html`${text} <span class="tag">re-decision</span>` : text;
+};
+/** The PR state pill; nothing for a PR whose state was never recorded. */
+const prState = (state: PrState | null) => state && pill(PR_TONE[state], state[0]!.toUpperCase() + state.slice(1));
+const quiet = (s: RunStatus) => QUIET.includes(s) && new Html(' class="quiet"');
 
-function status(r: { status: RunStatus; createdAt: string; updatedAt: string; ahead?: number | null }, now: Date) {
-  const p = pill(TONE[r.status], label(r.status));
+function status(r: {
+  status: RunStatus; event: string; repo: string; pr: number; reviewId: number | null; approved?: boolean | null;
+  createdAt: string; updatedAt: string; ahead?: number | null;
+}, now: Date) {
+  if (r.status === 'published' && r.reviewId !== null) {
+    const text = r.approved == null ? 'review posted' : `review posted · ${r.approved ? 'approved' : 'commented'}`;
+    return html`<a class="pill green" href="${reviewUrl(r.repo, r.pr, r.reviewId)}">${text} ↗</a>`;
+  }
+  // A re-decision that posts nothing kept the approval decision as it was.
+  const p = pill(TONE[r.status], r.status === 'nothing_to_publish' && isRedecision(r.event) ? 'no change' : label(r.status));
   if (r.status === 'queued') return html`${p} <span class="muted">${r.ahead ? html`${r.ahead} ahead · ` : ''}${since(r.createdAt, now)}</span>`;
   // Claiming a run sets updated_at, so this is how long it has been running.
   if (r.status === 'running') return html`${p} <span class="muted">${since(r.updatedAt, now)}</span>`;
@@ -86,14 +116,14 @@ const CSS = `
 :root {
   color-scheme: light dark;
   --bg: #fafafa; --surface: #fff; --hover: #f4f4f5; --border: #e4e4e7; --text: #18181b; --muted: #71717a;
-  --accent: #4f46e5; --on-accent: #fff; --green: #15803d; --red: #dc2626; --amber: #b45309; --blue: #2563eb;
+  --accent: #4f46e5; --on-accent: #fff; --green: #15803d; --red: #dc2626; --amber: #b45309; --blue: #2563eb; --purple: #8250df;
   font: 14px/1.5 'Inter Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
   font-feature-settings: 'cv11', 'ss01';
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #09090b; --surface: #121214; --hover: #1c1c1f; --border: #27272a; --text: #fafafa; --muted: #a1a1aa;
-    --accent: #818cf8; --on-accent: #09090b; --green: #4ade80; --red: #f87171; --amber: #fbbf24; --blue: #60a5fa;
+    --accent: #818cf8; --on-accent: #09090b; --green: #4ade80; --red: #f87171; --amber: #fbbf24; --blue: #60a5fa; --purple: #a371f7;
   }
 }
 * { box-sizing: border-box; }
@@ -140,6 +170,10 @@ ul.card li:last-child { border-bottom: 0; }
   font-size: 12px; font-weight: 500; white-space: nowrap; color: var(--tone);
   background: color-mix(in srgb, var(--tone) 12%, transparent); border: 1px solid color-mix(in srgb, var(--tone) 28%, transparent); }
 .green { --tone: var(--green); } .red { --tone: var(--red); } .amber { --tone: var(--amber); } .blue { --tone: var(--blue); }
+.purple { --tone: var(--purple); }
+a.pill:hover { color: var(--tone); background: color-mix(in srgb, var(--tone) 22%, transparent); }
+.tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.quiet > td { opacity: 0.55; }
 .live::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: pulse 1.4s infinite; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .live::before { animation: none; } }
@@ -211,25 +245,30 @@ ${runs.length === PAGE && html`<p class="more"><a class="btn" href="/admin/runs?
 /** Runs as table rows; `withPr` false on a PR's own page, whose heading names it. */
 function runTable(runs: ReturnType<Store['listRuns']>['runs'], now: Date, withPr = true) {
   return html`<div class="card"><table class="grid">
-<tr><th>Run</th>${withPr && html`<th>PR</th>`}<th>Kind</th><th>Reviewers</th><th>Status</th><th>Head</th><th>Created</th><th class="num">Cost</th><th></th></tr>
-${runs.map((r) => html`<tr>
+<tr><th>Run</th>${withPr && html`<th>PR</th>`}<th>Kind</th><th>Reviewers</th><th>Status</th><th>Head</th><th>Created</th><th class="num">Cost</th></tr>
+${runs.map((r) => html`<tr${quiet(r.status)}>
   <td><a class="ref" href="/admin/runs/${r.id}">${r.id}</a></td>
-  ${withPr && html`<td><a class="ref" href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${r.title}</td>`}
+  ${withPr && html`<td><a class="ref" href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${prState(r.prState)} ${r.title}</td>`}
   <td class="nowrap">${kind(r.event)}</td>
   <td>${r.focuses.length ? r.focuses.map((f, i) => html`${i > 0 && ', '}${f.status === 'failed' ? html`<span class="err">${f.focus} (failed)</span>` : f.focus}`) : '—'}</td>
   <td class="nowrap">${status(r, now)}</td>
   <td><code>${r.headSha.slice(0, 7)}</code></td>
   <td class="nowrap muted">${since(r.createdAt, now)} ago</td>
   <td class="num">${usd(r.cost)}</td>
-  <td class="nowrap">${reviewLink(r.repo, r.pr, r.reviewId)}</td>
 </tr>`)}
 </table></div>`;
 }
 
 /** The home page: PRs by their latest run. */
 function prList(store: Store, q: URLSearchParams, now: Date) {
-  const f = { repo: q.get('repo')?.trim() || undefined, active: q.get('active') === '1' || undefined };
+  const f = {
+    repo: q.get('repo')?.trim() || undefined,
+    active: q.get('active') === '1' || undefined,
+    state: PR_STATES.find((s) => s === q.get('state')),
+  };
   const prs = store.listPrs({ ...f, before: positiveInt(q.get('before')) }, PAGE);
+  const option = (value: string, text: string) =>
+    html`<option value="${value}"${value === (f.state ?? '') ? new Html(' selected') : ''}>${text}</option>`;
   const older = new URLSearchParams(Object.entries(f).flatMap(([k, v]) => (v === undefined ? [] : [[k, v === true ? '1' : v]])));
   older.set('before', String(prs.at(-1)?.id));
   return page('PRs', 'prs', html`
@@ -237,15 +276,16 @@ function prList(store: Store, q: URLSearchParams, now: Date) {
 <div class="meta">Pull requests by their latest run</div>
 <form method="get" action="/admin">
   <label>Repo <input name="repo" value="${f.repo}" placeholder="owner/repo"></label>
+  <label>State <select name="state">${option('', 'any')}${PR_STATES.map((s) => option(s, s))}</select></label>
   <label class="check"><input type="checkbox" name="active" value="1"${f.active ? new Html(' checked') : ''}> Active only</label>
   <button>Filter</button> <a class="ghost" href="/admin">Clear</a>
 </form>
 <div class="card"><table class="grid">
 <tr><th>PR</th><th>Latest run</th><th>Verdict</th><th>Last active</th><th class="num">Runs</th><th class="num">Cost</th></tr>
 ${prs.map((p) => html`<tr>
-  <td><a class="ref" href="${prPath(p.repo, p.pr)}">${p.repo}#${p.pr}</a> ${p.title}</td>
-  <td class="nowrap"><a class="ref" href="/admin/runs/${p.id}">${p.id}</a> <span class="muted">${kind(p.event)}</span> ${status(p, now)}</td>
-  <td class="nowrap">${verdict(p.reviewId, p.approved)} ${reviewLink(p.repo, p.pr, p.reviewId)}</td>
+  <td><a class="ref" href="${prPath(p.repo, p.pr)}">${p.repo}#${p.pr}</a> ${prState(p.prState)} ${p.title}</td>
+  <td class="nowrap"><a class="ref" href="/admin/runs/${p.id}">${p.id}</a> <span class="muted">${kind(p.event)}</span> ${status({ ...p, approved: null }, now)}</td>
+  <td class="nowrap">${verdict(p.repo, p.pr, p.reviewId, p.approved)}</td>
   <td class="nowrap muted">${since(p.updatedAt, now)} ago</td>
   <td class="num">${p.runs}</td>
   <td class="num">${usd(p.cost)}</td>
@@ -263,7 +303,8 @@ function prDetail(store: Store, repo: string, pr: number, q: URLSearchParams, no
   return page(`${latest.repo}#${pr}`, 'prs', html`
 <div class="eyebrow"><a class="ext" href="${prUrl(latest.repo, pr)}">${latest.repo}#${pr} ↗</a></div>
 <h1>${latest.title}</h1>
-<div class="meta"><span>Verdict ${verdict(latest.reviewId, latest.approved)} ${reviewLink(latest.repo, pr, latest.reviewId)}</span>
+<div class="meta">${latest.prState && html`<span>${prState(latest.prState)} ${since(latest.prStateAt!, now)} ago</span>`}
+<span>Verdict ${verdict(latest.repo, pr, latest.reviewId, latest.approved)}</span>
 <span>Total cost <strong>${usd(total)}</strong></span></div>
 ${runTable(runs, now, false)}
 ${runs.length === PAGE && html`<p class="more"><a class="btn" href="${prPath(repo, pr)}?before=${runs.at(-1)!.id}">Older</a></p>`}
@@ -281,7 +322,6 @@ function detail(store: Store, id: number, now: Date) {
 <h1>Run ${r.id}</h1>
 <div class="card" style="margin-top: 20px"><table class="kv">
 <tr><th>Status</th><td>${status(r, now)}</td></tr>
-<tr><th>Review</th><td>${verdict(r.reviewId, r.approved)} ${reviewLink(r.repo, r.pr, r.reviewId)}</td></tr>
 <tr><th>Event</th><td>${kind(r.event)} · delivery <code>${r.deliveryId}</code></td></tr>
 <tr><th>Head</th><td><code>${r.headSha}</code></td></tr>
 <tr><th>Base</th><td><code>${r.baseSha}</code></td></tr>

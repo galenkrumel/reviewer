@@ -343,6 +343,13 @@ export function createApp(deps: {
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
+    // Every pull_request delivery carries the PR's state, whatever its action and whether it starts a run.
+    if (event === 'pull_request' && repo && allowlist.has(repo.toLowerCase()) && Number.isInteger(pr?.number)) {
+      const updated = new Date(pr.updated_at);
+      store.recordPrState(repo, pr.number,
+        pr.merged || pr.merged_at ? 'merged' : pr.state === 'closed' ? 'closed' : pr.draft ? 'draft' : 'open',
+        Number.isNaN(updated.getTime()) ? deps.clock.now() : updated);
+    }
     if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
       if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
       if (!Number.isInteger(pr?.number)) return { status: 400 };
