@@ -64,7 +64,7 @@ Anyone whose association with the repository is owner, member or collaborator, t
 _Avoid_: Admin, reviewer, owner
 
 **Resolved**:
-GitHub's own collapsed state for a Thread. A UI state, not a verdict: the App can't set it, and it says nothing about why.
+GitHub's own collapsed state for a Thread. A UI state, not a verdict: GitHub refuses the App's own resolve, and it says nothing about why.
 
 **Approval**:
 The App's assertion that every Finding it raised on the PR is Fixed, Disproved or Waived. See `docs/adr/0001-approval-means-fixed-or-waived.md`.
