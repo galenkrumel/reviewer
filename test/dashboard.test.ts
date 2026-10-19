@@ -76,7 +76,7 @@ test('queued runs show their place in line, and the list filters and pages', asy
   await app.receive(delivery('pull_request', prPayload('opened', REPO, { ...pr, number: 8 })));
 
   const list = get(app, '/admin/runs')!.body;
-  assert.ok(list.includes('queued · 1 ahead'));
+  assert.ok(list.includes('>queued</span> <span class="muted">1 ahead · '));
   assert.ok(list.includes('<meta http-equiv="refresh"'));
   const rows = (url: string) => get(app, url)!.body.match(/href="\/admin\/runs\/\d+"/g) ?? [];
   assert.equal(rows('/admin/runs').length, 2);
@@ -105,7 +105,7 @@ test('the home page lists PRs by their latest run, with its verdict, runs and st
   const home = get(app, '/admin')!.body;
   const prRows = home.match(/href="\/admin\/prs\/acme\/widgets\/\d+"/g);
   assert.deepEqual(prRows, ['href="/admin/prs/acme/widgets/8"', 'href="/admin/prs/acme/widgets/7"'], 'latest run first');
-  assert.ok(home.includes('<td>commented <a'), 'the published review only commented');
+  assert.ok(home.includes('>commented</span> <a'), 'the published review only commented');
   assert.ok(home.includes('Fix &#60;img'));
   assert.ok(!home.includes('<img'));
   assert.ok(get(app, '/admin?active=1')!.body.includes('/admin/prs/acme/widgets/8"'));
@@ -115,7 +115,7 @@ test('the home page lists PRs by their latest run, with its verdict, runs and st
   const page = get(app, '/admin/prs/acme/widgets/7')!;
   assert.equal(page.status, 200);
   assert.deepEqual(page.body.match(/href="\/admin\/runs\/\d+"/g), ['href="/admin/runs/1"']);
-  assert.ok(page.body.includes('Verdict: commented'));
+  assert.ok(page.body.includes('Verdict <span class="pill ">commented</span>'));
   assert.match(page.body, /<td>correctness, security, documentation<\/td>/, 'the run\'s reviewers');
   assert.ok(!page.body.includes('<th>PR</th>') && !page.body.includes('href="/admin/prs/'), 'no PR column on its own page');
   assert.ok(get(app, '/admin/runs')!.body.includes('<th>PR</th>'), 'the flat list keeps it');
@@ -128,8 +128,8 @@ test('an approving review shows as approved', async () => {
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
   assert.equal(app.runs()[0]!.status, 'published');
-  assert.ok(get(app, '/admin')!.body.includes('<td>approved <a'));
-  assert.ok(get(app, '/admin/runs/1')!.body.includes('<td>approved <a'));
+  assert.ok(get(app, '/admin')!.body.includes('<td class="nowrap"><span class="pill green">approved</span> <a'));
+  assert.ok(get(app, '/admin/runs/1')!.body.includes('<td><span class="pill green">approved</span> <a'));
 });
 
 test('a run published before verdicts were recorded shows no verdict', async () => {
@@ -140,7 +140,7 @@ test('a run published before verdicts were recorded shows no verdict', async () 
   db.exec('DELETE FROM verdicts');
   db.close();
   assert.ok(get(app, '/admin/runs/1')!.body.includes('<tr><th>Review</th><td>— <a'));
-  assert.ok(get(app, '/admin')!.body.includes('<td>— </td>'));
+  assert.ok(get(app, '/admin')!.body.includes('<td class="nowrap">— </td>'));
   assert.equal(get(app, '/admin/prs/acme/widgets/7?before=1')!.status, 200, 'paging past the last run is not a 404');
   assert.equal(get(app, '/admin/prs/acme/widgets%zz/7')!.status, 404);
 });
