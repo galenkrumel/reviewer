@@ -2,7 +2,7 @@
 import type { ReviewComment, ReviewThread } from './ports.ts';
 import type { Finding, RecordedFinding, Waiver } from './store.ts';
 
-/** Maintainers: the GitHub author_associations that can waive a finding and whose replies reach the verifier. */
+/** Maintainers: the GitHub author_associations whose PRs are always reviewed and who can waive a finding. */
 export const TRUSTED_AUTHORS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
 
 export type Severity = Finding['severity'];
