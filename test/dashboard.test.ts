@@ -116,7 +116,7 @@ test('the home page lists PRs by their latest run, with its verdict, runs and st
   assert.equal(page.status, 200);
   assert.deepEqual(page.body.match(/href="\/admin\/runs\/\d+"/g), ['href="/admin/runs/1"']);
   assert.ok(page.body.includes('Verdict: commented'));
-  assert.match(page.body, /<td>correctness, security<\/td>/, 'the run\'s reviewers');
+  assert.match(page.body, /<td>correctness, security, documentation<\/td>/, 'the run\'s reviewers');
   assert.ok(!page.body.includes('<th>PR</th>') && !page.body.includes('href="/admin/prs/'), 'no PR column on its own page');
   assert.ok(get(app, '/admin/runs')!.body.includes('<th>PR</th>'), 'the flat list keeps it');
   assert.equal(get(app, '/admin/prs/acme/widgets/99')!.status, 404);
