@@ -198,6 +198,11 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
 
 ## Operating
 
+- **Dashboard:** set [`ADMIN_PASSWORD`](#deployment-config-env-vars) to get a read-only view at `/admin` of every PR
+  with its latest run, verdict, run count and cost.
+
+  ![Dashboard listing PRs with their latest run, verdict, last activity, run count and cost](docs/dashboard.png)
+
 - **Logs** go to stdout, one JSON object per line: `level` (`info`, `warn` or `error`) and `msg`.
   - Every webhook delivery logs `delivery` with `event`, the HTTP `status` returned, and a `reason` if it was not queued.
     A `warn` with status 401 means the signature didn't match: `GITHUB_WEBHOOK_SECRET` differs from the App's secret.
