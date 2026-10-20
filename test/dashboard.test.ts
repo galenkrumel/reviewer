@@ -129,23 +129,23 @@ test('PR state comes from pull_request deliveries, and a late older one does not
   const at = (t: string) => ({ updated_at: `2026-01-0${t}T00:00:00Z` });
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr, {}, at('1'))));
   await app.drain();
-  assert.ok(get(app, '/admin')!.body.includes('<span class="pill green">Open</span>'));
+  assert.ok(get(app, '/admin')!.body.includes('<span class="state green">Open</span>'));
 
   await app.receive(delivery('pull_request', prPayload('closed', REPO, pr, {}, { ...at('3'), state: 'closed', merged: true })));
   await app.receive(delivery('pull_request', prPayload('converted_to_draft', REPO, pr, {}, { ...at('2'), draft: true })));
-  const merged = '<span class="pill purple">Merged</span>';
+  const merged = '<span class="state purple">Merged</span>';
   for (const url of ['/admin', '/admin/runs', '/admin/prs/acme/widgets/7']) assert.ok(get(app, url)!.body.includes(merged), url);
   assert.ok(get(app, '/admin?state=merged')!.body.includes('/admin/prs/acme/widgets/7"'));
   assert.ok(!get(app, '/admin?state=open')!.body.includes('/admin/prs/acme/widgets/7"'));
 
   await app.receive(delivery('pull_request', prPayload('opened', REPO, { ...pr, number: 8 }, {}, at('4'))));
   await app.receive(delivery('pull_request', prPayload('closed', REPO, { ...pr, number: 8 }, {}, { ...at('5'), state: 'closed' })));
-  assert.ok(get(app, '/admin/prs/acme/widgets/8')!.body.includes('<span class="pill red">Closed</span>'));
+  assert.ok(get(app, '/admin/prs/acme/widgets/8')!.body.includes('<span class="state red">Closed</span>'));
 
   const db = new DatabaseSync(join(dataDir, 'reviewer.db'));
   db.exec('DELETE FROM pr_states');
   db.close();
-  assert.ok(!/>(Open|Merged|Closed|Draft)<\/span>/.test(get(app, '/admin')!.body), 'no pill without a recorded state');
+  assert.ok(!/>(Open|Merged|Closed|Draft)<\/span>/.test(get(app, '/admin')!.body), 'no state without a recorded one');
 });
 
 test('runs say in plain words what started them and what they did, and runs that did nothing are muted', async () => {
@@ -154,7 +154,7 @@ test('runs say in plain words what started them and what they did, and runs that
   await app.receive(delivery('pull_request', prPayload('synchronize', REPO, { ...pr, headSha: 'b'.repeat(40) })));
   const list = get(app, '/admin/runs')!.body;
   assert.match(list, /<tr class="quiet">\s*<td><a class="ref" href="\/admin\/runs\/1">/, 'the replaced run is muted');
-  assert.ok(list.includes('<span class="pill ">cancelled</span>'));
+  assert.ok(list.includes('<span class="muted">cancelled</span>'));
   assert.match(list, /<td class="nowrap">push<\/td>/);
 
   const db = new DatabaseSync(join(dataDir, 'reviewer.db'));
@@ -163,8 +163,8 @@ test('runs say in plain words what started them and what they did, and runs that
   db.close();
   const after = get(app, '/admin/runs')!.body;
   assert.ok(after.includes('thread resolved <span class="tag">re-decision</span>'));
-  assert.ok(after.includes('<span class="pill ">no change</span>'), 'a re-decision that kept the decision');
-  assert.ok(after.includes('<span class="pill ">nothing posted</span>'), 'a full run with nothing to post');
+  assert.ok(after.includes('<span class="muted">no change</span>'), 'a re-decision that kept the decision');
+  assert.ok(after.includes('<span class="muted">nothing posted</span>'), 'a full run with nothing to post');
 });
 
 test('an approving review shows as approved', async () => {

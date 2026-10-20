@@ -73,9 +73,11 @@ function since(iso: string, now: Date): string {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : s < 86400 ? `${Math.floor(s / 3600)}h` : `${Math.floor(s / 86400)}d`;
 }
 
-const usd = (n: number) => `$${n.toFixed(n > 0 && n < 0.01 ? 4 : 2)}`;
+const usd = (n: number) => `$${n.toFixed(3)}`;
 const label = (s: RunStatus) => LABEL[s] ?? s.replaceAll('_', ' ');
-const pill = (tone: string | undefined, text: unknown) => html`<span class="pill ${tone}">${text}</span>`;
+/** A pill for a status that wants attention; routine ones are plain muted text. */
+const pill = (tone: string | undefined, text: unknown) =>
+  tone ? html`<span class="pill ${tone}">${text}</span>` : html`<span class="muted">${text}</span>`;
 const prUrl = (repo: string, pr: number) => `https://github.com/${repo}/pull/${pr}`;
 const reviewUrl = (repo: string, pr: number, reviewId: number) => `${prUrl(repo, pr)}#pullrequestreview-${reviewId}`;
 /** The Dashboard's page for a PR. Repo names are [A-Za-z0-9._-] and one slash, so they need no encoding. */
@@ -88,8 +90,13 @@ const kind = (event: string) => {
   const text = KIND[event] ?? event.replace(/^pull_request\./, '');
   return isRedecision(event) ? html`${text} <span class="tag">re-decision</span>` : text;
 };
-/** The PR state pill; nothing for a PR whose state was never recorded. */
-const prState = (state: PrState | null) => state && pill(PR_TONE[state], state[0]!.toUpperCase() + state.slice(1));
+/** The PR state as a coloured dot and word; nothing for a PR whose state was never recorded. */
+const prState = (state: PrState | null) =>
+  state && html`<span class="state ${PR_TONE[state]}">${state[0]!.toUpperCase() + state.slice(1)}</span>`;
+/** A PR as its title over a muted `repo #n` line; the owner is in the tooltip. */
+const prCell = (r: { repo: string; pr: number; title: string; prState: PrState | null }) =>
+  html`<a href="${prPath(r.repo, r.pr)}">${r.title}</a>
+  <div class="sub"><span title="${r.repo}#${r.pr}">${r.repo.slice(r.repo.indexOf('/') + 1)} #${r.pr}</span>${prState(r.prState)}</div>`;
 const quiet = (s: RunStatus) => QUIET.includes(s) && new Html(' class="quiet"');
 
 function status(r: {
@@ -98,7 +105,7 @@ function status(r: {
 }, now: Date) {
   if (r.status === 'published' && r.reviewId !== null) {
     const text = r.approved == null ? 'review posted' : `review posted · ${r.approved ? 'approved' : 'commented'}`;
-    return html`<a class="pill green" href="${reviewUrl(r.repo, r.pr, r.reviewId)}">${text} ↗</a>`;
+    return html`<a class="muted" href="${reviewUrl(r.repo, r.pr, r.reviewId)}">${text} ↗</a>`;
   }
   // A re-decision that posts nothing kept the approval decision as it was.
   const p = pill(TONE[r.status], r.status === 'nothing_to_publish' && isRedecision(r.event) ? 'no change' : label(r.status));
@@ -159,6 +166,9 @@ thead th, .grid th { font-size: 12px; font-weight: 500; color: var(--muted); whi
 .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .nowrap { white-space: nowrap; }
 .ref { font-weight: 500; white-space: nowrap; }
+.sub { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 2px; font-size: 12px; color: var(--muted); }
+.state { --tone: var(--muted); display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--tone); }
 code, pre { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
 code { background: var(--hover); border: 1px solid var(--border); border-radius: 4px; padding: 1px 4px; }
 pre { white-space: pre-wrap; margin: 4px 0 0; color: var(--muted); }
@@ -248,7 +258,7 @@ function runTable(runs: ReturnType<Store['listRuns']>['runs'], now: Date, withPr
 <tr><th>Run</th>${withPr && html`<th>PR</th>`}<th>Kind</th><th>Reviewers</th><th>Status</th><th>Head</th><th>Created</th><th class="num">Cost</th></tr>
 ${runs.map((r) => html`<tr${quiet(r.status)}>
   <td><a class="ref" href="/admin/runs/${r.id}">${r.id}</a></td>
-  ${withPr && html`<td><a class="ref" href="${prPath(r.repo, r.pr)}">${r.repo}#${r.pr}</a> ${prState(r.prState)} ${r.title}</td>`}
+  ${withPr && html`<td>${prCell(r)}</td>`}
   <td class="nowrap">${kind(r.event)}</td>
   <td>${r.focuses.length ? r.focuses.map((f, i) => html`${i > 0 && ', '}${f.status === 'failed' ? html`<span class="err">${f.focus} (failed)</span>` : f.focus}`) : '—'}</td>
   <td class="nowrap">${status(r, now)}</td>
@@ -283,8 +293,8 @@ function prList(store: Store, q: URLSearchParams, now: Date) {
 <div class="card"><table class="grid">
 <tr><th>PR</th><th>Latest run</th><th>Verdict</th><th>Last active</th><th class="num">Runs</th><th class="num">Cost</th></tr>
 ${prs.map((p) => html`<tr>
-  <td><a class="ref" href="${prPath(p.repo, p.pr)}">${p.repo}#${p.pr}</a> ${prState(p.prState)} ${p.title}</td>
-  <td class="nowrap"><a class="ref" href="/admin/runs/${p.id}">${p.id}</a> <span class="muted">${kind(p.event)}</span> ${status({ ...p, approved: null }, now)}</td>
+  <td>${prCell(p)}</td>
+  <td class="nowrap"><a class="ref" href="/admin/runs/${p.id}">${p.id}</a> <span class="muted">${kind(p.event)} ·</span> ${status({ ...p, approved: null }, now)}</td>
   <td class="nowrap">${verdict(p.repo, p.pr, p.reviewId, p.approved)}</td>
   <td class="nowrap muted">${since(p.updatedAt, now)} ago</td>
   <td class="num">${p.runs}</td>
