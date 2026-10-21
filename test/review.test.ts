@@ -132,10 +132,10 @@ test('a PR on a repo outside the allowlist is ignored', async () => {
   assert.equal(github.reviews.length, 0);
 });
 
-test('a finding on an unchanged line is omitted and recorded as unanchorable', async () => {
+test('a finding more than two lines from any added line is omitted and recorded as unanchorable', async () => {
   const { pr, github } = setup();
   const model = new ScriptedModel(script([
-    toolCall('report_findings', { findings: [finding(1, 'one is fine actually'), finding(4, 'four is five')] }),
+    toolCall('report_findings', { findings: [finding(7, 'seven is past the edits'), finding(4, 'four is five')] }),
   ]));
   const { app } = testApp({ model, github });
 
@@ -143,7 +143,7 @@ test('a finding on an unchanged line is omitted and recorded as unanchorable', a
   await app.drain();
 
   assert.deepEqual(github.reviews[0]!.review.comments.map((c) => c.line), [4]);
-  assert.deepEqual(app.runs()[0]!.findings.map((f) => [f.line, f.outcome]), [[1, 'unanchorable'], [4, 'published']]);
+  assert.deepEqual(app.runs()[0]!.findings.map((f) => [f.line, f.outcome]), [[7, 'unanchorable'], [4, 'published']]);
 });
 
 test('when the reviewer reports no findings, no review is created', async () => {

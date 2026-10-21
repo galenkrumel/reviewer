@@ -10,6 +10,8 @@ export type Severity = Finding['severity'];
 export const SEVERITIES = ['low', 'medium', 'high', 'critical'] as const satisfies Severity[];
 const rank = (s: Severity) => SEVERITIES.indexOf(s) + 1;
 const MERGE_WINDOW = 3;
+/** How far, in lines, a finding may miss an added line and still be moved onto it. */
+const ANCHOR_TOLERANCE = 2;
 
 interface Thresholds {
   minSeverity: Severity;
@@ -21,8 +23,9 @@ const score = (f: Finding) => rank(f.severity) * f.confidence;
 const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 
 /**
- * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor, cross-reviewer
- * merge, cross-push dedup against `posted` (findings published at earlier heads), then cap.
+ * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor (snapping a miss of one
+ * or two lines onto the nearest added line), cross-reviewer merge, cross-push dedup against `posted` (findings published
+ * at earlier heads), then cap.
  * A published finding names every focus merged into it.
  */
 export function validate(
@@ -37,7 +40,18 @@ export function validate(
     // Threshold first: every other outcome then means a finding worth posting, which approval relies on.
     if (rank(f.severity) < rank(limits.minSeverity) || f.confidence < limits.minConfidence) f.outcome = 'below_threshold';
     else if (isWaived(f)) f.outcome = 'waived';
-    else if (!added?.has(f.line)) f.outcome = 'unanchorable';
+    else if (!added?.has(f.line)) {
+      // Models often miss by a line or two (the blank line above an edit), so snap to the nearest added line, following on a tie.
+      const near = Array.from({ length: ANCHOR_TOLERANCE }, (_, i) => [f.line + i + 1, f.line - i - 1]).flat()
+        .find((l) => added?.has(l));
+      if (near === undefined) f.outcome = 'unanchorable';
+      else {
+        if (f.start_line !== undefined) f.start_line = Math.max(1, f.start_line + near - f.line);
+        f.line = near;
+        // The fix was written for the lines the reviewer named, so it is no longer an exact replacement.
+        f.fix_replaces_anchor = false;
+      }
+    }
     return f;
   });
 
