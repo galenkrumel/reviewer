@@ -89,8 +89,9 @@ test('a finding already posted on an earlier head is not posted again after a pu
   const model = new ScriptedModel({
     orchestrator: [select('correctness'), select('correctness')],
     correctness: [
-      report(f(5, { title: 'Off-by-one in loop' })),
-      report(f(5, { title: 'off by one in loop!' }), f(30, { title: 'new problem' })),
+      report(f(5, { title: 'Off-by-one in loop' }), f(61, { title: 'last line' })),
+      // Line 63 snaps onto line 61, so it is a duplicate too.
+      report(f(5, { title: 'off by one in loop!' }), f(30, { title: 'new problem' }), f(63, { title: 'last line' })),
     ],
     security: [noFindings(), noFindings()],
   });
@@ -106,7 +107,7 @@ test('a finding already posted on an earlier head is not posted again after a pu
 
   assert.equal(github.reviews.length, 2);
   assert.deepEqual(github.reviews[1]!.review.comments.map((c) => c.line), [30]);
-  assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'duplicate'], [30, 'published']]);
+  assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'duplicate'], [30, 'published'], [61, 'duplicate']]);
 });
 
 test('a finding is posted again when the line of its earlier comment no longer exists', async () => {

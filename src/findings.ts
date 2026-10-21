@@ -10,6 +10,8 @@ export type Severity = Finding['severity'];
 export const SEVERITIES = ['low', 'medium', 'high', 'critical'] as const satisfies Severity[];
 const rank = (s: Severity) => SEVERITIES.indexOf(s) + 1;
 const MERGE_WINDOW = 3;
+/** How far, in lines, a finding may miss an added line and still be moved onto it. */
+const ANCHOR_TOLERANCE = 2;
 
 interface Thresholds {
   minSeverity: Severity;
@@ -40,7 +42,8 @@ export function validate(
     else if (isWaived(f)) f.outcome = 'waived';
     else if (!added?.has(f.line)) {
       // Models often miss by a line or two (the blank line above an edit), so snap to the nearest added line, following on a tie.
-      const near = [1, -1, 2, -2].map((d) => f.line + d).find((l) => added?.has(l));
+      const near = Array.from({ length: ANCHOR_TOLERANCE }, (_, i) => [f.line + i + 1, f.line - i - 1]).flat()
+        .find((l) => added?.has(l));
       if (near === undefined) f.outcome = 'unanchorable';
       else {
         if (f.start_line !== undefined) f.start_line = Math.max(1, f.start_line + near - f.line);
