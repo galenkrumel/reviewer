@@ -10,8 +10,8 @@ const PATH = 'src/app.ts';
 // Line 1 is unchanged; lines 2..61 are added.
 const lines = (n: number, v = 0) => Array.from({ length: n }, (_, i) => `const v${i + 1} = ${i + 1 + v};`).join('\n') + '\n';
 
-function setup() {
-  const fx = gitFixture({ [PATH]: 'keep\n' }, { [PATH]: 'keep\n' + lines(60) });
+function setup(base = 'keep\n', head = 'keep\n' + lines(60)) {
+  const fx = gitFixture({ [PATH]: base }, { [PATH]: head });
   const pr = { number: 7, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
   const github = new FakeGitHub();
   github.addPullRequest(REPO, fx.url, pr);
@@ -24,8 +24,11 @@ const f = (line: number, extra: Record<string, unknown> = {}) => ({
 const report = (...findings: unknown[]) => toolCall('report_findings', { findings });
 
 /** One run: the orchestrator picks correctness, security is always on. */
-async function run(correctness: AssistantMessage[], security: AssistantMessage[] = [noFindings()], config: Partial<AppConfig> = {}) {
-  const { pr, github } = setup();
+async function run(
+  correctness: AssistantMessage[], security: AssistantMessage[] = [noFindings()], config: Partial<AppConfig> = {},
+  files?: [base: string, head: string],
+) {
+  const { pr, github } = setup(...(files ?? []));
   const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness, security });
   const { app } = testApp({ model, github, config });
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
@@ -636,14 +639,14 @@ test('an incremental run does not approve on a deletion-only push', async () => 
 
 test('a finding that is dropped rather than posted still blocks approval', async () => {
   const { pr, github } = setup();
-  // Line 1 is unchanged, so the finding can't be anchored; it is above the threshold all the same.
-  const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [report(f(1))], security: [noFindings()] });
+  // Line 64 is three past the last added line, so the finding can't be anchored; it is above the threshold all the same.
+  const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [report(f(64))], security: [noFindings()] });
   const { app } = testApp({ model, github, config: { approveWhenClean: true } });
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
-  assert.deepEqual(outcomes(app.runs()[0]!), [[1, 'unanchorable']]);
+  assert.deepEqual(outcomes(app.runs()[0]!), [[64, 'unanchorable']]);
   assert.equal(github.reviews[0]!.review.event, 'COMMENT');
-  assert.match(github.reviews[0]!.review.body, /1 issue found outside the changed lines, at `src\/app\.ts:1`/);
+  assert.match(github.reviews[0]!.review.body, /1 issue found outside the changed lines, at `src\/app\.ts:64`/);
 });
 
 test('an incremental run does not approve after an earlier run dropped findings for the comment cap', async () => {
@@ -736,16 +739,54 @@ test('a review never has more than max_comments comments, keeping the highest ra
 
 test('every proposed finding is recorded with exactly one outcome', async () => {
   const { record } = await run(
-    [report(f(1), f(10, { severity: 'low' }), f(20), f(40, { confidence: 0.8 }))],
+    [report(f(64), f(10, { severity: 'low' }), f(20), f(40, { confidence: 0.8 }))],
     [report(f(22, { confidence: 0.75 }))],
     { maxComments: 1 },
   );
   assert.deepEqual(record.findings.map((x) => [x.focus, x.line, x.outcome]), [
-    ['correctness', 1, 'unanchorable'],
+    ['correctness', 64, 'unanchorable'],
     ['correctness', 10, 'below_threshold'],
     ['correctness', 20, 'published'],
     ['correctness', 40, 'over_cap'],
     ['security', 22, 'merged'],
+  ]);
+});
+
+test('a finding one or two lines from an added line is posted on the nearest one, the following line on a tie', async () => {
+  // The #47 shape: lines 2 and 6 are added; line 5 is the blank line between a heading and the edited sentence.
+  const base = 'one();\n\n// Switching harness or model\n\nold();\nend();\n';
+  const head = 'one();\nintro();\n\n// Switching harness or model\n\nnew_();\nend();\n';
+  const { comments, record } = await run([report(
+    f(5, { title: 'blank line', start_line: 4, suggested_fix: 'better();', fix_replaces_anchor: true }),
+    f(3, { title: 'after intro' }),
+    f(4, { title: 'tie' }),
+    f(10, { title: 'too far' }),
+  )], undefined, {}, [base, head]);
+  const at = (title: string) => comments.find((c) => c.body.startsWith(`**${title}**`))!;
+
+  assert.equal(at('blank line').line, 6);
+  assert.equal(at('blank line').start_line, undefined);
+  assert.ok(!at('blank line').body.includes('```suggestion'));
+  assert.ok(at('blank line').body.includes('**Suggested fix:**\n\nbetter();'));
+  assert.equal(at('after intro').line, 2);
+  assert.equal(at('tie').line, 6);
+  assert.deepEqual(record.findings.map((x) => [x.title, x.line, x.outcome]), [
+    ['blank line', 6, 'published'], ['after intro', 2, 'published'], ['tie', 6, 'published'], ['too far', 10, 'unanchorable'],
+  ]);
+});
+
+test('a re-anchored finding merges and is capped like any other', async () => {
+  // Line 63 is two past the last added line, 61.
+  const { comments, record } = await run(
+    [report(f(60, { title: 'merged away', confidence: 0.8 }), f(30, { title: 'capped', confidence: 0.7 }))],
+    [report(f(63, { title: 'snapped', severity: 'critical' }))],
+    { maxComments: 1 },
+  );
+  assert.deepEqual(comments.map((c) => c.line), [61]);
+  assert.match(comments[0]!.body, /snapped/);
+  assert.match(comments[0]!.body, /correctness/);
+  assert.deepEqual(record.findings.map((x) => [x.title, x.line, x.outcome]), [
+    ['merged away', 60, 'merged'], ['capped', 30, 'over_cap'], ['snapped', 61, 'published'],
   ]);
 });
 
