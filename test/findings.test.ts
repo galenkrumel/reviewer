@@ -587,7 +587,7 @@ test('a verifier or thread read that fails blocks approval with its own reason',
 test('a run with a new finding says it is not approved because of it', async () => {
   const { review } = await clean({ approveWhenClean: true }, 0, { correctness: [report(f(5))] });
   assert.equal(review?.event, 'COMMENT');
-  assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented inline\./);
+  assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented on\./);
 });
 
 test('an incremental run posts a late finding instead of approving, and does not post it again', async () => {
@@ -608,7 +608,7 @@ test('an incremental run posts a late finding instead of approving, and does not
   // The first run approves; the second finds a real issue on a line the first saw, and posts it like any other.
   assert.deepEqual(github.reviews.map((r) => r.review.event), ['APPROVE', 'COMMENT', 'COMMENT']);
   assert.deepEqual(github.reviews[1]!.review.comments.map((c) => c.line), [5]);
-  assert.match(github.reviews[1]!.review.body, /\*\*Not approved:\*\* 1 new issue commented inline/);
+  assert.match(github.reviews[1]!.review.body, /\*\*Not approved:\*\* 1 new issue commented on/);
   // Reported again on the next push, it was already posted: a duplicate, not a second comment.
   assert.deepEqual(outcomes(app.runs()[2]!), [[5, 'duplicate']]);
   assert.deepEqual(github.reviews[2]!.review.comments, []);
@@ -664,7 +664,7 @@ test('a finding off the added lines of a file in the diff is posted as a file-le
   }]);
   assert.deepEqual(outcomes(record), [[64, 'published']]);
   // It blocks as a new comment, a thread once posted, not as a finding outside the changed lines.
-  assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented inline\./);
+  assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented on\./);
   assert.doesNotMatch(review!.body, /outside the changed lines/);
 });
 
@@ -764,7 +764,7 @@ test('a push after an approval that finds a blocker dismisses the approval with 
   const { github, own } = await afterApproval([report(f(62)), report(f(63))]);
   assert.deepEqual(own.map((r) => r.review.event), ['APPROVE', 'COMMENT', 'COMMENT']);
   // The first non-approving run's reasons; the second run finds the approval already dismissed.
-  assert.equal(own[0]!.dismissed, 'Not approved: 1 new issue commented inline.');
+  assert.equal(own[0]!.dismissed, 'Not approved: 1 new issue commented on.');
   assert.deepEqual(github.dismissals, [own[0]!.id]);
   assert.equal(github.reviews.find((r) => r.foreign)!.dismissed, undefined);
   assert.doesNotMatch(own[1]!.review.body, /could not be dismissed/);
@@ -801,7 +801,7 @@ test('a review never has more than max_comments comments, keeping the highest ra
   assert.equal(comments.length, 10);
   assert.deepEqual(comments.map((c) => c.line).sort((a, b) => a! - b!), proposed.slice(2).map((x) => x.line));
   assert.deepEqual(record.findings.filter((x) => x.outcome === 'over_cap').map((x) => x.line), [2, 7]);
-  assert.match(review!.body, /: 10 issues, commented inline\./);
+  assert.match(review!.body, /: 10 issues, commented on\./);
 
   const capped = await run([report(...proposed)], undefined, { maxComments: 3 });
   assert.deepEqual(capped.comments.map((c) => c.line).sort((a, b) => a! - b!), [47, 52, 57]);

@@ -46,7 +46,7 @@ export interface ReviewThread {
   /** The line at the head revision; null once the code it was posted on has changed, and always on a file-level thread. */
   line: number | null;
   /** Posted on the whole file rather than a line. */
-  fileLevel?: boolean;
+  fileLevel?: true;
   /** The diff hunk the first comment was posted on, as it was then. */
   diffHunk: string;
   /** `association` is GitHub's author_association (OWNER, MEMBER, COLLABORATOR, NONE, ...). */

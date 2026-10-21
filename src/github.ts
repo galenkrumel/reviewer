@@ -64,13 +64,13 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
     listReviews: async (token, repo, number) => (await ownReviews(token, repo, number)).filter((r) => r.state !== 'PENDING'),
     async createReview(token, repo, number, review: NewReview) {
       const path = `/repos/${repo}/pulls/${number}/reviews`;
-      const files = review.comments.filter((c) => 'subject_type' in c);
-      if (!files.length) return { id: (await api(token, 'POST', path, review)).id };
-      // A review's own comments can't be file-level, so: a pending review, its file threads, then submit. GitHub
-      // allows one pending review per user, so one an earlier attempt left is deleted first.
+      // GitHub allows one pending review per user, so one an earlier attempt left would refuse this one: deleted first.
       for (const r of await ownReviews(token, repo, number)) {
         if (r.state === 'PENDING') await api(token, 'DELETE', `${path}/${r.id}`);
       }
+      const files = review.comments.filter((c) => 'subject_type' in c);
+      if (!files.length) return { id: (await api(token, 'POST', path, review)).id };
+      // A review's own comments can't be file-level, so: a pending review, its file threads, then submit.
       const { event, ...pending } = review;
       const r = await api(token, 'POST', path, { ...pending, comments: review.comments.filter((c) => !('subject_type' in c)) });
       for (const c of files) {

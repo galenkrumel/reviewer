@@ -549,7 +549,7 @@ export function createApp(deps: {
     ].filter((b): b is string => typeof b === 'string');
     const blockers = [
       ...unwaivable,
-      ...(comments.length > 0 ? [`${count(comments.length, 'new issue')} commented inline`] : []),
+      ...(comments.length > 0 ? [`${count(comments.length, 'new issue')} commented on`] : []),
       ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
     ];
     const record = {
@@ -813,7 +813,7 @@ function summary(job: Job, count: number, notes: {
         pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\`: `
       + (notes.approve ? 'no issues found, and every earlier comment is resolved or verified fixed. Approved.'
-        : count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented inline.`),
+        : count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented on.`),
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,

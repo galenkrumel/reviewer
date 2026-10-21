@@ -49,7 +49,7 @@ test('the orchestrator selects a subset of focuses, and each selection is record
     ['performance', 'performance matters here', 'succeeded'],
   ]);
   const { body } = reviews[0]!.review;
-  assert.match(body, /: 1 issue, commented inline\.\n\nReviewed for correctness, security, documentation and performance\./);
+  assert.match(body, /: 1 issue, commented on\.\n\nReviewed for correctness, security, documentation and performance\./);
 });
 
 test('documentation runs on a code change with correctness and security, and the cap of 4 leaves room for one pick', async () => {
