@@ -9,7 +9,7 @@ export interface PullRequest {
   baseSha: string;
 }
 
-export interface ReviewComment {
+export type ReviewComment = {
   path: string;
   line: number;
   side: 'RIGHT';
@@ -17,7 +17,16 @@ export interface ReviewComment {
   start_line?: number;
   start_side?: 'RIGHT';
   body: string;
-}
+} | {
+  /** On the whole file: its body names the line. */
+  path: string;
+  subject_type: 'file';
+  line?: never;
+  side?: never;
+  start_line?: never;
+  start_side?: never;
+  body: string;
+};
 
 export interface NewReview {
   commit_id: string;
@@ -34,8 +43,10 @@ export interface ReviewThread {
   /** Who resolved it, when resolved. `association` as on comments below. */
   resolvedBy?: { login: string; association: string };
   path: string;
-  /** The line at the head revision; null once the code it was posted on has changed. */
+  /** The line at the head revision; null once the code it was posted on has changed, and always on a file-level thread. */
   line: number | null;
+  /** Posted on the whole file rather than a line. */
+  fileLevel?: boolean;
   /** The diff hunk the first comment was posted on, as it was then. */
   diffHunk: string;
   /** `association` is GitHub's author_association (OWNER, MEMBER, COLLABORATOR, NONE, ...). */

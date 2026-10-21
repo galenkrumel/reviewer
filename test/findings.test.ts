@@ -55,7 +55,7 @@ test('two reviewers flagging lines within ±3 produce one comment naming both fo
     [report(f(10, { title: 'off by one', confidence: 0.8 }), f(17, { title: 'separate issue' }))],
     [report(f(13, { title: 'unchecked index', severity: 'critical' }))],
   );
-  assert.deepEqual(comments.map((c) => c.line).sort((a, b) => a - b), [13, 17]);
+  assert.deepEqual(comments.map((c) => c.line).sort((a, b) => a! - b!), [13, 17]);
   const merged = comments.find((c) => c.line === 13)!.body;
   assert.match(merged, /unchecked index/);
   assert.match(merged, /security/);
@@ -147,7 +147,7 @@ test('after a push, a late finding on a line an earlier review saw is commented 
 
   assert.deepEqual(outcomes(app.runs()[1]!), [[5, 'published'], [62, 'published']]);
   const { review } = github.reviews[0]!;
-  assert.deepEqual(review.comments.map((c) => c.line).sort((a, b) => a - b), [5, 62]);
+  assert.deepEqual(review.comments.map((c) => c.line).sort((a, b) => a! - b!), [5, 62]);
   assert.ok(review.body.includes(`Focused on changes since \`head@${pr.headSha.slice(0, 7)}\``));
   // The reviewer is told which changes are new, and to focus on them.
   const content = String(model.requestsFor('correctness')[1]!.messages[1]!.content);
@@ -638,16 +638,85 @@ test('an incremental run does not approve on a deletion-only push', async () => 
   assert.match(deleted!.body, /no reviewers ran on this push; add the `ai-review` label for a full review/);
 });
 
-test('a finding that is dropped rather than posted still blocks approval', async () => {
+test('a finding in a file outside the diff is not posted, and blocks approval by its location only', async () => {
   const { pr, github } = setup();
-  // Line 64 is three past the last added line, so the finding can't be anchored; it is above the threshold all the same.
-  const model = new ScriptedModel({ orchestrator: [select('correctness')], correctness: [report(f(64))], security: [noFindings()] });
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness')], correctness: [report(f(64, { path: 'src/other.ts' }))], security: [noFindings()],
+  });
   const { app } = testApp({ model, github, config: { approveWhenClean: true } });
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
   assert.deepEqual(outcomes(app.runs()[0]!), [[64, 'unanchorable']]);
-  assert.equal(github.reviews[0]!.review.event, 'COMMENT');
-  assert.match(github.reviews[0]!.review.body, /1 issue found outside the changed lines, at `src\/app\.ts:64`/);
+  const { review } = github.reviews[0]!;
+  assert.equal(review.event, 'COMMENT');
+  assert.deepEqual(review.comments, []);
+  assert.match(review.body, /1 issue found outside the changed lines, at `src\/other\.ts:64`/);
+  assert.doesNotMatch(review.body, /Line 64 is wrong/);
+});
+
+test('a finding off the added lines of a file in the diff is posted as a file-level comment naming its line', async () => {
+  // Line 64 is three past the last added line, 61, so it can't be anchored or snapped.
+  const { comments, record, review } = await run([report(f(64, { suggested_fix: 'fixed();', fix_replaces_anchor: true }))],
+    undefined, { approveWhenClean: true });
+  assert.deepEqual(comments, [{
+    path: PATH, subject_type: 'file',
+    body: '**issue at 64**\n\n`high` · correctness · line 64, outside the changed lines\n\nLine 64 is wrong.\n\n**Suggested fix:**\n\nfixed();',
+  }]);
+  assert.deepEqual(outcomes(record), [[64, 'published']]);
+  // It blocks as a new comment, a thread once posted, not as a finding outside the changed lines.
+  assert.match(review!.body, /\*\*Not approved:\*\* 1 new issue commented inline\./);
+  assert.doesNotMatch(review!.body, /outside the changed lines/);
+});
+
+test('a file-level thread is re-checked and waived like an inline one, and approval follows it', async () => {
+  const { pr, fx, github } = setup();
+  const model = new ScriptedModel({
+    orchestrator: Array(3).fill(select('correctness')), correctness: [report(f(70)), report(f(70)), report(f(70))],
+    security: Array(3).fill(noFindings()), verifier: [verdict(false)],
+  });
+  const { app } = testApp({ model, github, config: { approveWhenClean: true } });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  // GitHub reports a file-level thread with no line.
+  const thread = github.addThread(REPO, 7, PATH, null, github.reviews[0]!.review.comments[0]!.body);
+  thread.fileLevel = true;
+  let n = 0;
+  const push = async () => {
+    const pushed = { ...pr, headSha: fx.push({ [PATH]: 'keep\n' + lines(60) + `const extra = ${++n};\n` }) };
+    github.addPullRequest(REPO, fx.url, pushed);
+    await app.receive(delivery('pull_request', prPayload('synchronize', REPO, pushed)));
+    await app.drain();
+    return { review: github.reviews.at(-1)!.review, record: app.runs().at(-1)! };
+  };
+
+  // Reported again, it is the thread's finding: not posted twice, and the thread stays open.
+  const kept = await push();
+  const sent = String(model.requestsFor('verifier')[0]!.messages[1]!.content);
+  assert.match(sent, /thread 0: src\/app\.ts \(on the whole file: the comment names the line\)/);
+  assert.doesNotMatch(sent, /outdated/);
+  assert.deepEqual(outcomes(kept.record), [[70, 'duplicate']]);
+  assert.equal(kept.review.event, 'COMMENT');
+  assert.match(kept.review.body, /1 review thread still open, on `src\/app\.ts`/);
+  assert.equal(thread.resolved, false);
+
+  thread.comments.push({ byApp: false, byPrAuthor: false, login: 'octo-maint', association: 'MEMBER', body: 'Waive: intended' });
+  const waived = await push();
+  assert.deepEqual(outcomes(waived.record), [[70, 'waived']]);
+  assert.equal(waived.review.event, 'APPROVE');
+  assert.match(waived.review.body, /Waived by a maintainer:\n- issue at 70 \(`src\/app\.ts`\), waived by octo-maint/);
+});
+
+test('a file-level comment is not posted again after a push while its file is in the diff', async () => {
+  // Line 70 stays clear of the added lines on both heads.
+  const { github, thread, push } = await withThread([report(f(70, { title: 'Stale doc' })), report(f(70, { title: 'stale doc' }))]);
+  github.resolveAs(thread.id, 'octo-maint', 'MEMBER');
+  const first = await push();
+  assert.deepEqual(first.review.comments.map((c) => [c.path, 'subject_type' in c]), [[PATH, true]]);
+  const second = github.reviews.length;
+  const again = await push();
+  assert.deepEqual(outcomes(again.record), [[70, 'duplicate']]);
+  assert.equal(github.reviews.length, second + 1);
+  assert.deepEqual(again.review.comments, []);
 });
 
 test('an incremental run does not approve after an earlier run dropped findings for the comment cap', async () => {
@@ -730,17 +799,17 @@ test('a review never has more than max_comments comments, keeping the highest ra
   const proposed = Array.from({ length: 12 }, (_, i) => f(2 + 5 * i, { confidence: 0.7 + i * 0.02 }));
   const { comments, record, review } = await run([report(...proposed)]);
   assert.equal(comments.length, 10);
-  assert.deepEqual(comments.map((c) => c.line).sort((a, b) => a - b), proposed.slice(2).map((x) => x.line));
+  assert.deepEqual(comments.map((c) => c.line).sort((a, b) => a! - b!), proposed.slice(2).map((x) => x.line));
   assert.deepEqual(record.findings.filter((x) => x.outcome === 'over_cap').map((x) => x.line), [2, 7]);
   assert.match(review!.body, /: 10 issues, commented inline\./);
 
   const capped = await run([report(...proposed)], undefined, { maxComments: 3 });
-  assert.deepEqual(capped.comments.map((c) => c.line).sort((a, b) => a - b), [47, 52, 57]);
+  assert.deepEqual(capped.comments.map((c) => c.line).sort((a, b) => a! - b!), [47, 52, 57]);
 });
 
 test('every proposed finding is recorded with exactly one outcome', async () => {
   const { record } = await run(
-    [report(f(64), f(10, { severity: 'low' }), f(20), f(40, { confidence: 0.8 }))],
+    [report(f(64, { path: 'src/other.ts' }), f(10, { severity: 'low' }), f(20), f(40, { confidence: 0.8 }))],
     [report(f(22, { confidence: 0.75 }))],
     { maxComments: 1 },
   );
@@ -772,8 +841,10 @@ test('a finding one or two lines from an added line is posted on the nearest one
   assert.equal(at('after intro').line, 2);
   assert.equal(at('tie').line, 6);
   assert.deepEqual(record.findings.map((x) => [x.title, x.line, x.outcome]), [
-    ['blank line', 6, 'published'], ['after intro', 2, 'published'], ['tie', 6, 'published'], ['too far', 10, 'unanchorable'],
+    ['blank line', 6, 'published'], ['after intro', 2, 'published'], ['tie', 6, 'published'], ['too far', 10, 'published'],
   ]);
+  // Too far to snap: posted on the file instead.
+  assert.ok('subject_type' in at('too far'));
 });
 
 test('a re-anchored finding merges and is capped like any other', async () => {

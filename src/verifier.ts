@@ -55,7 +55,8 @@ const role = (c: ReviewThread['comments'][number]) => c.byApp ? 'reviewer'
 
 export async function runVerifier(opts: { chat: Chat; maxTurns: number; source: Source; threads: ReviewThread[] }): Promise<Verdict[]> {
   const threads = opts.threads.map((t, i) => [
-    `thread ${i}: ${t.path}${t.line === null ? ' (outdated: the code it was posted on has changed)' : `:${t.line}`}`,
+    `thread ${i}: ${t.path}${t.fileLevel ? ' (on the whole file: the comment names the line)'
+      : t.line === null ? ' (outdated: the code it was posted on has changed)' : `:${t.line}`}`,
     'posted on:', t.diffHunk,
     ...t.comments.map((c) => `${role(c)}:\n${c.body.slice(0, MAX_BODY)}`),
   ].join('\n')).join('\n\n');

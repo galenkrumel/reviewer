@@ -40,6 +40,17 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
   let botLogin: Promise<string> | undefined;
   const ownLogin = () => (botLogin ??= api(appJwt(), 'GET', '/app').then((a) => `${a.slug}[bot]`));
 
+  /** This app's reviews on the PR, pending ones included. Every page: the idempotency marker check must see them all. */
+  async function ownReviews(token: string, repo: string, number: number) {
+    const login = await ownLogin();
+    const out: { id: number; body: string; state: string }[] = [];
+    for (let page = 1; ; page++) {
+      const reviews = await api(token, 'GET', `/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`);
+      for (const r of reviews) if (r.user?.login === login) out.push({ id: r.id, body: r.body ?? '', state: r.state });
+      if (reviews.length < 100) return out;
+    }
+  }
+
   return {
     async mintToken(installationId) {
       return (await api(appJwt(), 'POST', `/app/installations/${installationId}/access_tokens`)).token;
@@ -49,18 +60,25 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       const pr = await api(token, 'GET', `/repos/${repo}/pulls/${number}`);
       return { number: pr.number, state: pr.state, draft: pr.draft, headSha: pr.head.sha, baseSha: pr.base.sha };
     },
-    async listReviews(token, repo, number) {
-      // Every page: the idempotency marker check must see all of the PR's reviews.
-      const login = await ownLogin();
-      const out: { id: number; body: string; state: string }[] = [];
-      for (let page = 1; ; page++) {
-        const reviews = await api(token, 'GET', `/repos/${repo}/pulls/${number}/reviews?per_page=100&page=${page}`);
-        for (const r of reviews) if (r.user?.login === login) out.push({ id: r.id, body: r.body ?? '', state: r.state });
-        if (reviews.length < 100) return out;
-      }
-    },
+    // A pending review is one createReview didn't finish: it never counts as posted.
+    listReviews: async (token, repo, number) => (await ownReviews(token, repo, number)).filter((r) => r.state !== 'PENDING'),
     async createReview(token, repo, number, review: NewReview) {
-      const r = await api(token, 'POST', `/repos/${repo}/pulls/${number}/reviews`, review);
+      const path = `/repos/${repo}/pulls/${number}/reviews`;
+      const files = review.comments.filter((c) => 'subject_type' in c);
+      if (!files.length) return { id: (await api(token, 'POST', path, review)).id };
+      // A review's own comments can't be file-level, so: a pending review, its file threads, then submit. GitHub
+      // allows one pending review per user, so one an earlier attempt left is deleted first.
+      for (const r of await ownReviews(token, repo, number)) {
+        if (r.state === 'PENDING') await api(token, 'DELETE', `${path}/${r.id}`);
+      }
+      const { event, ...pending } = review;
+      const r = await api(token, 'POST', path, { ...pending, comments: review.comments.filter((c) => !('subject_type' in c)) });
+      for (const c of files) {
+        await graphql(token, `mutation($review: ID!, $path: String!, $body: String!) {
+          addPullRequestReviewThread(input: { pullRequestReviewId: $review, path: $path, body: $body, subjectType: FILE }) { thread { id } } }`,
+        { review: r.node_id, path: c.path, body: c.body });
+      }
+      await api(token, 'POST', `${path}/${r.id}/events`, { event, body: review.body });
       return { id: r.id };
     },
     async dismissReview(token, repo, number, reviewId, message) {
@@ -78,7 +96,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
             author { login } authorAssociation
             reviewThreads(first: 50, after: $after) {
               pageInfo { hasNextPage endCursor }
-              nodes { id isResolved resolvedBy { login } path line comments(first: 50) { nodes { author { login } authorAssociation body diffHunk } } }
+              nodes { id isResolved resolvedBy { login } path line subjectType comments(first: 50) { nodes { author { login } authorAssociation body diffHunk } } }
             } } } }`, { owner, name, number, after });
         const prAuthor = data.repository.pullRequest.author?.login;
         // GraphQL gives no association for a thread's resolver. Only the PR's author or someone with write access
@@ -97,7 +115,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
           if (!byApp(comments[0]?.author?.login)) continue;
           out.push({
             id: t.id, resolved: t.isResolved, ...(t.isResolved && { resolvedBy: resolver(t.resolvedBy?.login) }),
-            path: t.path, line: t.line ?? null, diffHunk: comments[0].diffHunk ?? '',
+            path: t.path, line: t.line ?? null, ...(t.subjectType === 'FILE' && { fileLevel: true }), diffHunk: comments[0].diffHunk ?? '',
             comments: comments.map((c: any) => ({
               byApp: byApp(c.author?.login), login: c.author?.login ?? 'ghost', byPrAuthor: !!prAuthor && c.author?.login === prAuthor,
               association: c.authorAssociation ?? 'NONE', body: c.body ?? '',
