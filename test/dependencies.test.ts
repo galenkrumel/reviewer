@@ -111,6 +111,17 @@ test('a version whose source or integrity changed in any place it is installed i
     [['a', '1.0.0', '1.0.0', 'https://evil.example/a.tgz']]);
 });
 
+test('a new version installed from two different sources reports the odd one out', () => {
+  const head = lock({
+    'node_modules/a': pkg('2.0.0'),
+    'node_modules/b/node_modules/a': pkg('2.0.0', { resolved: 'https://evil.example/a.tgz', integrity: 'sha512-evil' }),
+  });
+  assert.deepEqual(compareLockfile(lock({ 'node_modules/a': pkg('1.0.0') }), head)?.map((c) => [c.from, c.to, c.resolved]), [
+    ['1.0.0', '2.0.0', 'https://registry.npmjs.org/x/-/x-2.0.0.tgz'],
+    ['2.0.0', '2.0.0', 'https://evil.example/a.tgz'],
+  ]);
+});
+
 test('unparseable text, a v1 lockfile or a missing packages map on either side is not understood', () => {
   const ok = lock({ 'node_modules/a': pkg('1.0.0') });
   for (const bad of ['{', '{}', '[]', 'null', lock({}, 1), JSON.stringify({ lockfileVersion: 3, packages: [] }),

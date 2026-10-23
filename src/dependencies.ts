@@ -163,10 +163,11 @@ export function compareLockfile(base: string | undefined, head: string | undefin
       const [from, to] = [removed[i], added[i]];
       push(to !== undefined ? is.get(to)![0]! : was.get(from!)![0]!, from, to);
     }
-    // The same version from somewhere new, in any place it is installed: a swapped tarball is not "unmoved".
-    for (const [v, entries] of is) {
-      const before = new Set(was.get(v)?.map(source));
-      const swapped = before.size > 0 && entries.find((e) => !before.has(source(e)));
+    // The same version from somewhere new, in any place it is installed: a swapped tarball is not "unmoved". A version
+    // the base didn't have is held to its own first install, which the move above reported.
+    for (const [v, installs] of is) {
+      const known = new Set(was.get(v)?.map(source) ?? [source(installs[0]!)]);
+      const swapped = installs.find((e) => !known.has(source(e)));
       if (swapped) push(swapped, v, v);
     }
   }
