@@ -668,6 +668,14 @@ test('a finding off the added lines of a file in the diff is posted as a file-le
   assert.doesNotMatch(review!.body, /outside the changed lines/);
 });
 
+test('a file-level finding near an inline one from another focus is posted separately, not merged', async () => {
+  const { comments, record } = await run(
+    [report(f(64, { title: 'off the diff', severity: 'medium' }))], [report(f(61, { title: 'on the diff' }))],
+  );
+  assert.deepEqual(comments.map((c) => ('line' in c ? c.line : 'file')), ['file', 61]);
+  assert.deepEqual(outcomes(record), [[64, 'published'], [61, 'published']]);
+});
+
 test('a file-level thread is re-checked and waived like an inline one, and approval follows it', async () => {
   const { pr, fx, github } = setup();
   const model = new ScriptedModel({
