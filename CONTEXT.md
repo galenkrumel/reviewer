@@ -31,6 +31,14 @@ _Avoid_: Admin panel, console
 One kind of review a Run can ask for: correctness, security, performance, architecture, conciseness or documentation. Each selected focus runs as its own reviewer. The orchestrator selects focuses; it cannot add new ones.
 _Avoid_: Reviewer type, authorize (for selecting a focus)
 
+**Dependency check**:
+The part of a Run that compares a PR's lockfiles at base and head and looks up known advisories for the packages that changed. It is not a Focus: no model runs it and the orchestrator cannot skip it. The security focus is given what it found.
+_Avoid_: Dependency review (that's what the security focus does with it), audit
+
+**Advisory**:
+A published report that a range of a package's versions is vulnerable, with its own severity. Relative to a PR, an Advisory is **introduced** (open against a version the PR moves to or adds, and not against the version it replaced), **still open** (open before and after), or **fixed** (open before, not after). Only an introduced Advisory is a Finding, at the Advisory's own severity; a model never lowers it, and a Maintainer can waive it.
+_Avoid_: Vulnerability, CVE (one Advisory may carry several IDs)
+
 **Doc drift**:
 A statement in the repository's documentation that a PR makes false: prose files or doc comments that still describe the behavior, names, paths, config or commands the PR changed. Documentation that was already wrong before the PR is not doc drift.
 _Avoid_: Stale docs (it doesn't separate what this PR broke from older debt)
