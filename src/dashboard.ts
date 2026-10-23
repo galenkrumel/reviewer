@@ -1,7 +1,7 @@
 // The operator's read-only Dashboard of Runs: server-rendered HTML behind Basic auth, no client script.
 import { createHash, timingSafeEqual } from 'node:crypto';
-import type { DependencyCheck, PackageChange } from './dependencies.ts';
-import { isRedecision,type openStore, type PrState, type RunStatus } from './store.ts';
+import { describeMove, type DependencyCheck } from './dependencies.ts';
+import { isRedecision, type openStore, type PrState, type RunStatus } from './store.ts';
 
 type Store = ReturnType<typeof openStore>;
 
@@ -327,13 +327,12 @@ ${waivers.length > 0 && html`<h2>Waived on this PR</h2>
 function dependencySection(d: DependencyCheck) {
   const rows = d.lockfiles.flatMap(({ path, changes }) => (changes.length ? changes : [undefined]).map((c) => ({ path, c })));
   if (!rows.length && !d.unreadable.length && !d.unchecked.length) return;
-  const move = (c: PackageChange) => c.from === undefined ? `${c.to} (added)` : c.to === undefined ? `${c.from} (removed)` : `${c.from} → ${c.to}`;
   const paths = (title: string, list: string[], tone = '') => list.length > 0
     && html`<p class="${tone}">${title}: ${list.map((p, i) => html`${i > 0 && ', '}<code>${p}</code>`)}</p>`;
   return html`<h2>Dependency check</h2>
 ${rows.length > 0 && html`<div class="card"><table class="grid"><tr><th>Lockfile</th><th>Package</th><th>Change</th></tr>
 ${rows.map(({ path, c }) => html`<tr><td><code>${path}${c?.line !== undefined ? `:${c.line}` : ''}</code></td>${
-  c ? html`<td>${c.name}</td><td>${move(c)}</td>` : html`<td class="muted" colspan="2">no packages moved</td>`}</tr>`)}</table></div>`}
+  c ? html`<td>${c.name}</td><td>${describeMove(c)}</td>` : html`<td class="muted" colspan="2">no packages moved</td>`}</tr>`)}</table></div>`}
 ${paths('Not understood, blocking approval', d.unreadable, 'err')}
 ${paths('Not checked (format not supported yet)', d.unchecked)}`;
 }

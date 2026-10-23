@@ -3,7 +3,10 @@ import { posix } from 'node:path';
 import { ToolError, type FileChange, type Source } from './git.ts';
 import { LOCKFILES } from './scope.ts';
 
-/** One package the PR added, removed, or moved from one version to another, counted once per lockfile. */
+/**
+ * One package the PR added, removed, or moved from one version to another (or to the same version from a new source
+ * or integrity: `from` equals `to`), counted once per lockfile.
+ */
 export interface PackageChange {
   name: string;
   /** The version the PR replaced or removed; unset for an added package. */
@@ -12,11 +15,17 @@ export interface PackageChange {
   to?: string;
   /** Where it resolved from, at head (at base for a removed package). Unset for a bundled package. */
   resolved?: string;
+  /** Its lockfile integrity hash, from the same side as `resolved`. */
   integrity?: string;
   /** Its `"version"` line at head; unset for a removed package. */
   line?: number;
 }
 
+/** "3.4.11 → 3.4.17", "2.0.0 (added)" or "1.0.0 (removed)". */
+export const describeMove = (c: PackageChange) => c.from === undefined ? `${c.to} (added)`
+  : c.to === undefined ? `${c.from} (removed)` : c.from === c.to ? `${c.to} (source or integrity changed)` : `${c.from} → ${c.to}`;
+
+/** What the Dependency check found on one Run. */
 export interface DependencyCheck {
   /** Each supported lockfile compared, with its package changes (none for a reformat). */
   lockfiles: { path: string; changes: PackageChange[] }[];
@@ -49,7 +58,9 @@ function entries(text: string | undefined): Entry[] | undefined {
   for (const [key, e] of Object.entries<any>(packages)) {
     if (typeof e !== 'object' || e === null) return;
     const at = key.lastIndexOf('node_modules/');
-    if (at < 0 || e.link || typeof e.version !== 'string') continue;
+    if (at < 0 || e.link) continue;
+    // An installed package always records its version: one without is not a lockfile the check understands.
+    if (typeof e.version !== 'string') return;
     // An `npm:` alias is installed under its alias and records the real name.
     const name = typeof e.name === 'string' ? e.name : key.slice(at + 'node_modules/'.length);
     out.push({ name, version: e.version, resolved: str(e.resolved), integrity: str(e.integrity), key });
@@ -59,16 +70,18 @@ function entries(text: string | undefined): Entry[] | undefined {
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
 
-/** Each name's versions, with the first entry seen for each version. */
-function byName(list: Entry[]): Map<string, Map<string, Entry>> {
-  const out = new Map<string, Map<string, Entry>>();
+/** Each name's versions, with every entry installing each version. */
+function byName(list: Entry[]): Map<string, Map<string, Entry[]>> {
+  const out = new Map<string, Map<string, Entry[]>>();
   for (const e of list) {
-    const versions = out.get(e.name) ?? new Map<string, Entry>();
-    if (!versions.has(e.version)) versions.set(e.version, e);
+    const versions = out.get(e.name) ?? new Map<string, Entry[]>();
+    versions.set(e.version, [...versions.get(e.version) ?? [], e]);
     out.set(e.name, versions);
   }
   return out;
 }
+
+const source = (e: Entry) => `${e.resolved} ${e.integrity}`;
 
 /**
  * The line of each package key's first `"version"`, as npm writes lockfiles: one key per line, version before any
@@ -115,12 +128,15 @@ export async function checkDependencies(
   return check;
 }
 
-const byVersion =(a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
+// ponytail: numeric string order, so a prerelease sorts after its release; only pairing of several moves of one name
+// depends on it. Compare by semver if mispaired moves show up.
+const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
 
 /**
  * The packages a lockfile change added, removed or moved, by name then version, or undefined when either side isn't
  * a lockfile the check understands. Undefined text is a side where the lockfile doesn't exist. A name's removed and
- * added versions pair up in version order as moves; the rest are added or removed.
+ * added versions pair up in version order as moves; the rest are added or removed. A version on both sides that some
+ * install now resolves from elsewhere, or with another integrity, is a change from that version to itself.
  */
 export function compareLockfile(base: string | undefined, head: string | undefined): PackageChange[] | undefined {
   const [before, after] = [entries(base), entries(head)];
@@ -129,18 +145,24 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   const lines = head === undefined ? new Map<string, number>() : versionLines(head);
   const changes: PackageChange[] = [];
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
-    const was = old.get(name) ?? new Map<string, Entry>();
-    const is = now.get(name) ?? new Map<string, Entry>();
+    const was = old.get(name) ?? new Map<string, Entry[]>();
+    const is = now.get(name) ?? new Map<string, Entry[]>();
+    const push = (e: Entry, from?: string, to?: string) => changes.push({
+      name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
+      ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
+      ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
+    });
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
     const added = [...is.keys()].filter((v) => !was.has(v)).sort(byVersion);
     for (let i = 0; i < Math.max(removed.length, added.length); i++) {
       const [from, to] = [removed[i], added[i]];
-      const e = to !== undefined ? is.get(to)! : was.get(from!)!;
-      changes.push({
-        name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
-        ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
-        ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
-      });
+      push(to !== undefined ? is.get(to)![0]! : was.get(from!)![0]!, from, to);
+    }
+    // The same version from somewhere new, in any place it is installed: a swapped tarball is not "unmoved".
+    for (const [v, entries] of is) {
+      const before = new Set(was.get(v)?.map(source));
+      const swapped = before.size > 0 && entries.find((e) => !before.has(source(e)));
+      if (swapped) push(swapped, v, v);
     }
   }
   return changes;

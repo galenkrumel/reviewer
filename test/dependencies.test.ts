@@ -101,10 +101,20 @@ test('a reformatted lockfile, or one whose metadata changed, moves no packages',
   assert.deepEqual(compareLockfile(base, JSON.stringify(parsed, null, 4)), []);
 });
 
+test('a version whose source or integrity changed in any place it is installed is reported, not passed as unmoved', () => {
+  const base = lock({ 'node_modules/a': pkg('1.0.0'), 'node_modules/b/node_modules/a': pkg('1.0.0') });
+  const head = lock({
+    'node_modules/a': pkg('1.0.0'),
+    'node_modules/b/node_modules/a': pkg('1.0.0', { resolved: 'https://evil.example/a.tgz', integrity: 'sha512-evil' }),
+  });
+  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.name, c.from, c.to, c.resolved]),
+    [['a', '1.0.0', '1.0.0', 'https://evil.example/a.tgz']]);
+});
+
 test('unparseable text, a v1 lockfile or a missing packages map on either side is not understood', () => {
   const ok = lock({ 'node_modules/a': pkg('1.0.0') });
   for (const bad of ['{', '{}', '[]', 'null', lock({}, 1), JSON.stringify({ lockfileVersion: 3, packages: [] }),
-    JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/a': 'x' } })]) {
+    JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/a': 'x' } }), lock({ 'node_modules/a': { resolved: 'x' } })]) {
     assert.equal(compareLockfile(bad, ok), undefined, bad);
     assert.equal(compareLockfile(ok, bad), undefined, bad);
   }

@@ -134,7 +134,8 @@ export async function openSource(opts: {
     if (!e) return undefined;
     if (e.mode === SYMLINK_MODE) throw new ToolError(`${path} is a symlink`);
     if (e.type !== 'blob') throw new ToolError(`${path} is not a file`);
-    if (Number(await git('cat-file', '-s', e.oid)) > maxBytes) throw new ToolError(`${path} is over ${maxBytes / 1024} KiB`);
+    const limit = maxBytes >= 1024 * 1024 ? `${maxBytes / 1024 / 1024} MiB` : `${maxBytes / 1024} KiB`;
+    if (Number(await git('cat-file', '-s', e.oid)) > maxBytes) throw new ToolError(`${path} is over ${limit}`);
     return git('cat-file', 'blob', e.oid);
   }
   let mergeBase: Promise<string> | undefined;

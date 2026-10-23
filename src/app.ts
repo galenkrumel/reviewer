@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { createDashboard } from './dashboard.ts';
-import { checkDependencies, type DependencyCheck, type PackageChange } from './dependencies.ts';
+import { checkDependencies, describeMove, type DependencyCheck, type PackageChange } from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import { absorbed, sanitize, stillReported, threadTitle, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
@@ -810,8 +810,7 @@ function outcomes(findings: { outcome: string }[]): Record<string, number> {
  * had nothing to look at.
  */
 function dependencyLines(check: DependencyCheck): string[] {
-  const move = (c: PackageChange) => c.from === undefined ? `${c.name} ${c.to} (added)`
-    : c.to === undefined ? `${c.name} ${c.from} (removed)` : `${c.name} ${c.from} → ${c.to}`;
+  const move = (c: PackageChange) => `${c.name} ${describeMove(c)}`;
   return [
     ...capped(check.lockfiles.map(({ path, changes }) => changes.length === 0
       ? `Dependencies in ${pathList([path], '', 1)}: no packages moved.`
