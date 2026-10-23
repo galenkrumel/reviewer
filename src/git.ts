@@ -65,10 +65,10 @@ export interface Source {
   /** A regular file at the base SHA, or undefined if there is none. Throws ToolError for a symlink, directory or oversized file. */
   fileAtBase(path: string): Promise<string | undefined>;
   /**
-   * A changed file's text on each side of the PR diff: at the merge-base (under its old path, if renamed) and at head.
-   * A side is undefined where the file doesn't exist. Throws ToolError for a symlink, directory or file over 32 MiB.
+   * A file's text on one side of the PR diff: `base` is the merge-base, `head` the head. Undefined where the file
+   * doesn't exist. Throws ToolError for a symlink, directory or file over 32 MiB.
    */
-  bothSides(file: FileChange): Promise<{ base?: string; head?: string }>;
+  fileAtSide(side: 'base' | 'head', path: string): Promise<string | undefined>;
 }
 
 // ponytail: fixed cap on grep output lines; make it a budget when per-agent budgets land.
@@ -213,13 +213,11 @@ export async function openSource(opts: {
 
     fileAtBase: (path) => fileAt(path, baseSha, MAX_BASE_FILE_BYTES),
 
-    async bothSides(file) {
+    async fileAtSide(side, path) {
+      if (side === 'head') return fileAt(path, headSha, MAX_SIDE_BYTES);
       // The PR diff is base...head, so its base side is the merge-base: main's later changes aren't the PR's.
       mergeBase ??= git('merge-base', baseSha, headSha).then((out) => out.trim());
-      return {
-        base: await fileAt(file.oldPath ?? file.path, await mergeBase, MAX_SIDE_BYTES),
-        head: await fileAt(file.path, headSha, MAX_SIDE_BYTES),
-      };
+      return fileAt(path, await mergeBase, MAX_SIDE_BYTES);
     },
 
     async readFile(path, start, end) {

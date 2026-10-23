@@ -113,7 +113,7 @@ function versionLines(text: string): Map<string, number> {
  * A lockfile too big or odd to read (a symlink) is as unreadable as one that doesn't parse.
  */
 export async function checkDependencies(
-  files: FileChange[], excluded: ReadonlySet<string>, read: Source['bothSides'],
+  files: FileChange[], excluded: ReadonlySet<string>, read: Source['fileAtSide'],
 ): Promise<DependencyCheck> {
   const check: DependencyCheck = { lockfiles: [], unreadable: [], unchecked: [] };
   // A rename that changes the file's name (package-lock.json to yarn.lock, or to some other file) is a deletion and an
@@ -123,7 +123,7 @@ export async function checkDependencies(
   for (const f of sides) {
     const name = posix.basename(f.path);
     // Each side counts only where it isn't excluded: moved out of an excluded path, every package is new; moved into
-    // one, every package left. An excluded side is never parsed.
+    // one, every package left. An excluded side is never read.
     const old = f.oldPath ?? f.path;
     const [useBase, useHead] = [!excluded.has(old), !excluded.has(f.path)];
     if (!LOCKFILES.has(name) || (!useBase && !useHead)) continue;
@@ -131,8 +131,7 @@ export async function checkDependencies(
     if (!SUPPORTED.has(name)) { check.unchecked.push(path); continue; }
     let changes: PackageChange[] | undefined;
     try {
-      const { base, head } = await read(f);
-      changes = compareLockfile(useBase ? base : undefined, useHead ? head : undefined);
+      changes = compareLockfile(useBase ? await read('base', old) : undefined, useHead ? await read('head', f.path) : undefined);
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
     }

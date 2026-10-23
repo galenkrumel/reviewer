@@ -449,7 +449,7 @@ export function createApp(deps: {
       binary: scope.binary.length, lines: scope.reviewableLines, ...(since !== undefined && { since: since.slice(0, 7) }),
     });
     // Lockfiles stay out of line review and the budget; the Dependency check compares them in full on every run.
-    const dependencies = await checkDependencies(files, excluded, source.bothSides);
+    const dependencies = await checkDependencies(files, excluded, source.fileAtSide);
     progress(job, 'dependencies checked', {
       lockfiles: dependencies.lockfiles.length, changes: dependencies.lockfiles.reduce((n, l) => n + l.changes.length, 0),
       unreadable: dependencies.unreadable.length, unchecked: dependencies.unchecked.length,

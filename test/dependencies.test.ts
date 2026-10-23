@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AppConfig } from '../src/app.ts';
-import { compareLockfile } from '../src/dependencies.ts';
+import { checkDependencies, compareLockfile, describeMove } from '../src/dependencies.ts';
+import { ToolError } from '../src/git.ts';
 import { delivery, FakeGitHub, gitFixture, openedPayload, prPayload, ScriptedModel, testApp } from './harness.ts';
 
 /** A lockfile as npm writes it: two-space indentation, one key per line. */
@@ -148,6 +149,22 @@ test('unparseable text, a v1 lockfile or a missing packages map on either side i
     assert.equal(compareLockfile(bad, ok), undefined, bad);
     assert.equal(compareLockfile(ok, bad), undefined, bad);
   }
+});
+
+test('an excluded side of a moved lockfile is never read, so it cannot make the lockfile unreadable', async () => {
+  const text = lock({ 'node_modules/a': pkg('1.0.0') });
+  const reads: string[] = [];
+  const check = await checkDependencies(
+    [{ path: 'app/package-lock.json', oldPath: 'fixtures/package-lock.json', added: 0, deleted: 0 }],
+    new Set(['fixtures/package-lock.json']),
+    async (side, path) => {
+      reads.push(`${side}:${path}`);
+      if (path.startsWith('fixtures/')) throw new ToolError(`${path} is a symlink`);
+      return text;
+    },
+  );
+  assert.deepEqual(reads, ['head:app/package-lock.json']);
+  assert.deepEqual(check.lockfiles.map((l) => [l.path, l.changes.map((c) => describeMove(c))]), [['app/package-lock.json', ['1.0.0 (added)']]]);
 });
 
 // Through the harness: what a Maintainer sees in the Review, and what the Run records.
