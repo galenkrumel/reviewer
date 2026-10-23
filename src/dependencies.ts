@@ -109,7 +109,7 @@ function versionLines(text: string): Map<string, number> {
 
 /**
  * Compare every changed lockfile that per-repo `exclude` globs and `.gitattributes` marks (`excluded`, holding old and
- * new paths) leave in at both of its paths.
+ * new paths) leave in, on the side or sides they leave in.
  * A lockfile too big or odd to read (a symlink) is as unreadable as one that doesn't parse.
  */
 export async function checkDependencies(
@@ -122,17 +122,22 @@ export async function checkDependencies(
     ? [{ path: f.oldPath, added: 0, deleted: 0 }, { path: f.path, added: 0, deleted: 0 }] : [f]);
   for (const f of sides) {
     const name = posix.basename(f.path);
-    if (!LOCKFILES.has(name) || excluded.has(f.path) || (f.oldPath !== undefined && excluded.has(f.oldPath))) continue;
-    if (!SUPPORTED.has(name)) { check.unchecked.push(f.path); continue; }
+    // Each side counts only where it isn't excluded: moved out of an excluded path, every package is new; moved into
+    // one, every package left. An excluded side is never parsed.
+    const old = f.oldPath ?? f.path;
+    const [useBase, useHead] = [!excluded.has(old), !excluded.has(f.path)];
+    if (!LOCKFILES.has(name) || (!useBase && !useHead)) continue;
+    const path = useHead ? f.path : old;
+    if (!SUPPORTED.has(name)) { check.unchecked.push(path); continue; }
     let changes: PackageChange[] | undefined;
     try {
       const { base, head } = await read(f);
-      changes = compareLockfile(base, head);
+      changes = compareLockfile(useBase ? base : undefined, useHead ? head : undefined);
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
     }
-    if (changes) check.lockfiles.push({ path: f.path, changes });
-    else check.unreadable.push(f.path);
+    if (changes) check.lockfiles.push({ path, changes });
+    else check.unreadable.push(path);
   }
   return check;
 }
@@ -169,13 +174,14 @@ export function compareLockfile(base: string | undefined, head: string | undefin
       push(to !== undefined ? is.get(to)![0]! : was.get(from!)![0]!, from, to);
     }
     // The same version from somewhere new, in any place it is installed: a swapped tarball is not "unmoved". An install
-    // is held to the base's install at the same place when that had this version, else to every base install of it; a
+    // is held to the base's install at the same place when that was this package at this version (an alias can change
+    // what a place holds), else to every base install of it; a
     // version the base didn't have is held to its own first install, which the move above reported.
     for (const [v, installs] of is) {
       const known = new Set(was.get(v)?.map(source) ?? [source(installs[0]!)]);
       const swapped = installs.find((e) => {
         const there = atKey.get(e.key);
-        return there?.version === v ? source(there) !== source(e) : !known.has(source(e));
+        return there?.name === name && there.version === v ? source(there) !== source(e) : !known.has(source(e));
       });
       if (swapped) push(swapped, v, v);
     }

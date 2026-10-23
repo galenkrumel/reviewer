@@ -118,6 +118,18 @@ test('two installs of one version swapping sources is reported, though the set o
   assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.from, c.to, c.resolved]), [['1.0.0', '1.0.0', evil.resolved]]);
 });
 
+test('an install is only held to the base install at its place when that was the same package', () => {
+  const evil = { resolved: 'https://evil.example/b.tgz', integrity: 'sha512-evil' };
+  // At base, x is an alias of a, from the evil source; b@1.0.0 is installed elsewhere from the registry.
+  const base = lock({ 'node_modules/x': pkg('1.0.0', { name: 'a', ...evil }), 'node_modules/b': pkg('1.0.0') });
+  // At head, x aliases b instead, from that same evil source.
+  const head = lock({ 'node_modules/x': pkg('1.0.0', { name: 'b', ...evil }), 'node_modules/b': pkg('1.0.0') });
+  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.name, c.from, c.to, c.resolved]), [
+    ['a', '1.0.0', undefined, evil.resolved],
+    ['b', '1.0.0', '1.0.0', evil.resolved],
+  ]);
+});
+
 test('a new version installed from two different sources reports the odd one out', () => {
   const head = lock({
     'node_modules/a': pkg('2.0.0'),
@@ -214,16 +226,15 @@ test('lockfiles excluded by repo config or .gitattributes are not checked and no
   assert.deepEqual(record.dependencies, { lockfiles: [], unreadable: [], unchecked: [] });
 });
 
-test('a lockfile moved out of an excluded path is still excluded', async () => {
-  const fixture = '{ "not": "a lockfile", "padding": "' + 'x'.repeat(200) + '" }\n';
-  const s = prFor(
-    { '.github/ai-review.yml': 'exclude:\n  - "fixtures/**"\n', 'fixtures/package-lock.json': fixture },
-    { 'fixtures/package-lock.json': null, 'app/package-lock.json': fixture },
-  );
-  const { review, record } = await run(s);
+test('exclusions follow where a moved lockfile ends up: out of an excluded path, all its packages are new', async () => {
+  const text = lock(Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`node_modules/p${i}`, pkg('1.0.0')])));
+  const config = { '.github/ai-review.yml': 'exclude:\n  - "fixtures/**"\n' };
+  const out = await run(prFor({ ...config, 'fixtures/package-lock.json': text }, { 'fixtures/package-lock.json': null, 'app/package-lock.json': text }));
+  assert.match(out.review!.body, /Dependencies changed in `app\/package-lock\.json`:\n- `p0 1\.0\.0 \(added\)`/);
 
-  assert.equal(review, undefined, review?.body);
-  assert.deepEqual(record.dependencies, { lockfiles: [], unreadable: [], unchecked: [] });
+  // Into an excluded path: the packages left the place they were installed from.
+  const into = await run(prFor({ ...config, 'app/package-lock.json': text }, { 'app/package-lock.json': null, 'fixtures/package-lock.json': text }));
+  assert.match(into.review!.body, /Dependencies changed in `app\/package-lock\.json`:\n- `p0 1\.0\.0 \(removed\)`/);
 });
 
 test('an unparseable supported lockfile is named and blocks approval with its own line', async () => {
