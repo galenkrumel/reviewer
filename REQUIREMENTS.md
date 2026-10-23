@@ -18,7 +18,7 @@ The MVP is read-only with respect to source code: it must not build, test, impor
 - An orchestrator that selects specialist reviewers based on the change.
 - Reviewers with read-only, revision-pinned repository tools (§6.2).
 - Per-agent model selection via OpenRouter (§5.4).
-- Findings published as inline comments in one PR review per run.
+- Findings published as inline or file-level comments in one PR review per run.
 - Every run tied to the exact head and base revisions analyzed.
 
 ### Out of scope for the MVP
@@ -303,7 +303,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 5. Reopening or updating a draft PR does not start a review until it is ready.
 6. The orchestrator can select a subset of the six focuses and records a reason for each.
 7. No code from the PR is executed during review.
-8. Published findings are inline comments anchored to changed lines.
+8. Published findings are inline comments anchored to changed lines, or file-level comments naming the line when no changed line is near it in a file in the diff.
 9. An empty result with no summary-worthy notes produces no review.
 10. Duplicate event delivery does not duplicate comments.
 11. If the PR head changes during analysis, the stale run publishes nothing.
