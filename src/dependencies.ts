@@ -92,16 +92,18 @@ const source = (e: Entry) => `${e.resolved} ${e.integrity}`;
 function versionLines(text: string): Map<string, number> {
   const out = new Map<string, number>();
   let key: string | undefined;
-  text.split('\n').forEach((l, i) => {
-    const m = /^\s*("(?:[^"\\]|\\.)*")\s*:/.exec(l);
-    if (!m) return;
+  // Matched in place rather than split into lines: a lockfile can be 32 MiB.
+  let line = 1;
+  let at = 0;
+  for (const m of text.matchAll(/^[ \t]*("(?:[^"\\\n]|\\.)*")[ \t]*:/gm)) {
+    for (; at < m.index; at++) if (text.charCodeAt(at) === 10) line++;
     const k: string = JSON.parse(m[1]!);
     if (k.includes('node_modules/')) key = k;
     else if (k === 'version' && key !== undefined) {
-      if (!out.has(key)) out.set(key, i + 1);
+      if (!out.has(key)) out.set(key, line);
       key = undefined;
     }
-  });
+  }
   return out;
 }
 
@@ -113,22 +115,23 @@ export async function checkDependencies(
   files: FileChange[], excluded: ReadonlySet<string>, read: Source['bothSides'],
 ): Promise<DependencyCheck> {
   const check: DependencyCheck = { lockfiles: [], unreadable: [], unchecked: [] };
-  for (const f of files) {
-    // A rename can turn a lockfile into some other file, or the reverse: only the lockfile side is compared.
-    const [was, is] = [posix.basename(f.oldPath ?? f.path), posix.basename(f.path)];
-    const name = LOCKFILES.has(is) ? is : was;
-    const path = name === is ? f.path : f.oldPath!;
+  // A rename that changes the file's name (package-lock.json to yarn.lock, or to some other file) is a deletion and an
+  // addition, so each side is checked as the kind of file it is. A move that keeps the name compares like an edit.
+  const sides = files.flatMap((f): FileChange[] => f.oldPath && posix.basename(f.oldPath) !== posix.basename(f.path)
+    ? [{ path: f.oldPath, added: 0, deleted: 0 }, { path: f.path, added: 0, deleted: 0 }] : [f]);
+  for (const f of sides) {
+    const name = posix.basename(f.path);
     if (!LOCKFILES.has(name) || excluded.has(f.path)) continue;
-    if (!SUPPORTED.has(name)) { check.unchecked.push(path); continue; }
+    if (!SUPPORTED.has(name)) { check.unchecked.push(f.path); continue; }
     let changes: PackageChange[] | undefined;
     try {
       const { base, head } = await read(f);
-      changes = compareLockfile(was === name ? base : undefined, is === name ? head : undefined);
+      changes = compareLockfile(base, head);
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
     }
-    if (changes) check.lockfiles.push({ path, changes });
-    else check.unreadable.push(path);
+    if (changes) check.lockfiles.push({ path: f.path, changes });
+    else check.unreadable.push(f.path);
   }
   return check;
 }

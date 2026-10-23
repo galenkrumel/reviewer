@@ -239,6 +239,15 @@ test('a lockfile renamed to a name that is not a lockfile has its packages repor
   assert.match(review!.body, /Dependencies changed in `package-lock\.json`:\n- `p0 1\.0\.0 \(removed\)`/);
 });
 
+test('a lockfile renamed to another lockfile format reports the old one removed and names the new one not checked', async () => {
+  const text = lock(Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`node_modules/p${i}`, pkg('1.0.0')])));
+  const s = prFor({ 'package-lock.json': text }, { 'package-lock.json': null, 'yarn.lock': text });
+  const { review } = await run(s);
+
+  assert.match(review!.body, /Dependencies changed in `package-lock\.json`:\n- `p0 1\.0\.0 \(removed\)`/);
+  assert.match(review!.body, /Not checked[^\n]*`yarn\.lock`/);
+});
+
 test("main's later changes to the lockfile are not the PR's", async () => {
   const s = prFor({ 'package-lock.json': lock({ 'node_modules/a': pkg('1.0.0'), 'node_modules/b': pkg('1.0.0') }) },
     { 'package-lock.json': lock({ 'node_modules/a': pkg('1.1.0'), 'node_modules/b': pkg('1.0.0') }) });
