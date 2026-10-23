@@ -419,7 +419,8 @@ export function createApp(deps: {
     const settings = parsed.settings;
     store.recordConfigWarnings(job.id, [...configWarnings, ...parsed.warnings]);
     const files = await source.changedFiles();
-    const paths = files.map((f) => f.path);
+    // Old paths too: the Dependency check reads a moved lockfile at its old path, where an exclusion may match.
+    const paths = files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
     const excluded = await source.markedAtBase(paths);
     for (const p of paths) if (settings.exclude.some((glob) => matchesGlob(p, glob))) excluded.add(p);
     const scope = selectFiles(files, excluded, config.reviewTokenBudget ?? 50_000);

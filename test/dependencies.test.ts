@@ -111,6 +111,13 @@ test('a version whose source or integrity changed in any place it is installed i
     [['a', '1.0.0', '1.0.0', 'https://evil.example/a.tgz']]);
 });
 
+test('two installs of one version swapping sources is reported, though the set of sources is unchanged', () => {
+  const evil = { resolved: 'https://evil.example/a.tgz', integrity: 'sha512-evil' };
+  const base = lock({ 'node_modules/a': pkg('1.0.0'), 'node_modules/b/node_modules/a': pkg('1.0.0', evil) });
+  const head = lock({ 'node_modules/a': pkg('1.0.0', evil), 'node_modules/b/node_modules/a': pkg('1.0.0') });
+  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.from, c.to, c.resolved]), [['1.0.0', '1.0.0', evil.resolved]]);
+});
+
 test('a new version installed from two different sources reports the odd one out', () => {
   const head = lock({
     'node_modules/a': pkg('2.0.0'),
@@ -204,6 +211,18 @@ test('lockfiles excluded by repo config or .gitattributes are not checked and no
 
   assert.equal(review, undefined);
   assert.equal(record.status, 'nothing_to_publish');
+  assert.deepEqual(record.dependencies, { lockfiles: [], unreadable: [], unchecked: [] });
+});
+
+test('a lockfile moved out of an excluded path is still excluded', async () => {
+  const fixture = '{ "not": "a lockfile", "padding": "' + 'x'.repeat(200) + '" }\n';
+  const s = prFor(
+    { '.github/ai-review.yml': 'exclude:\n  - "fixtures/**"\n', 'fixtures/package-lock.json': fixture },
+    { 'fixtures/package-lock.json': null, 'app/package-lock.json': fixture },
+  );
+  const { review, record } = await run(s);
+
+  assert.equal(review, undefined, review?.body);
   assert.deepEqual(record.dependencies, { lockfiles: [], unreadable: [], unchecked: [] });
 });
 

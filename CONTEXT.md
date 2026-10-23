@@ -32,11 +32,11 @@ One kind of review a Run can ask for: correctness, security, performance, archit
 _Avoid_: Reviewer type, authorize (for selecting a focus)
 
 **Dependency check**:
-The part of a Run that compares a PR's lockfiles at base and head and looks up known advisories for the packages that changed. It is not a Focus: no model runs it and the orchestrator cannot skip it. The security focus is given what it found.
+The part of a Run that compares a PR's lockfiles at base and head and looks up known advisories for the packages that changed. It is not a Focus: no model runs it and the orchestrator cannot skip it. The security focus is given what it found. So far it only compares npm lockfiles and lists their package changes; the advisory lookups and the security focus's part are still to come (ADR 0002).
 _Avoid_: Dependency review (that's what the security focus does with it), audit
 
 **Advisory**:
-A published report that a range of a package's versions is vulnerable, with its own severity. Relative to a PR, an Advisory is **introduced** (open against a version the PR moves to or adds, and not against the version it replaced), **still open** (open before and after), or **fixed** (open before, not after). Only an introduced Advisory is a Finding, at the Advisory's own severity; a model never lowers it, and a Maintainer can waive it.
+A published report that a range of a package's versions is vulnerable, with its own severity. Relative to a PR, an Advisory is **introduced** (open against a version the PR moves to or adds, and not against the version it replaced), **still open** (open before and after), or **fixed** (open before, not after). Only an introduced Advisory is a Finding, at the Advisory's own severity; a model never lowers it, and a Maintainer can waive it. Advisories are not looked up yet (ADR 0002).
 _Avoid_: Vulnerability, CVE (one Advisory may carry several IDs)
 
 **Doc drift**:
