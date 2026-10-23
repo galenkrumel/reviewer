@@ -18,7 +18,7 @@ The MVP is read-only with respect to source code: it must not build, test, impor
 - An orchestrator that selects specialist reviewers based on the change.
 - Reviewers with read-only, revision-pinned repository tools (§6.2).
 - Per-agent model selection via OpenRouter (§5.4).
-- Findings published as inline comments in one PR review per run.
+- Findings published as inline or file-level comments in one PR review per run.
 - Every run tied to the exact head and base revisions analyzed.
 
 ### Out of scope for the MVP
@@ -165,11 +165,11 @@ Before publishing, comment text is sanitized: `@`-mentions are neutralized, and 
 ### 7.2 Validation (in code, never trusted to the model)
 
 1. Schema-valid.
-2. The anchor falls on a line added or modified in the reviewed diff. An anchor within 2 lines of such a line in the same file is moved to the nearest one, the following line on a tie, before merge and dedup; a start line moves by the same amount (but not below line 1), and the suggested fix is posted as prose rather than a suggestion block. Anything further is `unanchorable`.
+2. The anchor falls on a line added or modified in the reviewed diff. An anchor within 2 lines of such a line in the same file is moved to the nearest one, the following line on a tie, before merge and dedup; a start line moves by the same amount (but not below line 1), and the suggested fix is posted as prose rather than a suggestion block. Anything further, in a file in the reviewed diff, is posted as a **file-level** comment that names the line it refers to, under the rules below like an inline one, so it too becomes a thread someone can fix, disprove or waive. In a file outside the reviewed diff, which can't take a comment, it is `unanchorable`.
    - **Incremental after a push:** when an earlier head was reviewed, against this base or one of its ancestors (main merged in or rebased onto), with at least one focus run, no failed focus and no file skipped for budget, reviewers see the full diff for context plus the changes since that head (and any file the base changed since that review: merging main in can undo one of main's changes on a line the PR didn't touch since), and are told to focus on those. A focus that didn't run on that review never saw its lines, so it gets the full review instead. A **late finding**, on a line an earlier review saw, is still posted inline under the rules below like any other finding, so it blocks approval as a thread someone can fix, disprove or waive rather than by being held back. A push that adds no lines runs no reviewers. A label re-review, a base that isn't a descendant of the earlier one (a retarget), an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
 3. `severity ≥ medium` **and** `confidence ≥ 0.7`. Both thresholds are configurable.
-4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one, except that a documentation finding never merges with another focus's finding. The higher severity × confidence finding is kept, and all contributing focuses are noted.
-5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff.
+4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one, except that a documentation finding never merges with another focus's finding, and a file-level finding never merges with an inline one. The higher severity × confidence finding is kept, and all contributing focuses are noted.
+5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff (for a file-level comment, its file is still in the reviewed diff).
 6. **Cap:** at most `max_comments` (default 10) per review, ranked by severity × confidence.
 
 Findings that fail validation are omitted from the review. Their outcome (`unanchorable`, `below_threshold`, `merged`, `duplicate`, `over_cap`, `waived`) is recorded in run metadata.
@@ -186,9 +186,9 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 ### 9.1 When to post
 
 - Post one review per run, with event `COMMENT`, or `APPROVE` under the rule below. The agent never sends `REQUEST_CHANGES`.
-- Post a review if at least one inline comment survives validation, **or** if the summary contains an oversized-PR note, skipped files, failed focuses, or a dependency section (any changed lockfile the Dependency check compared or named, on every push while the PR changes one), **or** if approvals are on (every such run either approves or says why not).
-- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when at least one focus ran and all succeeded, no file was skipped or left unreviewed as binary, every finding the run reported fell below the publish threshold or was `waived` (so none was posted (late findings included), merged, or dropped as `unanchorable` or `duplicate`), on an incremental run no earlier run on this base dropped a finding as `over_cap`, and every review thread the App started on the PR is verified fixed or waived (§9.2). A thread resolved by someone who can't waive it still blocks, unless it was verified fixed. If the threads can't be read, or the verifier fails, don't approve. A push that runs no reviewers (deletions only) is never approved.
-- **Not approved:** with approvals on, a run that doesn't approve says why in one summary line, naming every blocker with counts and paths, never model text: new issues, issues a reviewer still reports, issues outside the changed lines, an earlier comment-cap drop, failed focuses, unreviewed files, lockfiles the Dependency check couldn't understand, unreadable or un-rechecked threads, threads still open, threads resolved by someone who can't waive them, or no reviewers having run (with the re-review label as the way out).
+- Post a review if at least one comment (inline or file-level) survives validation, **or** if the summary contains an oversized-PR note, skipped files, failed focuses, or a dependency section (any changed lockfile the Dependency check compared or named, on every push while the PR changes one), **or** if approvals are on (every such run either approves or says why not).
+- **Approval (opt-in, `APPROVE_WHEN_CLEAN=true`, off by default):** approve when at least one focus ran and all succeeded, no file was skipped or left unreviewed as binary, every finding the run reported fell below the publish threshold or was `waived` (so none was posted (late findings and file-level comments included), merged, or dropped as `unanchorable` or `duplicate`), on an incremental run no earlier run on this base dropped a finding as `over_cap`, and every review thread the App started on the PR is verified fixed or waived (§9.2). A thread resolved by someone who can't waive it still blocks, unless it was verified fixed. If the threads can't be read, or the verifier fails, don't approve. A push that runs no reviewers (deletions only) is never approved.
+- **Not approved:** with approvals on, a run that doesn't approve says why in one summary line, naming every blocker with counts and paths, never model text: new issues, issues a reviewer still reports, issues outside the changed lines (left only in a file outside the reviewed diff, by location), an earlier comment-cap drop, failed focuses, unreviewed files, lockfiles the Dependency check couldn't understand, unreadable or un-rechecked threads, threads still open, threads resolved by someone who can't waive them, or no reviewers having run (with the re-review label as the way out).
 - **Waived findings:** an approval lists every waived finding as its title (`path:line`), waived by the maintainer's login, without `@`, capped at 50 like other path lists. Titles come from the App's own comments, sanitized again.
 - **Dismissing stale approvals:** when a run with approvals on doesn't approve, it dismisses every approval of the App's own that is still in force on the PR, with the **Not approved** line as the message, before posting its review, so the App's approval always reflects its latest verdict. Only the App's own reviews are considered, and a dismissed one isn't dismissed again. Branch protection can restrict who may dismiss reviews: a refusal is logged once per run, and the review's summary says an earlier approval by this App could not be dismissed.
 - The approval is a model's judgment over PR-controlled content, and any maintainer, the PR's author included, can waive the App's findings. The verifier reads replies from the PR's author and anyone with write access, as untrusted data; those people can resolve the App's threads directly anyway. It must never be the only review that branch protection requires.
@@ -198,6 +198,7 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 - Every run reads every review thread the App started, resolved or not, whether or not reviewers ran (a deletion can be the fix).
 - **Waivers:** the App can't resolve its own threads, so a resolved App thread always means a human decided. A thread resolved by a **maintainer** (OWNER, MEMBER or COLLABORATOR, the PR's author included), or where a maintainer replied with a comment starting `Waive: <reason>` (ignoring case and leading whitespace), is **waived**: the first run that sees it records the waiver durably (who, how, the reply's reason sanitized, and the thread's path, line and title) and logs it with run, repo, PR and who waived. A waiver is never revoked: later runs read waivers from the store, not GitHub, so unresolving the thread changes nothing. A waived thread counts as closed and never reaches the verifier. A finding a reviewer reports again that matches a waived thread (same path, and a nearby line or the same title) gets the `waived` outcome: it isn't posted and doesn't block. If it also matches a thread that isn't waived, it is handled as usual and blocks. `Waive:` from anyone else, or in the App's own comments and replies, never waives. A thread resolved by anyone else isn't waived: it stays a blocker, never reaches the verifier, and counts as closed only if the App had verified it fixed.
+- A file-level thread has no line, so it matches a re-report or a waiver by path and title. Otherwise it is handled like an inline thread.
 - When unresolved, unwaived threads remain, the verifier agent judges each at the current head, with the read-only repository tools (§6.2) and each thread's original diff hunk, comments and replies as untrusted data. It finishes with one `report_threads` call: per thread, resolved or open, and a short reply.
 - Only comments from the App, the PR's author, and OWNER, MEMBER or COLLABORATOR authors reach the verifier: the people who could resolve the thread themselves. Anyone else's replies are dropped, and don't count as the author speaking last. Each comment reaches it labelled reviewer (the App), PR author, or maintainer; a PR author who is a maintainer is labelled both.
 - When a maintainer's last reply states a decision not to fix the finding, the verifier keeps the thread open and, rather than arguing, replies that resolving the thread or replying `Waive: <reason>` waives it.
@@ -209,7 +210,7 @@ Findings that fail validation are omitted from the review. Their outcome (`unanc
 
 ### 9.3 Summary body
 
-- The reviewed revisions: `head@<sha7>`, `base@<sha7>`, followed by the result (how many issues were commented inline).
+- The reviewed revisions: `head@<sha7>`, `base@<sha7>`, followed by the result (how many issues were commented on, inline or on their file).
 - The names of the focuses that ran. Fallback selection is noted where used.
 - On an incremental review, the earlier head whose changes were already reviewed, and any focus that reviewed the whole PR because it didn't run on that review. Selection reasons stay in the run record: they are PR-influenced, and the names are enough for a reader.
 - Any focuses that failed.
@@ -224,7 +225,8 @@ The summary does not repeat inline comment text.
 - The title in bold.
 - A severity and focus badge.
 - The evidence.
-- The suggested fix as a GitHub `suggestion` block when it replaces exactly the anchored lines, and as prose otherwise.
+- On a file-level comment, the line it refers to, in the badge.
+- The suggested fix as a GitHub `suggestion` block when it replaces exactly the anchored lines, and as prose otherwise (always on a file-level comment).
 
 Confidence is not shown to readers. It is stored in metadata only.
 
@@ -304,7 +306,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 5. Reopening or updating a draft PR does not start a review until it is ready.
 6. The orchestrator can select a subset of the six focuses and records a reason for each.
 7. No code from the PR is executed during review.
-8. Published findings are inline comments anchored to changed lines.
+8. Published findings are inline comments anchored to changed lines, or file-level comments naming the line when no changed line is near it in a file in the diff.
 9. An empty result with no summary-worthy notes produces no review.
 10. Duplicate event delivery does not duplicate comments.
 11. If the PR head changes during analysis, the stale run publishes nothing.

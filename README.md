@@ -162,7 +162,7 @@ Optional:
 | `RUN_CAP` | `10` | Max runs per PR per rolling 24 hours; further events are recorded as `skipped` |
 | `MIN_SEVERITY` | `medium` | Findings below this severity (`low`, `medium`, `high`, `critical`) are not posted |
 | `MIN_CONFIDENCE` | `0.7` | Findings below this confidence (0 to 1) are not posted |
-| `MAX_COMMENTS` | `10` | Inline comments per review, highest severity × confidence first |
+| `MAX_COMMENTS` | `10` | Comments per review (inline or file-level), highest severity × confidence first |
 | `MAX_REVIEWABLE_LINES` | `800` | Above this many reviewable changed lines the summary recommends a split |
 | `REVIEW_TOKEN_BUDGET` | `50000` | Estimated diff tokens given to reviewers; files past it are skipped and listed |
 | `WORKER_CONCURRENCY` | `2` | Jobs reviewed at once |
