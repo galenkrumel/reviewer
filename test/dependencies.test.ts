@@ -142,6 +142,12 @@ test('a new version installed from two different sources reports the odd one out
   ]);
 });
 
+test('a lockfile with more package entries than any real one is not understood', () => {
+  const huge = JSON.stringify({ lockfileVersion: 3, packages: Object.fromEntries(
+    Array.from({ length: 50_001 }, (_, i) => [`node_modules/p${i}`, { version: '1.0.0' }])) });
+  assert.equal(compareLockfile(undefined, huge), undefined);
+});
+
 test('unparseable text, a v1 lockfile or a missing packages map on either side is not understood', () => {
   const ok = lock({ 'node_modules/a': pkg('1.0.0') });
   for (const bad of ['{', '{}', '[]', 'null', lock({}, 1), JSON.stringify({ lockfileVersion: 3, packages: [] }),

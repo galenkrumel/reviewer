@@ -36,6 +36,7 @@ export interface DependencyCheck {
 }
 
 const SUPPORTED = new Set(['package-lock.json']);
+const MAX_ENTRIES = 50_000;
 
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
@@ -54,8 +55,12 @@ function entries(text: string | undefined): Entry[] | undefined {
   }
   const packages = lock?.packages;
   if (![2, 3].includes(lock?.lockfileVersion) || typeof packages !== 'object' || packages === null || Array.isArray(packages)) return;
+  const keys = Object.keys(packages);
+  // Far past any real lockfile (big monorepos have about 10,000): a PR can't make the comparison hold more than this.
+  if (keys.length > MAX_ENTRIES) return;
   const out: Entry[] = [];
-  for (const [key, e] of Object.entries<any>(packages)) {
+  for (const key of keys) {
+    const e = packages[key];
     if (typeof e !== 'object' || e === null) return;
     const at = key.lastIndexOf('node_modules/');
     if (at < 0 || e.link) continue;
