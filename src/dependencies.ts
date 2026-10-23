@@ -75,7 +75,9 @@ function byName(list: Entry[]): Map<string, Map<string, Entry[]>> {
   const out = new Map<string, Map<string, Entry[]>>();
   for (const e of list) {
     const versions = out.get(e.name) ?? new Map<string, Entry[]>();
-    versions.set(e.version, [...versions.get(e.version) ?? [], e]);
+    const installs = versions.get(e.version) ?? [];
+    installs.push(e);
+    versions.set(e.version, installs);
     out.set(e.name, versions);
   }
   return out;
@@ -112,18 +114,21 @@ export async function checkDependencies(
 ): Promise<DependencyCheck> {
   const check: DependencyCheck = { lockfiles: [], unreadable: [], unchecked: [] };
   for (const f of files) {
-    const name = posix.basename(f.path);
+    // A rename can turn a lockfile into some other file, or the reverse: only the lockfile side is compared.
+    const [was, is] = [posix.basename(f.oldPath ?? f.path), posix.basename(f.path)];
+    const name = LOCKFILES.has(is) ? is : was;
+    const path = name === is ? f.path : f.oldPath!;
     if (!LOCKFILES.has(name) || excluded.has(f.path)) continue;
-    if (!SUPPORTED.has(name)) { check.unchecked.push(f.path); continue; }
+    if (!SUPPORTED.has(name)) { check.unchecked.push(path); continue; }
     let changes: PackageChange[] | undefined;
     try {
       const { base, head } = await read(f);
-      changes = compareLockfile(base, head);
+      changes = compareLockfile(was === name ? base : undefined, is === name ? head : undefined);
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
     }
-    if (changes) check.lockfiles.push({ path: f.path, changes });
-    else check.unreadable.push(f.path);
+    if (changes) check.lockfiles.push({ path, changes });
+    else check.unreadable.push(path);
   }
   return check;
 }

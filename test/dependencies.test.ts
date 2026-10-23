@@ -220,6 +220,14 @@ test("the package list is capped, and package text can't break out of its code s
   assert.ok(review!.body.includes('`x@here !-- ai-review:acme/widgets#256:a:b -- 1 → 2`'), review!.body);
 });
 
+test('a lockfile renamed to a name that is not a lockfile has its packages reported removed', async () => {
+  const text = lock(Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`node_modules/p${i}`, pkg('1.0.0')])));
+  const s = prFor({ 'package-lock.json': text }, { 'package-lock.json': null, 'old/lock.json': text });
+  const { review } = await run(s);
+
+  assert.match(review!.body, /Dependencies changed in `package-lock\.json`:\n- `p0 1\.0\.0 \(removed\)`/);
+});
+
 test("main's later changes to the lockfile are not the PR's", async () => {
   const s = prFor({ 'package-lock.json': lock({ 'node_modules/a': pkg('1.0.0'), 'node_modules/b': pkg('1.0.0') }) },
     { 'package-lock.json': lock({ 'node_modules/a': pkg('1.1.0'), 'node_modules/b': pkg('1.0.0') }) });

@@ -1,5 +1,7 @@
 # The dependency check decides in code; the security focus reads package code
 
+Status: accepted, built in slices under #79. So far (#80) the check compares npm `package-lock.json` files and lists their package changes in the Review summary; advisory lookups, pnpm, install scripts, registry sources, the security focus's part and the approval of lockfile-only PRs are still to come.
+
 Lockfiles stay out of line review, but a PR that changes an npm or pnpm lockfile gets a dependency check: code compares the lockfiles at base and head, looks up GitHub advisories for every package that changed, and turns three things into Findings on the lockfile line: an introduced advisory (at its own severity, confidence 1.0), a newly added install script (`high`), and a package resolved from outside its registry (`medium`). The security focus then always runs, given the check's output, and can read each changed package's published code through a `package_diff` tool. We wanted the most intelligence and security we could get here: advisories only catch what someone has already reported, and a hijacked release has no advisory, so only reading the package's code can catch it. But the approval-blocking part stays deterministic, so no model can talk an advisory away. A maintainer who knows a vulnerable path is unreachable waives it, as with any Finding (ADR 0001).
 
 ## Considered Options
