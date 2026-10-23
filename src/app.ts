@@ -253,14 +253,15 @@ export function createApp(deps: {
     let reviewId: number | undefined;
     try {
       // A failed POST may still have created the review, so every attempt checks the marker first.
-      reviewId = await retrying(job, 'publish', async () => {
+      // One publish at a time per PR: each deletes a pending review it finds, which may be another's still being built.
+      reviewId = await retrying(job, 'publish', () => oneAtATime(`${job.repo}#${job.pr}`, async () => {
         if (store.superseded(job.id)) return;
         const posted = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
         if (posted) return posted.id;
         // Another worker may have superseded this run while the list was loading.
         if (store.superseded(job.id)) return;
         return (await github.createReview(token, job.repo, job.pr, review)).id;
-      });
+      }));
     } catch (err) {
       // Keep the findings and costs: only the post is missing.
       return store.finish(job.id, 'failed', { ...record, error: errorMessage(err) });
@@ -316,11 +317,12 @@ export function createApp(deps: {
     }
   }
 
-  // openSource creates the clone and writes its git config, so it runs one at a time per repository.
-  const fetches = new Map<string, Promise<unknown>>();
-  function oneAtATime<T>(repo: string, fn: () => Promise<T>): Promise<T> {
-    const next = (fetches.get(repo) ?? Promise.resolve()).catch(() => {}).then(fn);
-    fetches.set(repo, next);
+  // Runs `fn` after every earlier call with the same key: a repository's fetches (openSource creates the clone and writes
+  // its git config) or a PR's publishes.
+  const queues = new Map<string, Promise<unknown>>();
+  function oneAtATime<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const next = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
+    queues.set(key, next);
     return next;
   }
 
