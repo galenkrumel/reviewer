@@ -64,6 +64,11 @@ export interface Source {
   markedAtBase(paths: string[]): Promise<Set<string>>;
   /** A regular file at the base SHA, or undefined if there is none. Throws ToolError for a symlink, directory or oversized file. */
   fileAtBase(path: string): Promise<string | undefined>;
+  /**
+   * A file's text on one side of the PR diff: `base` is the merge-base, `head` the head. Undefined where the file
+   * doesn't exist. Throws ToolError for a symlink, directory or file over 32 MiB.
+   */
+  fileAtSide(side: 'base' | 'head', path: string): Promise<string | undefined>;
 }
 
 // ponytail: fixed cap on grep output lines; make it a budget when per-agent budgets land.
@@ -71,6 +76,7 @@ const MAX_GREP_LINES = 200;
 
 const SYMLINK_MODE = '120000';
 const MAX_BASE_FILE_BYTES = 64 * 1024;
+const MAX_SIDE_BYTES = 32 * 1024 * 1024;
 
 /** A repository-relative path: not absolute, no empty, "." or ".." segments. One trailing "/" is allowed, as list_dir prints. */
 function checkPath(path: unknown): string {
@@ -121,6 +127,18 @@ export async function openSource(opts: {
     const e = treeEntries(out)[0];
     return e?.name === path ? e : undefined;
   }
+
+  /** A regular file at `sha`, or undefined if there is none. */
+  async function fileAt(path: string, sha: string, maxBytes: number) {
+    const e = await entry(path, sha);
+    if (!e) return undefined;
+    if (e.mode === SYMLINK_MODE) throw new ToolError(`${path} is a symlink`);
+    if (e.type !== 'blob') throw new ToolError(`${path} is not a file`);
+    const limit = maxBytes >= 1024 * 1024 ? `${maxBytes / 1024 / 1024} MiB` : `${maxBytes / 1024} KiB`;
+    if (Number(await git('cat-file', '-s', e.oid)) > maxBytes) throw new ToolError(`${path} is over ${limit}`);
+    return git('cat-file', 'blob', e.oid);
+  }
+  let mergeBase: Promise<string> | undefined;
 
   const sides = (f: FileChange) => (f.oldPath ? [f.oldPath, f.path] : [f.path]);
   const diff = (revs: string[], paths: string[]) => git('--literal-pathspecs', '-c', 'core.quotePath=false', 'diff', '-M',
@@ -193,13 +211,13 @@ export async function openSource(opts: {
       return marked;
     },
 
-    async fileAtBase(path) {
-      const e = await entry(path, baseSha);
-      if (!e) return undefined;
-      if (e.mode === SYMLINK_MODE) throw new ToolError(`${path} is a symlink`);
-      if (e.type !== 'blob') throw new ToolError(`${path} is not a file`);
-      if (Number(await git('cat-file', '-s', e.oid)) > MAX_BASE_FILE_BYTES) throw new ToolError(`${path} is over 64 KiB`);
-      return git('cat-file', 'blob', e.oid);
+    fileAtBase: (path) => fileAt(path, baseSha, MAX_BASE_FILE_BYTES),
+
+    async fileAtSide(side, path) {
+      if (side === 'head') return fileAt(path, headSha, MAX_SIDE_BYTES);
+      // The PR diff is base...head, so its base side is the merge-base: main's later changes aren't the PR's.
+      mergeBase ??= git('merge-base', baseSha, headSha).then((out) => out.trim());
+      return fileAt(path, await mergeBase, MAX_SIDE_BYTES);
     },
 
     async readFile(path, start, end) {

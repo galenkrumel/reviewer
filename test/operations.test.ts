@@ -300,7 +300,7 @@ test('a run logs each step: what it reviewed, which reviewers ran, what they fou
   const steps = logs.filter((l) => l.run !== undefined && l.level === 'info');
   assert.deepEqual(steps.map((l) => l.msg),
     [
-      'run started', 'scope', 'reviewers picked', 'reviewer finished', 'reviewer finished', 'reviewer finished', 'threads checked',
+      'run started', 'scope', 'dependencies checked', 'reviewers picked', 'reviewer finished', 'reviewer finished', 'reviewer finished', 'threads checked',
       'review decided', 'run finished',
     ]);
   assert.ok(steps.every((l) => l.repo === REPO && l.pr === 7));
