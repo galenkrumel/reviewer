@@ -2,7 +2,7 @@
 import { posix } from 'node:path';
 import type { FileChange } from './git.ts';
 
-const LOCKFILES = new Set([
+export const LOCKFILES = new Set([
   'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock', 'deno.lock',
   'Cargo.lock', 'Gemfile.lock', 'poetry.lock', 'Pipfile.lock', 'uv.lock', 'pdm.lock', 'composer.lock', 'go.sum',
   'mix.lock', 'pubspec.lock', 'Podfile.lock', 'packages.lock.json', 'flake.lock', 'gradle.lockfile',

@@ -2,6 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { createDashboard } from './dashboard.ts';
+import { checkDependencies, type DependencyCheck, type PackageChange } from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import { absorbed, sanitize, stillReported, threadTitle, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
@@ -444,6 +445,13 @@ export function createApp(deps: {
       changed: files.length, reviewed: scope.reviewed.length, excluded: excluded.size, skipped: scope.skipped.length,
       binary: scope.binary.length, lines: scope.reviewableLines, ...(since !== undefined && { since: since.slice(0, 7) }),
     });
+    // Lockfiles stay out of line review and the budget; the Dependency check compares them in full on every run.
+    const dependencies = await checkDependencies(files, excluded, source.bothSides);
+    progress(job, 'dependencies checked', {
+      lockfiles: dependencies.lockfiles.length, changes: dependencies.lockfiles.reduce((n, l) => n + l.changes.length, 0),
+      unreadable: dependencies.unreadable.length, unchecked: dependencies.unchecked.length,
+    });
+    if (store.superseded(job.id)) return;
     // Nothing added since then (a deletion has no line to comment on): no reviewer is worth paying for.
     if (scope.reviewed.length && (!fresh || [...fresh.values()].some((lines) => lines.size))) {
       let picks: Pick[];
@@ -544,6 +552,7 @@ export function createApp(deps: {
         : 'no reviewers ran: nothing reviewable changed'),
       failed.length > 0 && `the ${listed(failed)} review failed`,
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
+      dependencies.unreadable.length > 0 && `the dependency check couldn't understand ${pathList(dependencies.unreadable, ', ', 10)}`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
     ].filter((b): b is string => typeof b === 'string');
@@ -553,14 +562,15 @@ export function createApp(deps: {
       ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
     ];
     const record = {
-      findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped,
+      findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped, dependencies,
       // Here the inline comments block; once they are threads a waiver can close, the ones over the cap still do.
       blockers: [...unwaivable, ...(overCap > 0 ? [`${count(overCap, 'issue')} left uncommented over the comment cap`] : [])],
     };
     const approve = config.approveWhenClean === true && blockers.length === 0;
     progress(job, 'review decided', { comments: comments.length, approve, blockers: blockers.length, findings: outcomes(findings) });
     // With approvals on, every run says where the PR stands, even when there is nothing else to post.
-    if (!config.approveWhenClean && comments.length === 0 && !oversized && !unreviewed && !failed.length) {
+    const dependencyNotes = dependencyLines(dependencies);
+    if (!config.approveWhenClean && comments.length === 0 && !oversized && !unreviewed && !failed.length && !dependencyNotes.length) {
       return store.finish(job.id, 'nothing_to_publish', record);
     }
 
@@ -573,7 +583,7 @@ export function createApp(deps: {
       body: summary(job, comments.length, {
         scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, newcomers, approve,
         blockers: config.approveWhenClean ? blockers : [], undismissed,
-        waivers: approve ? accepted(waivers, threads, findings) : [],
+        waivers: approve ? accepted(waivers, threads, findings) : [], dependencyNotes,
       }),
       comments,
     }, record);
@@ -794,6 +804,23 @@ function outcomes(findings: { outcome: string }[]): Record<string, number> {
   return out;
 }
 
+/**
+ * The summary's dependency section, one paragraph per lockfile, then the lockfiles it couldn't understand or doesn't
+ * support. Package names and versions come from the PR, so they go through pathList like paths; empty when the check
+ * had nothing to look at.
+ */
+function dependencyLines(check: DependencyCheck): string[] {
+  const move = (c: PackageChange) => c.from === undefined ? `${c.name} ${c.to} (added)`
+    : c.to === undefined ? `${c.name} ${c.from} (removed)` : `${c.name} ${c.from} → ${c.to}`;
+  return [
+    ...capped(check.lockfiles.map(({ path, changes }) => changes.length === 0
+      ? `Dependencies in ${pathList([path], '', 1)}: no packages moved.`
+      : `Dependencies changed in ${pathList([path], '', 1)}:\n- ${pathList(changes.map(move), '\n- ', 50)}`), 20),
+    ...(check.unreadable.length ? [`Not understood by the dependency check: ${pathList(check.unreadable, ', ', 20)}.`] : []),
+    ...(check.unchecked.length ? [`Not checked (lockfile format not supported yet): ${pathList(check.unchecked, ', ', 20)}.`] : []),
+  ];
+}
+
 function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
   /** Focuses that reviewed the whole PR though `since` is set: they didn't run on that review. */
@@ -804,6 +831,8 @@ function summary(job: Job, count: number, notes: {
   undismissed?: string;
   /** Listed on an approval: the risks it accepted. */
   waivers: Waiver[];
+  /** The Dependency check's section, from dependencyLines. */
+  dependencyNotes: string[];
 }): string {
   const { scope, focuses } = notes;
   const failed = focuses.filter((f) => f.status === 'failed').map((f) => f.focus);
@@ -824,6 +853,7 @@ function summary(job: Job, count: number, notes: {
     notes.blockers.length > 0 && `**Not approved:** ${notes.blockers.join('; ')}.`,
     notes.undismissed,
     waivedList(notes.waivers, job.repo),
+    ...notes.dependencyNotes,
     scope.skipped.length > 0 && `Skipped (over the review budget):\n- ${pathList(scope.skipped, '\n- ', 50)}`,
     scope.binary.length > 0 && `Not reviewed (binary content):\n- ${pathList(scope.binary, '\n- ', 50)}`,
     marker(job),

@@ -70,6 +70,25 @@ test('a published run is listed and detailed with everything PR-controlled escap
   }
 });
 
+test("a run's page shows what the Dependency check found, escaped", async () => {
+  const lock = (v: string) => JSON.stringify({ lockfileVersion: 3, packages: { [`node_modules/${XSS}`]: { version: v } } }, null, 2);
+  const fx = gitFixture({ 'package-lock.json': lock('1.0.0'), 'a/package-lock.json': '{}' }, {
+    'package-lock.json': lock('1.1.0'), 'a/package-lock.json': '{ }', 'yarn.lock': 'x\n',
+  });
+  const pr = { number: 8, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const { app, github } = testApp({ model: new ScriptedModel([]), config: { adminPassword: PASSWORD } });
+  github.addPullRequest(REPO, fx.url, pr);
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  const body = get(app, `/admin/runs/${app.runs()[0]!.id}`)!.body;
+  assert.match(body, /<h2>Dependency check<\/h2>/);
+  assert.ok(body.includes('&#60;img src=x onerror=alert(1)&#62;</td><td>1.0.0 → 1.1.0'), body);
+  assert.ok(!body.includes(XSS));
+  assert.match(body, /Not understood[^]*<code>a\/package-lock.json<\/code>/);
+  assert.match(body, /Not checked[^]*<code>yarn.lock<\/code>/);
+});
+
 test('queued runs show their place in line, and the list filters and pages', async () => {
   const { app, pr } = setup();
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
