@@ -37,6 +37,8 @@ export interface RecordedFinding extends Finding {
   outcome: FindingOutcome;
   /** On a kept finding: every focus that flagged it, its own first. */
   focuses?: string[];
+  /** Posted on its file rather than a line: no added line was near it. */
+  fileLevel?: true;
 }
 
 /** A maintainer's decision not to fix a thread's finding on this PR. Never revoked. */

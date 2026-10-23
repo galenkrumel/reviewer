@@ -210,6 +210,30 @@ test('with a concurrency of 2, two queued jobs run at the same time', async () =
   assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish', 'nothing_to_publish']);
 });
 
+test('two runs for one PR publish one at a time', async () => {
+  let inFlight = 0;
+  let most = 0;
+  class SlowPublish extends FakeGitHub {
+    override async createReview(token: string, repo: string, number: number, review: NewReview) {
+      most = Math.max(most, ++inFlight);
+      await new Promise((r) => setTimeout(r, 50));
+      inFlight--;
+      return super.createReview(token, repo, number, review);
+    }
+  }
+  const { pr, github } = setup(new SlowPublish());
+  const { app } = testApp({ model: new ScriptedModel([report(), report()]), github, config: { workerConcurrency: 2 } });
+
+  // A label re-review is never a duplicate, so both run at the same head.
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.receive(delivery('pull_request', { ...openedPayload(REPO, pr), action: 'labeled', label: { name: 'ai-review' } }));
+  await app.drain();
+
+  assert.equal(most, 1);
+  assert.equal(github.reviews.length, 2);
+  assert.deepEqual(app.runs().map((r) => r.status), ['published', 'published']);
+});
+
 test('a job enqueued while another runs starts at once when a worker slot is free', async () => {
   const { fx, pr, github } = setup();
   github.addPullRequest(REPO, fx.url, { ...pr, number: 8 });

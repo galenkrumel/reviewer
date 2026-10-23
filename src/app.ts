@@ -253,14 +253,15 @@ export function createApp(deps: {
     let reviewId: number | undefined;
     try {
       // A failed POST may still have created the review, so every attempt checks the marker first.
-      reviewId = await retrying(job, 'publish', async () => {
+      // One publish at a time per PR: each deletes a pending review it finds, which may be another's still being built.
+      reviewId = await retrying(job, 'publish', () => oneAtATime(`${job.repo}#${job.pr}`, async () => {
         if (store.superseded(job.id)) return;
         const posted = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
         if (posted) return posted.id;
         // Another worker may have superseded this run while the list was loading.
         if (store.superseded(job.id)) return;
         return (await github.createReview(token, job.repo, job.pr, review)).id;
-      });
+      }));
     } catch (err) {
       // Keep the findings and costs: only the post is missing.
       return store.finish(job.id, 'failed', { ...record, error: errorMessage(err) });
@@ -316,11 +317,12 @@ export function createApp(deps: {
     }
   }
 
-  // openSource creates the clone and writes its git config, so it runs one at a time per repository.
-  const fetches = new Map<string, Promise<unknown>>();
-  function oneAtATime<T>(repo: string, fn: () => Promise<T>): Promise<T> {
-    const next = (fetches.get(repo) ?? Promise.resolve()).catch(() => {}).then(fn);
-    fetches.set(repo, next);
+  // Runs `fn` after every earlier call with the same key: a repository's fetches (openSource creates the clone and writes
+  // its git config) or a PR's publishes.
+  const queues = new Map<string, Promise<unknown>>();
+  function oneAtATime<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const next = (queues.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
+    queues.set(key, next);
     return next;
   }
 
@@ -549,7 +551,7 @@ export function createApp(deps: {
     ].filter((b): b is string => typeof b === 'string');
     const blockers = [
       ...unwaivable,
-      ...(comments.length > 0 ? [`${count(comments.length, 'new issue')} commented inline`] : []),
+      ...(comments.length > 0 ? [`${count(comments.length, 'new issue')} commented on`] : []),
       ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
     ];
     const record = {
@@ -813,7 +815,7 @@ function summary(job: Job, count: number, notes: {
         pathList(scope.directories, ', ', 20).replace('`.`', '(repo root)')}.`,
     `**AI review** of \`head@${job.headSha.slice(0, 7)}\` against \`base@${job.baseSha.slice(0, 7)}\`: `
       + (notes.approve ? 'no issues found, and every earlier comment is resolved or verified fixed. Approved.'
-        : count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented inline.`),
+        : count === 0 ? 'no issues to comment on.' : `${count} issue${count === 1 ? '' : 's'}, commented on.`),
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,
