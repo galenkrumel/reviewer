@@ -163,8 +163,8 @@ test("lockfiles past the run's budget of text read or changes kept are unreadabl
   // 40,000 added packages each: the third takes the run past 100,000 changes.
   const many = lock(Object.fromEntries(Array.from({ length: 40_000 }, (_, i) => [`node_modules/p${i}`, pkg('1.0.0')])));
   assert.deepEqual(await run(many), [kept, unreadable, read]);
-  // 50 MiB each: the third takes the run past 128 MiB.
-  assert.deepEqual(await run(lock({ 'node_modules/a': pkg('1.0.0') }) + ' '.repeat(50 * 1024 * 1024)), [kept, unreadable, read]);
+  // 54 MiB each, counted in UTF-8 bytes (18 Mi characters): the third takes the run past 128 MiB.
+  assert.deepEqual(await run(lock({ 'node_modules/a': pkg('1.0.0', { description: '€'.repeat(18 * 1024 * 1024) }) })), [kept, unreadable, read]);
 });
 
 test("a side read counts toward the run's text even when the lockfile's other side can't be read", async () => {

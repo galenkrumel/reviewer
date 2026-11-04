@@ -144,8 +144,9 @@ export async function checkDependencies(
     if (text <= MAX_RUN_TEXT && kept <= MAX_RUN_CHANGES && tried < MAX_RUN_LOCKFILES) try {
       // Each side counts once read, so a failed read of the other side doesn't hide it.
       let base: string | undefined, head: string | undefined;
-      if (useBase) text += (base = await read('base', old))?.length ?? 0;
-      if (useHead && text <= MAX_RUN_TEXT) text += (head = await read('head', f.path))?.length ?? 0;
+      const size = (t: string | undefined) => (t === undefined ? 0 : Buffer.byteLength(t));
+      if (useBase) text += size(base = await read('base', old));
+      if (useHead && text <= MAX_RUN_TEXT) text += size(head = await read('head', f.path));
       if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head);
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
