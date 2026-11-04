@@ -237,12 +237,15 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
     const was = old.get(name) ?? new Map<string, Entry[]>();
     const is = now.get(name) ?? new Map<string, Entry[]>();
-    const push = (e: Entry, from?: string, to?: string) => changes.push({
-      name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
-      ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
-      ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
-      ...(dependents(name, to === undefined).length && { pulledBy: dependents(name, to === undefined) }),
-    });
+    const push = (e: Entry, from?: string, to?: string) => {
+      const pulledBy = dependents(name, to === undefined);
+      changes.push({
+        name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
+        ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
+        ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
+        ...(pulledBy.length && { pulledBy }),
+      });
+    };
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
     const added = [...is.keys()].filter((v) => !was.has(v)).sort(byVersion);
     for (let i = 0; i < Math.max(removed.length, added.length); i++) {

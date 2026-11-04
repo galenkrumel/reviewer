@@ -139,6 +139,16 @@ test("a model that says nothing about an introduced Advisory, or reports it lowe
   assert.match(review.body, /\*\*Not approved:\*\* 1 new issue commented on/);
 });
 
+test('an introduced Advisory the security focus says nothing about still blocks', async () => {
+  const s = setup({ [LOCK]: purify('3.4.10') }, { [LOCK]: purify('3.4.16') }, { config: { approveWhenClean: true } });
+  s.github.advisoryDb.push({ ...FIXES[0]!, package: 'dompurify', versions: ['3.4.16'] });
+  const review = await s.opened();
+
+  assert.equal(review.event, 'COMMENT');
+  assert.equal(review.comments.length, 1);
+  assert.match(review.body, /\*\*Not approved:\*\* 1 new issue commented on/);
+});
+
 test('a PR changing only excluded files and no supported lockfile still runs no reviewers', async () => {
   const s = setup({ 'yarn.lock': 'a@1\n' }, { 'yarn.lock': 'a@2\n' }, { config: { approveWhenClean: true }, turns: {} });
   const review = await s.opened();
