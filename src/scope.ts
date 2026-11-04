@@ -59,8 +59,10 @@ export function selectFiles(files: FileChange[], excludedAtBase: Set<string>, to
 }
 
 /**
- * The PR's changed files, which of them are excluded (.gitattributes marks at the base, then `exclude` globs), the
- * reviewed scope, and the diff reviewers are given: empty when nothing is reviewed. Comments anchor only against it.
+ * The PR's changed files; `excluded`, the paths the repository excludes (.gitattributes marks at the base and
+ * `exclude` glob matches; the built-in lockfile, vendored and generated exclusions are applied by selectFiles and not
+ * listed); the reviewed scope; and the diff reviewers are given: empty when nothing is reviewed. Comments anchor only
+ * against it.
  */
 export async function reviewScope(source: Source, opts: { exclude: string[]; tokenBudget: number }) {
   const files = await source.changedFiles();
