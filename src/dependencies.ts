@@ -1,6 +1,7 @@
 // The Dependency check: code, never a model, compares a PR's lockfiles at base and head (ADR 0002).
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { ToolError, type FileChange, type Source } from './git.ts';
 import type { Advisory } from './ports.ts';
 import { LOCKFILES } from './scope.ts';
@@ -20,11 +21,18 @@ export interface PackageChange {
   resolved?: string;
   /** Its lockfile integrity hash, from the same side as `resolved`. */
   integrity?: string;
+  /** Where the version it moved from resolved, at base; unset for an added or removed package. */
+  fromResolved?: string;
   /** Its `"version"` line at head; unset for a removed package. */
   line?: number;
   /** The Advisories open against either side, once looked up; unset when none are. */
   advisories?: ClassifiedAdvisory[];
+  /** Install scripts its fetched tarball has that the version it moved from didn't (any, when added), by name. */
+  installScripts?: Record<string, string>;
 }
+
+/** A package change whose code the check couldn't fetch and read, so nothing vouches for it. */
+export interface NotInspected { path: string; name: string; version: string; reason: string }
 
 /**
  * An Advisory relative to the PR: introduced (open against the version it moves to or adds, not the one it replaced),
@@ -46,6 +54,8 @@ export interface DependencyCheck {
   unchecked: string[];
   /** Why the Advisories couldn't be looked up, when they couldn't. It blocks approval. */
   advisoryError?: string;
+  /** Package changes whose tarballs weren't fetched or read. They block approval. Unset on runs before tarball fetches. */
+  notInspected?: NotInspected[];
 }
 
 const SUPPORTED = new Set(['package-lock.json']);
@@ -216,16 +226,18 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
     const was = old.get(name) ?? new Map<string, Entry[]>();
     const is = now.get(name) ?? new Map<string, Entry[]>();
-    const push = (e: Entry, from?: string, to?: string) => changes.push({
+    // `b` is the base install a move or swap replaced, for where the old version resolved.
+    const push = (e: Entry, from?: string, to?: string, b?: Entry) => changes.push({
       name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
       ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
+      ...(to !== undefined && b?.resolved !== undefined && { fromResolved: b.resolved }),
       ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
     });
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
     const added = [...is.keys()].filter((v) => !was.has(v)).sort(byVersion);
     for (let i = 0; i < Math.max(removed.length, added.length); i++) {
       const [from, to] = [removed[i], added[i]];
-      push(to !== undefined ? is.get(to)![0]! : was.get(from!)![0]!, from, to);
+      push(to !== undefined ? is.get(to)![0]! : was.get(from!)![0]!, from, to, from === undefined ? undefined : was.get(from)![0]);
     }
     // The same version from somewhere new, in any place it is installed: a swapped tarball is not "unmoved". An install
     // is held to the base's install at the same place when that was this package at this version (an alias can change
@@ -233,11 +245,15 @@ export function compareLockfile(base: string | undefined, head: string | undefin
     // version the base didn't have is held to its own first install, which the move above reported.
     for (const [v, installs] of is) {
       const known = new Set(was.get(v)?.map(source) ?? [source(installs[0]!)]);
-      const swapped = installs.find((e) => {
+      const here = (e: Entry) => {
         const there = atKey.get(e.key);
-        return there?.name === name && there.version === v ? source(there) !== source(e) : !known.has(source(e));
+        return there?.name === name && there.version === v ? there : undefined;
+      };
+      const swapped = installs.find((e) => {
+        const there = here(e);
+        return there ? source(there) !== source(e) : !known.has(source(e));
       });
-      if (swapped) push(swapped, v, v);
+      if (swapped) push(swapped, v, v, here(swapped) ?? was.get(v)?.[0]);
     }
   }
   return changes;
@@ -287,6 +303,101 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
   }
 }
 
+/** Whether a URL is on npm's default registry, the only host the check fetches tarballs from. */
+export const onRegistry = (url: string) => url.startsWith(REGISTRY);
+
+/**
+ * A tar archive's regular files by path below its top folder (`package/` in an npm tarball, though some use another
+ * name). A path that escapes that folder, once normalized, is dropped; a later entry for a path replaces an earlier one,
+ * as extracting it would. Truncated or malformed input throws.
+ * ponytail: ustar names and prefixes only; pax and GNU long names are skipped, so a file under a path past 255
+ * characters is missing. Read pax `path=` records if package_diff needs them.
+ */
+export function untar(archive: Buffer): Map<string, Buffer> {
+  const files = new Map<string, Buffer>();
+  const field = (h: Buffer, at: number, len: number) => h.subarray(at, at + len).toString('utf8').replace(/\0.*$/s, '');
+  for (let at = 0; at + 512 <= archive.length;) {
+    const h = archive.subarray(at, at + 512);
+    if (h.every((b) => b === 0)) break;
+    const size = parseInt(field(h, 124, 12).trim() || '0', 8);
+    if (!Number.isSafeInteger(size) || size < 0 || at + 512 + size > archive.length) throw new Error('malformed tar archive');
+    const type = field(h, 156, 1);
+    const prefix = field(h, 257, 6) === 'ustar' ? field(h, 345, 155) : '';
+    const path = posix.normalize((prefix ? `${prefix}/` : '') + field(h, 0, 100));
+    const below = path.split('/').slice(1).join('/');
+    if ((type === '0' || type === '') && !path.startsWith('/') && !path.startsWith('..') && below && !below.endsWith('/')) {
+      files.set(below, archive.subarray(at + 512, at + 512 + size));
+    }
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  return files;
+}
+
+const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
+// ponytail: unpacked bytes per run are capped at this multiple of the fetch byte cap, against a gzip bomb. Raise it if
+// ordinary packages hit it.
+const UNPACKED_PER_FETCHED = 8;
+
+/**
+ * Fetch the tarball of every package change the PR moves to or adds, and of the version it moved from, and record each
+ * install script the new one adds. Packages go in order of risk (added, then major bumps, then the rest), at most
+ * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run; one tarball is fetched
+ * once. A package past either cap, or whose tarball (old or new) couldn't be fetched or read or isn't on the registry,
+ * is not inspected. One with no `resolved` is bundled: its code is in its parent's tarball.
+ * Stops between fetches once `stopped` says so; `fetched` hears each fetch.
+ */
+export async function inspectPackages(
+  check: DependencyCheck, fetch: (url: string, maxBytes: number) => Promise<Buffer>, caps: { packages: number; bytes: number },
+  stopped: () => boolean, fetched: (url: string, bytes: number) => void,
+) {
+  const major = (v: string) => v.split('.')[0];
+  const risk = (c: PackageChange) => (c.from === undefined ? 0 : major(c.from) !== major(c.to!) ? 1 : 2);
+  const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined && c.resolved !== undefined)
+    .map((c) => ({ path, c }))).sort((a, b) => risk(a.c) - risk(b.c));
+  const allowed = new Set([...new Set(wanted.map(({ c }) => `${c.name}@${c.to}`))].slice(0, caps.packages));
+  const read = new Map<string, Record<string, string> | Error>();
+  let [bytes, unpacked] = [0, 0];
+  /** A tarball's install scripts, fetched once per run. */
+  const scripts = async (url: string | undefined) => {
+    if (url === undefined || !onRegistry(url)) throw new Error('not on the npm registry');
+    if (!read.has(url)) {
+      if (stopped()) return;
+      try {
+        if (bytes >= caps.bytes) throw new Error(`over the run's cap of ${caps.bytes} bytes fetched`);
+        const body = await fetch(url, caps.bytes - bytes);
+        bytes += body.length;
+        fetched(url, body.length);
+        const tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
+        unpacked += tar.length;
+        const manifest = untar(tar).get('package.json');
+        const found = manifest && JSON.parse(manifest.toString('utf8'))?.scripts;
+        if (manifest === undefined) throw new Error('no package.json');
+        read.set(url, Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof found?.[k] === 'string').map((k) => [k, found[k] as string])));
+      } catch (err) {
+        read.set(url, err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+    const got = read.get(url)!;
+    if (got instanceof Error) throw got;
+    return got;
+  };
+  const notInspected: NotInspected[] = [];
+  for (const { path, c } of wanted) {
+    const skip = (reason: string) => notInspected.push({ path, name: c.name, version: c.to!, reason });
+    if (!allowed.has(`${c.name}@${c.to}`)) { skip(`over the run's cap of ${caps.packages} packages`); continue; }
+    try {
+      const now = await scripts(c.resolved);
+      const before = c.from === undefined ? {} : await scripts(c.fromResolved);
+      if (!now || !before) return;
+      const added = Object.entries(now).filter(([k]) => !(k in before));
+      if (added.length) c.installScripts = Object.fromEntries(added);
+    } catch (err) {
+      skip((err as Error).message);
+    }
+  }
+  if (notInspected.length) check.notInspected = notInspected.sort((a, b) => a.path.localeCompare(b.path) || a.name.localeCompare(b.name));
+}
+
 /**
  * Where an off-registry package resolves from, in words; undefined for the registry, or none recorded (bundled).
  * ponytail: the kind is a guess from the URL's shape, for the comment's wording only; every kind is a Finding alike.
@@ -331,6 +442,11 @@ export function dependencyFindings(check: DependencyCheck): Finding[] {
         evidence: `${a.id} (\`${a.severity}\`): ${a.summary}\n\nIt affects ${move}${c.from === undefined || c.from === c.to ? ''
           : ', and not the version it replaced'}. ${a.firstPatched ? `First patched in ${a.firstPatched}.` : 'No patched version is published yet.'}`,
       })),
+      ...(c.installScripts ? [{
+        ...at, title: `${titleName(c.name)} adds an install script`, severity: 'high' as const,
+        evidence: `${move} ${c.from === undefined ? 'is new and runs' : 'now runs'} code when it is installed:\n\n${
+          Object.entries(c.installScripts).map(([k, v]) => `- \`${k}\`: \`${v.replace(/[`\s]+/g, ' ').slice(0, 200)}\``).join('\n')}`,
+      }] : []),
       ...(where ? [{
         ...at, title: `${titleName(c.name)} resolves from outside the npm registry`, severity: 'medium' as const,
         evidence: `${move} resolves from ${where}, not registry.npmjs.org: what installs is not what the registry publishes, `

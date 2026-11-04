@@ -4,6 +4,7 @@ import { AGENTS, createApp, errorMessage, type Log, type OutsidePolicy } from '.
 import { SEVERITIES, type Severity } from './findings.ts';
 import { gitHubApp } from './github.ts';
 import { openRouter } from './openrouter.ts';
+import { npmRegistry } from './registry.ts';
 
 function env(name: string): string {
   const v = process.env[name];
@@ -81,9 +82,12 @@ const app = createApp({
     retentionDays: positiveInt('RETENTION_DAYS'),
     approveWhenClean: flag('APPROVE_WHEN_CLEAN'),
     adminPassword: process.env.ADMIN_PASSWORD || undefined,
+    registryFetchPackages: positiveInt('REGISTRY_FETCH_PACKAGES'),
+    registryFetchBytes: positiveInt('REGISTRY_FETCH_BYTES'),
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),
+  registry: npmRegistry(),
   model: openRouter(env('OPENROUTER_API_KEY')),
   clock: { now: () => new Date() },
   log,

@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createDashboard } from './dashboard.ts';
 import {
-  checkDependencies, dependencyFindings, describeMove, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
+  checkDependencies, dependencyFindings, describeMove, inspectPackages, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
 } from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import {
@@ -16,7 +16,7 @@ import {
   isRedecision, openStore, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
 } from './store.ts';
 import { runVerifier, type Verdict } from './verifier.ts';
-import type { Clock, GitHubPort, ModelPort, NewReview, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
+import type { Clock, GitHubPort, ModelPort, NewReview, RegistryPort, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
 
 export const AGENTS = ['orchestrator', 'verifier', ...FOCUSES] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -66,6 +66,10 @@ export interface AppConfig {
   approveWhenClean?: boolean;
   /** Basic-auth password for the read-only Dashboard at /admin. Unset, the Dashboard is not served. */
   adminPassword?: string;
+  /** Packages whose tarballs the Dependency check fetches per run; the rest aren't inspected. Default 20. */
+  registryFetchPackages?: number;
+  /** Tarball bytes the Dependency check downloads per run. Default 5 MiB. */
+  registryFetchBytes?: number;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -85,7 +89,7 @@ type Step = 'fetch' | 'advisories' | 'dependencies' | 'orchestrator' | 'reviewer
 class StepError extends Error {}
 
 export function createApp(deps: {
-  config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock;
+  config: AppConfig; github: GitHubPort; registry: RegistryPort; model: ModelPort; clock: Clock;
   /** Backoff waits. Default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   log: Log;
@@ -444,11 +448,15 @@ export function createApp(deps: {
     const dependencies = await checkDependencies(files, excluded, source.fileAtSide);
     await lookUpAdvisories(dependencies, (name, version) => github.advisories(token, name, version));
     if (dependencies.advisoryError !== undefined) logFailure(job, 'advisories', dependencies.advisoryError, false);
+    await inspectPackages(dependencies, (url, maxBytes) => deps.registry.tarball(url, maxBytes), {
+      packages: config.registryFetchPackages ?? 20, bytes: config.registryFetchBytes ?? 5 * 1024 * 1024,
+    }, () => store.superseded(job.id), (url, bytes) => progress(job, 'package fetched', { url, bytes }));
     store.recordDependencies(job.id, dependencies);
     const advisories = dependencies.lockfiles.flatMap((l) => l.changes.flatMap((c) => c.advisories ?? []));
     progress(job, 'dependencies checked', {
       lockfiles: dependencies.lockfiles.length, changes: dependencies.lockfiles.reduce((n, l) => n + l.changes.length, 0),
       unreadable: dependencies.unreadable.length, unchecked: dependencies.unchecked.length,
+      notInspected: dependencies.notInspected?.length ?? 0,
       advisories: outcomes(advisories.map((a) => ({ outcome: a.status }))),
     });
     if (store.superseded(job.id)) return;
@@ -545,7 +553,9 @@ export function createApp(deps: {
     // open, with a reply when the author spoke last. It fully checked a lockfile it compared, with every lookup made,
     // or one the PR no longer changes; one it couldn't read, or now leaves out, fixes nothing.
     // A moved lockfile was checked under its old path too.
-    const compared = new Set(dependencies.lockfiles.map((l) => l.path));
+    // One with a package it couldn't inspect may still have that package's install script.
+    const notInspected = dependencies.notInspected ?? [];
+    const compared = new Set(dependencies.lockfiles.map((l) => l.path).filter((p) => !notInspected.some((n) => n.path === p)));
     for (const f of files) if (f.oldPath && compared.has(f.path)) compared.add(f.oldPath);
     // A thread on a moved lockfile's old path is still found when the moved one has its finding.
     const movedTo = new Map(files.filter((f) => f.oldPath).map((f) => [f.oldPath!, f.path]));
@@ -591,6 +601,7 @@ export function createApp(deps: {
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
       dependencies.unreadable.length > 0 && `the dependency check couldn't understand ${pathList(dependencies.unreadable, ', ', 10)}`,
       dependencies.advisoryError !== undefined && "the dependency check couldn't look up advisories",
+      notInspected.length > 0 && `${count(notInspected.length, 'package')} ${notInspected.length === 1 ? "wasn't" : "weren't"} inspected (listed below)`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
     ].filter((b): b is string => typeof b === 'string');
@@ -874,6 +885,8 @@ function dependencyLines(check: DependencyCheck): string[] {
         advisories(changes, 'fixed', 'Advisories fixed')}${advisories(changes, 'still open', 'Advisories still open')}`;
     }), 20),
     ...(check.advisoryError !== undefined ? ["Advisories couldn't be looked up, so none are listed or commented on."] : []),
+    ...(check.notInspected?.length ? [`Not inspected (its published code couldn't be fetched and read):\n- ${
+      pathList(check.notInspected.map((n) => `${n.name} ${n.version}`), '\n- ', 50)}`] : []),
     ...(check.unreadable.length ? [`Not understood by the dependency check: ${pathList(check.unreadable, ', ', 20)}.`] : []),
     ...(check.unchecked.length ? [`Not checked (lockfile format not supported yet): ${pathList(check.unchecked, ', ', 20)}.`] : []),
   ];
@@ -921,7 +934,7 @@ function summary(job: Job, count: number, notes: {
 const CHECK_STILL_FINDS = 'The dependency check still finds this at the current head. Resolving this thread or replying '
   + '`Waive: <reason>` waives it.';
 const CHECK_COULDNT = "The dependency check couldn't fully re-check this lockfile at the current head (its advisories couldn't be "
-  + 'looked up, or the lockfile couldn\'t be read), so this stays open. Resolving this thread or replying `Waive: <reason>` waives it.';
+  + 'looked up, a package in it couldn\'t be inspected, or the lockfile couldn\'t be read), so this stays open. Resolving this thread or replying `Waive: <reason>` waives it.';
 
 /** Ends a reply that verified a thread fixed. Only the app's own comments are trusted to carry it. */
 const VERIFIED = '<!-- ai-review:verified -->';

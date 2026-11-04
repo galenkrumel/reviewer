@@ -1,5 +1,5 @@
 // The edges of the service. Everything here has a real adapter (src/github.ts,
-// src/openrouter.ts) and a test fake (test/harness.ts).
+// src/openrouter.ts, src/registry.ts) and a test fake (test/harness.ts).
 
 export interface PullRequest {
   number: number;
@@ -83,6 +83,12 @@ export interface Advisory {
   /** The first version that fixes it for this package, when one is published. */
   firstPatched?: string;
   withdrawn: boolean;
+}
+
+/** The npm registry, which code (never a model) fetches published tarballs from. */
+export interface RegistryPort {
+  /** The tarball at `url`, refused for any host but the registry's, and past `maxBytes` downloaded. */
+  tarball(url: string, maxBytes: number): Promise<Buffer>;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).
