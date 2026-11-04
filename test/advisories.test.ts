@@ -201,6 +201,27 @@ test("a lockfile moved elsewhere has its old path's Advisory Thread Fixed once t
   assert.equal(s.github.thread(thread.id).resolved, true);
 });
 
+test('a lockfile moved elsewhere that still has the Advisory keeps its old Thread open', async () => {
+  const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
+  s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
+  const thread = threadFor(s, (await s.opened()).comments[0]!);
+
+  await s.push({ [LOCK]: null, [`web/${LOCK}`]: purify('3.4.16'), 'src/a.ts': 'c\n' });
+  assert.equal(s.github.thread(thread.id).resolved, false);
+});
+
+test("after a lookup outage, an author's reply is told the check couldn't re-check, not that it still finds the problem", async () => {
+  const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
+  s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
+  const thread = threadFor(s, (await s.opened()).comments[0]!);
+  s.github.thread(thread.id).comments.push({ byApp: false, byPrAuthor: true, login: 'author', association: 'NONE', body: 'Bumped it.' });
+
+  s.github.advisoriesDown = true;
+  await s.push({ [LOCK]: purify('3.4.17'), 'src/a.ts': 'c\n' });
+  assert.equal(s.github.thread(thread.id).resolved, false);
+  assert.match(s.github.thread(thread.id).comments.at(-1)!.body, /^The dependency check couldn't fully re-check this/);
+});
+
 test("an Advisory Thread isn't Fixed by a push the check couldn't fully check", async () => {
   const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
   s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });

@@ -144,8 +144,10 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
         for (const a of await res.json()) {
           // One advisory can list several ranges of the package: the lowest fix above this version is the one to take.
           const patched = (a.vulnerabilities ?? [])
-            .filter((v: any) => v.package?.ecosystem === 'npm' && v.package?.name === name && typeof v.first_patched_version === 'string')
-            .map((v: any) => v.first_patched_version as string)
+            // A string on this endpoint; `{ identifier }` elsewhere in GitHub's API, so either is read.
+            .filter((v: any) => v.package?.ecosystem === 'npm' && v.package?.name === name)
+            .map((v: any) => (typeof v.first_patched_version === 'string' ? v.first_patched_version : v.first_patched_version?.identifier))
+            .filter((p: unknown): p is string => typeof p === 'string')
             .filter((p: string) => byVersion(p, version) > 0).sort(byVersion);
           out.push({
             id: a.ghsa_id, summary: a.summary ?? '', withdrawn: a.withdrawn_at != null,

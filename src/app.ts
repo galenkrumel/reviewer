@@ -563,10 +563,15 @@ export function createApp(deps: {
     // A moved lockfile was checked under its old path too.
     const compared = new Set(dependencies.lockfiles.map((l) => l.path));
     for (const f of files) if (f.oldPath && compared.has(f.path)) compared.add(f.oldPath);
+    // A thread on a moved lockfile's old path is still found when the moved one has its finding.
+    const movedTo = new Map(files.filter((f) => f.oldPath).map((f) => [f.oldPath!, f.path]));
     const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).map((t) => {
-      const fixed = !checkFound.some((f) => sameTitle(t, f)) && dependencies.advisoryError === undefined
-        && (compared.has(t.path) || !paths.includes(t.path));
-      return { thread: t, resolved: fixed, reply: fixed ? 'The dependency check no longer finds this at the current head.' : CHECK_STILL_FINDS };
+      const still = checkFound.some((f) => sameTitle(t, f.path === movedTo.get(t.path) ? { ...f, path: t.path } : f));
+      const checked = dependencies.advisoryError === undefined && (compared.has(t.path) || !paths.includes(t.path));
+      return {
+        thread: t, resolved: !still && checked,
+        reply: still ? CHECK_STILL_FINDS : checked ? 'The dependency check no longer finds this at the current head.' : CHECK_COULDNT,
+      };
     });
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
@@ -930,6 +935,8 @@ function summary(job: Job, count: number, notes: {
 
 const CHECK_STILL_FINDS = 'The dependency check still finds this at the current head. Resolving this thread or replying '
   + '`Waive: <reason>` waives it.';
+const CHECK_COULDNT = "The dependency check couldn't fully re-check this lockfile at the current head (its advisories couldn't be "
+  + 'looked up, or the lockfile couldn\'t be read), so this stays open. Resolving this thread or replying `Waive: <reason>` waives it.';
 
 /** Ends a reply that verified a thread fixed. Only the app's own comments are trusted to carry it. */
 const VERIFIED = '<!-- ai-review:verified -->';

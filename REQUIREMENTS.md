@@ -180,7 +180,7 @@ The Dependency check (§8) makes Findings in code, never through a model: an **i
 - they never merge with a reviewer's Finding;
 - cross-push dedup matches them by path and title while their lockfile is in the diff, whatever line they are on now (a lockfile's lines shift whenever a package is added above);
 - a re-report, a waiver and a thread match them by path and title alone, since one package's Advisories share a line;
-- their threads never reach the verifier: a full run resolves one as Fixed (§9.2's verified reply, `Resolved: The dependency check no longer finds this at the current head.`) once the check no longer finds its problem in a lockfile it compared at this head (under its old path too, if moved) with every advisory lookup made, or in one the PR no longer changes; otherwise it stays open, and an author's reply gets the answer that the check still finds it and how to waive it. A re-decision leaves them as they are. A model never lowers or removes one; a Maintainer can waive it.
+- their threads never reach the verifier: a full run resolves one as Fixed (§9.2's verified reply, `Resolved: The dependency check no longer finds this at the current head.`) once the check no longer finds its problem in a lockfile it compared at this head (under its old path too, if moved) with every advisory lookup made, or in one the PR no longer changes; otherwise it stays open (a moved lockfile that still has the problem keeps its old path's thread open), and an author's reply gets the answer that the check still finds it, or, when the check couldn't fully re-check that lockfile, that it couldn't, with how to waive it either way. A re-decision leaves them as they are. A model never lowers or removes one; a Maintainer can waive it.
 
 ## 8. Large PRs
 
