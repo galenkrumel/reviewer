@@ -1,7 +1,8 @@
 // Runs one reviewer focus on one pinned PR, outside the App, and prints what it found and how it got there (#88).
 // Usage: OPENROUTER_API_KEY=… REVIEW_MODEL=… GITHUB_TOKEN="$(gh auth token)" node scripts/eval-reviewer.ts case.json
-// case.json: { "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. GITHUB_TOKEN is only
-// needed for a remote url. Prints { findings | error, transcript, usage } as JSON; exits 1 when the run fails.
+// case.json: { "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
+// https://github.com/…; GITHUB_TOKEN is only needed for the latter. REVIEW_FALLBACK_MODEL is optional, as in the App.
+// Prints { findings | error, transcript, usage } as JSON; exits 1 when the run fails.
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,12 +24,19 @@ const testCase = JSON.parse(readFileSync(casePath, 'utf8')) as {
   url: string; baseSha: string; headSha: string; title: string; body: string; focus: Focus; exclude?: string[];
 };
 if (!FOCUSES.includes(testCase.focus)) throw new Error(`focus must be one of ${FOCUSES.join(', ')}`);
-const { OPENROUTER_API_KEY: apiKey, REVIEW_MODEL: model, GITHUB_TOKEN: token = '' } = process.env;
+const { OPENROUTER_API_KEY: apiKey, REVIEW_MODEL: model, GITHUB_TOKEN = '' } = process.env;
+const fallbackModel = process.env.REVIEW_FALLBACK_MODEL || undefined;
 if (!apiKey || !model) throw new Error('set OPENROUTER_API_KEY and REVIEW_MODEL');
-if (!token && !testCase.url.startsWith('file://')) throw new Error('set GITHUB_TOKEN to fetch a remote url');
+// openSource sends the token to the url's host, so it only ever goes to GitHub; a local repository gets none.
+const local = testCase.url.startsWith('file://');
+if (!local && !testCase.url.startsWith('https://github.com/')) throw new Error('url must be file:// or https://github.com/…');
+if (!local && !GITHUB_TOKEN) throw new Error('set GITHUB_TOKEN to fetch from GitHub');
+const token = local ? '' : GITHUB_TOKEN;
 
 const usage: RecordedInvocation = { agent: testCase.focus, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
-const metered = meteredChat(openRouter(apiKey), { model, maxTokens: MAX_TOKENS }, `eval-${testCase.focus}`, usage);
+const metered = meteredChat(
+  openRouter(apiKey), { model, fallbackModel, maxTokens: MAX_TOKENS }, `eval-${testCase.focus}`, usage,
+);
 // runTools passes the same growing array on every turn, so the last one seen is the whole conversation.
 let transcript: ChatMessage[] = [];
 const chat: Chat = (messages, tools) => { transcript = messages; return metered(messages, tools); };
