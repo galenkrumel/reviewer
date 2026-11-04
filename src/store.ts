@@ -2,6 +2,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import type { DependencyCheck } from './dependencies.ts';
 import type { Clock } from './ports.ts';
 
 export type RunStatus =
@@ -104,6 +105,8 @@ export interface RunRecord extends Omit<Job, 'installationId' | 'title' | 'body'
   orchestratorError: string | null;
   /** Per-repo config settings that were ignored, and why. */
   configWarnings: string[];
+  /** What the Dependency check found; null when the run didn't get that far. */
+  dependencies: DependencyCheck | null;
 }
 
 export function openStore(dataDir: string, clock: Clock) {
@@ -175,6 +178,10 @@ export function openStore(dataDir: string, clock: Clock) {
       fallback_used INTEGER NOT NULL,
       error TEXT
     );
+    CREATE TABLE IF NOT EXISTS dependency_checks (
+      run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+      data TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS pr_states (
       repo TEXT NOT NULL,
       pr INTEGER NOT NULL,
@@ -196,6 +203,7 @@ export function openStore(dataDir: string, clock: Clock) {
   const invocations = db.prepare('SELECT data FROM invocations WHERE run_id = ? ORDER BY rowid');
   const orchestration = db.prepare('SELECT fallback_used, error FROM orchestrations WHERE run_id = ?');
   const warnings = db.prepare('SELECT warning FROM config_warnings WHERE run_id = ? ORDER BY rowid');
+  const dependencies = db.prepare('SELECT data FROM dependency_checks WHERE run_id = ?');
   const toRecord = (r: any): RunRecord => {
     const { installationId, title, body, ...job } = toJob(r);
     const o: any = orchestration.get(r.id);
@@ -210,6 +218,7 @@ export function openStore(dataDir: string, clock: Clock) {
       fallbackUsed: o?.fallback_used === 1,
       orchestratorError: o?.error ?? null,
       configWarnings: warnings.all(r.id).map((w: any) => w.warning),
+      dependencies: JSON.parse((dependencies.get(r.id) as any)?.data ?? 'null'),
     };
   };
 
@@ -347,6 +356,13 @@ export function openStore(dataDir: string, clock: Clock) {
         .map((row: any) => JSON.parse(row.data));
     },
 
+    /** Recorded as soon as the check runs, so it survives a run that later fails or is superseded. */
+    recordDependencies(id: number, check: DependencyCheck) {
+      // A run requeued after a restart checks again.
+      db.prepare('DELETE FROM dependency_checks WHERE run_id = ?').run(id);
+      db.prepare('INSERT INTO dependency_checks (run_id, data) VALUES (?, ?)').run(id, JSON.stringify(check));
+    },
+
     /** Recorded as soon as the config is read, so they survive a run that later fails or is superseded. */
     recordConfigWarnings(id: number, warnings: string[]) {
       // A run requeued after a restart reads the config again.
@@ -398,7 +414,7 @@ export function openStore(dataDir: string, clock: Clock) {
       db.exec('BEGIN');
       try {
         for (const table of [
-          'findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings', 'verdicts',
+          'findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings', 'verdicts', 'dependency_checks',
         ]) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }

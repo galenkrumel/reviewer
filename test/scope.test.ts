@@ -67,7 +67,8 @@ test('a changed path cannot forge the idempotency marker in the summary', async 
 });
 
 test('a clean run whose only other changes are excluded files posts nothing', async () => {
-  const s = prFor({ 'src/a.ts': 'a\n' }, { 'src/a.ts': 'a\nb\n', 'yarn.lock': lines(2000) });
+  // Lockfiles aren't among them: the dependency check reports on those (test/dependencies.test.ts).
+  const s = prFor({ 'src/a.ts': 'a\n' }, { 'src/a.ts': 'a\nb\n', 'public/app.min.js': lines(2000) });
   const { app, reviews } = await review(s, clean(), { maxReviewableLines: 10 });
 
   assert.equal(reviews.length, 0);
@@ -75,7 +76,7 @@ test('a clean run whose only other changes are excluded files posts nothing', as
 });
 
 test('a PR that only changes excluded files never reaches the model and posts nothing', async () => {
-  const s = prFor({ 'README.md': 'hi\n' }, { 'package-lock.json': '{}\n', 'go.sum': 'x\n' });
+  const s = prFor({ 'README.md': 'hi\n' }, { 'vendor/lib.js': 'v\n', 'public/app.min.js': 'm\n' });
   const model = new ScriptedModel([]);
   const { app, reviews } = await review(s, model);
 

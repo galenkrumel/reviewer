@@ -294,6 +294,8 @@ export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opene
 /** Pass an earlier app's dataDir to simulate a restart on the same volume. */
 export function testApp(opts: {
   model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>; time?: Date;
+  /** Sees each log entry as it is written, so a test can act mid-run (deliver an event) between steps. */
+  onLog?: (entry: Record<string, unknown>) => void;
 }) {
   const github = opts.github ?? new FakeGitHub();
   const dataDir = opts.dataDir ?? tempDir();
@@ -316,7 +318,7 @@ export function testApp(opts: {
     model: opts.model,
     clock,
     sleep: async (ms) => void sleeps.push(ms),
-    log: (entry) => void logs.push(entry),
+    log: (entry) => { logs.push(entry); opts.onLog?.(entry); },
   });
   after(() => app.close());
   return { app, github, dataDir, clock, sleeps, logs };

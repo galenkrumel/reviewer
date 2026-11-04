@@ -1,5 +1,6 @@
 // The operator's read-only Dashboard of Runs: server-rendered HTML behind Basic auth, no client script.
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { describeMove, type DependencyCheck } from './dependencies.ts';
 import { isRedecision, type openStore, type PrState, type RunStatus } from './store.ts';
 
 type Store = ReturnType<typeof openStore>;
@@ -322,6 +323,20 @@ ${waivers.length > 0 && html`<h2>Waived on this PR</h2>
 <ul class="card">${waivers.map((w) => html`<li>${w.title} <code>${w.path}${w.line !== null ? `:${w.line}` : ''}</code> <span class="muted">waived by ${w.by}${w.reason ? `: ${w.reason}` : ''}</span></li>`)}</ul>`}`, true);
 }
 
+/** Each compared lockfile's package changes (one row saying none moved, for a reformat), then the lockfiles left out. */
+function dependencySection(d: DependencyCheck) {
+  const rows = d.lockfiles.flatMap(({ path, changes }) => (changes.length ? changes : [undefined]).map((c) => ({ path, c })));
+  if (!rows.length && !d.unreadable.length && !d.unchecked.length) return;
+  const paths = (title: string, list: string[], tone = '') => list.length > 0
+    && html`<p class="${tone}">${title}: ${list.map((p, i) => html`${i > 0 && ', '}<code>${p}</code>`)}</p>`;
+  return html`<h2>Dependency check</h2>
+${rows.length > 0 && html`<div class="card"><table class="grid"><tr><th>Lockfile</th><th>Package</th><th>Change</th></tr>
+${rows.map(({ path, c }) => html`<tr><td><code>${path}${c?.line !== undefined ? `:${c.line}` : ''}</code></td>${
+  c ? html`<td>${c.name}</td><td>${describeMove(c)}</td>` : html`<td class="muted" colspan="2">no packages moved</td>`}</tr>`)}</table></div>`}
+${paths('Not understood, blocking approval', d.unreadable, 'err')}
+${paths('Not checked (format not supported yet)', d.unchecked)}`;
+}
+
 function detail(store: Store, id: number, now: Date) {
   const r = store.runDetail(id);
   if (!r) return;
@@ -351,6 +366,7 @@ ${r.findings.map((f) => html`<tr><td class="nowrap">${f.outcome}</td><td>${f.sev
 ${section('Agents', r.invocations, html`<div class="card"><table class="grid"><tr><th>Agent</th><th>Models</th><th class="num">Input tokens</th><th class="num">Output tokens</th><th class="num">Cost</th></tr>
 ${r.invocations.map((i) => html`<tr><td class="ref">${i.agent}</td><td>${i.models.join(' → ')}</td><td class="num">${i.inputTokens}</td><td class="num">${i.outputTokens}</td><td class="num">${usd(i.cost)}</td></tr>`)}</table></div>`)}
 ${section('Config warnings', r.configWarnings, html`<ul class="card">${r.configWarnings.map((w) => html`<li>${w}</li>`)}</ul>`)}
+${r.dependencies && dependencySection(r.dependencies)}
 ${section('Skipped files (over the review budget)', r.skipped, html`<ul class="card">${r.skipped.map((p) => html`<li><code>${p}</code></li>`)}</ul>`)}`,
   r.status === 'queued' || r.status === 'running');
 }
