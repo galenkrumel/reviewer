@@ -388,7 +388,10 @@ function paxRecords(data: Buffer): { path?: string; size?: number } {
       || !record.endsWith('\n') || eq < 0) throw new Error('malformed tar archive');
     const [key, value] = [record.slice(space - at + 1, eq), record.slice(eq + 1, -1)];
     // node-tar splits records on newlines: one holding another, in its key or value, would be read two ways.
-    if (record.slice(0, -1).includes('\n') || !/^[\w.-]+$/.test(key)) throw new Error('malformed tar archive');
+    // So does invalid UTF-8, which node-tar decodes to replacement characters and then measures again.
+    if (record.slice(0, -1).includes('\n') || !/^[\w.-]+$/.test(key) || Buffer.byteLength(record) !== len) {
+      throw new Error('malformed tar archive');
+    }
     if (key === 'path') out.path = value;
     if (key === 'size') {
       if (!/^\d+$/.test(value)) throw new Error('malformed tar archive');

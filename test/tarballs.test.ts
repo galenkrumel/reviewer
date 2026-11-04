@@ -1,6 +1,7 @@
 // The Dependency check's tarball fetches, through the harness: install-script Findings and packages not inspected.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import type { AppConfig } from '../src/app.ts';
 import {
   delivery, FakeGitHub, FakeRegistry, gitFixture, noFindings, openedPayload, packageTarball, prPayload, ScriptedModel, tarball, testApp,
@@ -164,7 +165,7 @@ test('a package.json named by a pax header or a GNU long name is the one read, a
 });
 
 test('a tarball a reader could take another way than npm is not inspected, rather than read one way', async () => {
-  const names = ['nl', 'chain', 'dot', 'glob', 'odd', 'key'];
+  const names = ['nl', 'chain', 'dot', 'glob', 'odd', 'key', 'utf'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const manifest = JSON.stringify({ name: 'x' });
@@ -180,10 +181,14 @@ test('a tarball a reader could take another way than npm is not inspected, rathe
   // The same, hidden in a key.
   const inKey = pax({ [`x\n29 path=package/package.json\nc`]: 'v' });
   s.registry.tarballs.set(url('key', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': inKey, 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
+  // A path record node-tar would measure as longer than it says, once its invalid byte decodes to U+FFFD.
+  const utf = gunzipSync(tarball({ 'package/package.json': manifest, 'PaxHeader/a': '29 path=package/package.json\n', 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
+  utf[utf.indexOf('json\n', 512) + 3] = 0xff;
+  s.registry.tarballs.set(url('utf', '1.0.1'), gzipSync(utf));
   const review = await s.opened();
 
-  assert.match(review.body, /6 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 6);
+  assert.match(review.body, /7 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 7);
 });
 
 test("a bundled package is read from its bundler's tarball, at the folder and version the lockfile records", async () => {
