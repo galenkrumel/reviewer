@@ -64,9 +64,11 @@ export function validate(
   // A file-level finding never merges with an anchored one either: the merged comment would post on one and lose the other's
   // place (its line, or its thread on the file).
   // Nor does one the Dependency check made with a reviewer's: code decides its Thread, a model the other's.
+  // The check's are all security's, so they merge with nothing: skipping the scan keeps a lockfile with many thousands of
+  // them linear.
   const isDoc = (x: RecordedFinding) => x.focus === 'documentation';
   for (const f of ranked) {
-    const into = kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus)
+    const into = f.check ? undefined : kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus)
       && isDoc(k) === isDoc(f) && !k.fileLevel === !f.fileLevel && !k.check === !f.check);
     if (into) { f.outcome = 'merged'; into.focuses!.push(f.focus); continue; }
     f.focuses = [f.focus];

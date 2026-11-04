@@ -132,7 +132,8 @@ const source = (e: Entry) => `${e.resolved} ${e.integrity}`;
 
 /**
  * The line of each package key's first `"version"`, as npm writes lockfiles: one key per line, version before any
- * nested map. ponytail: line-based; a minified lockfile anchors nothing. Track JSON positions if one turns up.
+ * nested map. ponytail: line-based; a minified lockfile has no version lines, so the check's Findings fall back to
+ * line 1. Track JSON positions if one turns up.
  */
 function versionLines(text: string): Map<string, number> {
   const out = new Map<string, number>();
