@@ -50,9 +50,23 @@ export interface DependencyCheck {
 const SUPPORTED = new Set(['package-lock.json']);
 /** npm's default registry: anything else a package resolves from is off-registry. */
 const REGISTRY = 'https://registry.npmjs.org/';
-/** npm's package-name grammar, and a semver version: nothing in either that a URL reads specially. */
-const NPM_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Whether a registry URL is exactly this package's tarball at this version, as fetched: a semver version, no escapes
+ * in the name, and a URL the parser leaves as written (no `..`, query or fragment). Names keep their case: old
+ * packages (`JSONStream`) have capitals.
+ */
+function isTarballOf(resolved: string, name: string, version: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(resolved);
+  } catch {
+    return false;
+  }
+  return SEMVER.test(version) && !name.includes('%') && url.href === resolved && !url.search && !url.hash
+    && resolved === `${REGISTRY}${name}/-/${name.split('/').pop()}-${version}.tgz`;
+}
 const MAX_ENTRIES = 50_000;
 // A PR can change any number of lockfiles: past these totals for the run, the rest are unreadable rather than read.
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
@@ -93,8 +107,7 @@ function entries(text: string | undefined): Entry[] | undefined {
     // another package or version is not a lockfile the check understands. The name and version must be plain ones
     // too, or the URL could still say something else once fetched (`a/../evil`, `1.0.0#`).
     const resolved = str(e.resolved);
-    if (resolved?.startsWith(REGISTRY) && (!NPM_NAME.test(name) || !SEMVER.test(e.version)
-      || resolved !== `${REGISTRY}${name}/-/${name.split('/').pop()}-${e.version}.tgz`)) return;
+    if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
   return out;

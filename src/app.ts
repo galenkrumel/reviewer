@@ -548,6 +548,7 @@ export function createApp(deps: {
         for (const [path, lines] of addedLines(lockDiff)) if (anchored.has(path)) changed.set(path, lines);
       } catch (err) {
         // Its findings are then unanchorable, which still blocks.
+        // ponytail: with approvals off that is silent (a diff past git's 64 MiB buffer); stream the diff if it happens.
         logFailure(job, 'dependencies', err, false);
       }
     }

@@ -102,9 +102,11 @@ test('a registry tarball of another package or version than its entry records is
     assert.equal(compareLockfile(ok, lock({ 'node_modules/@s/a': pkg('1.0.0', { resolved }) })), undefined, resolved);
   }
   // A name or version that the URL reads as something else once fetched.
-  for (const [name, version] of [['a/../evil', '1.0.0'], ['evil', '1.0.0#'], ['evil', '1.0.0?x']]) {
+  for (const [name, version] of [['a/../evil', '1.0.0'], ['a/%2e%2e/evil', '1.0.0'], ['evil', '1.0.0#'], ['evil', '1.0.0?x']]) {
     assert.equal(compareLockfile(ok, lock({ 'node_modules/x': pkg(version, { name }) })), undefined, `${name}@${version}`);
   }
+  // Old packages have capitals in their names.
+  assert.deepEqual(compareLockfile(ok, lock({ 'node_modules/JSONStream': pkg('1.3.5') }))?.map((c) => c.name), ['@s/a', 'JSONStream']);
   // An alias names the real package, and so does its tarball.
   assert.deepEqual(compareLockfile(ok, lock({ 'node_modules/alias': pkg('1.0.0', { name: '@s/a' }) })), []);
 });

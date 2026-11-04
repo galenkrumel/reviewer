@@ -64,6 +64,16 @@ test('an Advisory open against the version a PR moves to, and not the one it rep
   assert.deepEqual(s.github.lookups.sort(), ['dompurify@3.4.10', 'dompurify@3.4.16']);
 });
 
+test('a lockfile marked -diff in .gitattributes still takes the Advisory inline', async () => {
+  const head = purify('3.4.16');
+  const attrs = { '.gitattributes': 'package-lock.json -diff\n' };
+  const s = setup({ ...attrs, [LOCK]: purify('3.4.10') }, { ...attrs, [LOCK]: head });
+  s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
+  const review = await s.opened();
+
+  assert.deepEqual(review.comments.map((c) => [c.path, c.line]), [[LOCK, versionLine(head, 'node_modules/dompurify')]]);
+});
+
 /** Open the posted comment as a Thread, as GitHub would. */
 const threadFor = (s: ReturnType<typeof setup>, c: { path: string; line?: number; body: string }) =>
   s.github.addThread(REPO, 9, c.path, c.line ?? null, c.body);
