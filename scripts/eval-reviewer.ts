@@ -1,16 +1,17 @@
 // Runs one reviewer focus on one pinned PR, outside the App, and prints what it found and how it got there (#88).
 // Usage: OPENROUTER_API_KEY=… REVIEW_MODEL=… GITHUB_TOKEN="$(gh auth token)" node scripts/eval-reviewer.ts case.json
-// case.json: { "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
+// case.json: { "id"?, "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
 // https://github.com/…; GITHUB_TOKEN is only needed for the latter. REVIEW_FALLBACK_MODEL is optional, as in the App.
 // A missing argument, malformed case JSON, an unknown focus, an unsupported url or a missing required environment
 // variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
 // The run prints { findings | error, transcript, usage } as JSON; a fetching, scoping or reviewer error exits 1.
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
-// one AGENT span for the review, with an LLM span per model call. Without a Phoenix server the spans are dropped.
+// one AGENT span named after the case id (its file name unless "id" is set), with case, focus, model and headSha as
+// metadata, and an LLM span per model call. Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { openSource } from '../src/git.ts';
 import { openRouter } from '../src/openrouter.ts';
 import type { ChatMessage } from '../src/ports.ts';
@@ -26,8 +27,10 @@ const TOKEN_BUDGET = 50_000;
 const [casePath] = process.argv.slice(2);
 if (!casePath) throw new Error('usage: eval-reviewer.ts case.json');
 const testCase = JSON.parse(readFileSync(casePath, 'utf8')) as {
-  url: string; baseSha: string; headSha: string; title: string; body: string; focus: Focus; exclude?: string[];
+  id?: string; url: string; baseSha: string; headSha: string; title: string; body: string; focus: Focus; exclude?: string[];
 };
+// The span name, so every run of a case groups under one name in Phoenix.
+const caseId = testCase.id ?? basename(casePath, '.json');
 if (!FOCUSES.includes(testCase.focus)) throw new Error(`focus must be one of ${FOCUSES.join(', ')}`);
 const { OPENROUTER_API_KEY: apiKey, REVIEW_MODEL: model, GITHUB_TOKEN = '' } = process.env;
 const fallbackModel = process.env.REVIEW_FALLBACK_MODEL || undefined;
@@ -74,8 +77,11 @@ const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (sp
   }
 });
 
-await tracer.startActiveSpan('review', async (span) => {
-  span.setAttributes({ [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase) });
+await tracer.startActiveSpan(caseId, async (span) => {
+  span.setAttributes({
+    [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase),
+    [SC.METADATA]: JSON.stringify({ case: caseId, focus: testCase.focus, model, headSha: testCase.headSha }),
+  });
   try {
     // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
     // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
