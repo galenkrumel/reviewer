@@ -2,7 +2,8 @@
 // Usage: OPENROUTER_API_KEY=… REVIEW_MODEL=… GITHUB_TOKEN="$(gh auth token)" node scripts/eval-reviewer.ts case.json
 // case.json: { "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
 // https://github.com/…; GITHUB_TOKEN is only needed for the latter. REVIEW_FALLBACK_MODEL is optional, as in the App.
-// Prints { findings | error, transcript, usage } as JSON; exits 1 when the run fails.
+// A bad argument, case or environment variable throws before anything runs. After that, prints
+// { findings | error, transcript, usage } as JSON, exiting 1 when fetching, scoping or the reviewer fails.
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -42,8 +43,8 @@ let transcript: ChatMessage[] = [];
 const chat: Chat = (messages, tools) => { transcript = messages; return metered(messages, tools); };
 
 try {
-  // A fixed directory, so repeat runs reuse the repository copy and only fetch missing commits. It is named after the
-  // url's last two segments, which are owner/repo for a GitHub url.
+  // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
+  // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
   const source = await openSource({
     dataDir: join(tmpdir(), 'reviewer-eval'), repo: testCase.url.replace(/\.git$/, '').split('/').slice(-2).join('/'),
     url: testCase.url, token, headSha: testCase.headSha, baseSha: testCase.baseSha,
