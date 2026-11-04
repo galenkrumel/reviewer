@@ -70,6 +70,19 @@ export interface GitHubPort {
   reviewThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
   replyToThread(token: string, threadId: string, body: string): Promise<void>;
   resolveThread(token: string, threadId: string): Promise<void>;
+  /** The GitHub Advisory Database's advisories affecting one npm package at one version, withdrawn ones included. */
+  advisories(token: string, name: string, version: string): Promise<Advisory[]>;
+}
+
+export interface Advisory {
+  /** The GHSA ID. */
+  id: string;
+  /** GitHub's; one it rates `unknown` counts as medium. */
+  severity: 'critical' | 'high' | 'medium' | 'low';
+  summary: string;
+  /** The first version that fixes it for this package, when one is published. */
+  firstPatched?: string;
+  withdrawn: boolean;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).

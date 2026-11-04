@@ -30,7 +30,7 @@ const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu
  */
 export function validate(
   reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
-  posted: Pick<RecordedFinding, 'path' | 'title' | 'line' | 'fileLevel'>[], limits: Thresholds,
+  posted: Pick<RecordedFinding, 'path' | 'title' | 'line' | 'fileLevel' | 'check'>[], limits: Thresholds,
   threads: ReviewThread[] | undefined, waivers: Waiver[],
 ): RecordedFinding[] {
   const isWaived = waivedBy(threads, waivers);
@@ -63,19 +63,21 @@ export function validate(
   // Doc drift is a different problem from a bug on the same line, so documentation findings never merge with other focuses.
   // A file-level finding never merges with an anchored one either: the merged comment would post on one and lose the other's
   // place (its line, or its thread on the file).
+  // Nor does one the Dependency check made with a reviewer's: code decides its Thread, a model the other's.
   const isDoc = (x: RecordedFinding) => x.focus === 'documentation';
   for (const f of ranked) {
     const into = kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus)
-      && isDoc(k) === isDoc(f) && !k.fileLevel === !f.fileLevel);
+      && isDoc(k) === isDoc(f) && !k.fileLevel === !f.fileLevel && !k.check === !f.check);
     if (into) { f.outcome = 'merged'; into.focuses!.push(f.focus); continue; }
     f.focuses = [f.focus];
     kept.push(f);
   }
 
   // An earlier comment still counts while its line is in the current diff; once that line is gone, the finding is new again.
-  // A file-level comment counts while its file is in the diff.
+  // A file-level comment counts while its file is in the diff, and so does the Dependency check's: its title names the
+  // package, and a lockfile's lines shift whenever a package is added above.
   // ponytail: same title on the same path is the identity, and the old line number isn't mapped to the new head.
-  const seen = new Set(posted.filter((p) => (p.fileLevel ? changed.has(p.path) : changed.get(p.path)?.has(p.line)))
+  const seen = new Set(posted.filter((p) => (p.fileLevel || p.check ? changed.has(p.path) : changed.get(p.path)?.has(p.line)))
     .map((p) => `${p.path}\0${normalizeTitle(p.title)}`));
   let published = 0;
   for (const f of kept) {
@@ -95,15 +97,25 @@ export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[])
   // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
   const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
   const others = threads.filter((t) => !waivedIds.has(t.id));
-  return (f: Pick<Finding, 'path' | 'line' | 'title'>) => waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f));
+  // A waived thread with the finding's very title is its thread, whatever else sits nearby (one package's Advisories
+  // share a line); a thread that isn't waived with that title is too.
+  return (f: Pick<Finding, 'path' | 'line' | 'title'>) => waived.some((t) => titled(t, f))
+    || (!threads.some((t) => titled(t, f)) && waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f)));
 }
 
 /**
  * Whether a finding this run reported again (a duplicate of an earlier comment) is the one a thread raised:
- * same path, and a nearby line or the same title. Such a thread must stay open.
+ * same path, and a nearby line or the same title; when a finding has the thread's very title, only that one.
+ * Such a thread must stay open.
  */
 export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
-  return findings.some((f) => f.outcome === 'duplicate' && raises(thread, f));
+  const again = findings.filter((f) => f.outcome === 'duplicate');
+  return again.some((f) => titled(thread, f)) || (!findings.some((f) => titled(thread, f)) && again.some((f) => raises(thread, f)));
+}
+
+/** Whether a thread (or a waiver's record of one) raised a finding with this very title, on its path. */
+export function titled(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
+  return f.path === thread.path && normalizeTitle('comments' in thread ? threadTitle(thread) : thread.title) === normalizeTitle(f.title);
 }
 
 /** Whether this run absorbed a re-report of the thread's finding into its waiver. */

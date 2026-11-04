@@ -2,9 +2,13 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { matchesGlob } from 'node:path';
 import { createDashboard } from './dashboard.ts';
-import { checkDependencies, describeMove, type DependencyCheck, type PackageChange } from './dependencies.ts';
+import {
+  checkDependencies, dependencyFindings, describeMove, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
+} from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
-import { absorbed, sanitize, stillReported, threadTitle, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity } from './findings.ts';
+import {
+  absorbed, sanitize, stillReported, threadTitle, titled, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity,
+} from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat, type Focus } from './reviewer.ts';
@@ -76,7 +80,7 @@ export interface Delivery {
 export type Log = (entry: Record<string, unknown>) => void;
 
 /** Where a run failed. `run` is anything outside the named steps (a token mint, a PR lookup, a git read). */
-type Step = 'fetch' | 'orchestrator' | 'reviewer' | 'validation' | 'verifier' | 'threads' | 'dismiss' | 'publish' | 'run';
+type Step = 'fetch' | 'advisories' | 'dependencies' | 'orchestrator' | 'reviewer' | 'validation' | 'verifier' | 'threads' | 'dismiss' | 'publish' | 'run';
 
 /** A failure already logged, its message prefixed with the step. */
 class StepError extends Error {}
@@ -247,6 +251,12 @@ export function createApp(deps: {
     } catch (err) {
       logFailure(job, 'verifier', err, false);
     }
+  }
+
+  /** Whether a thread raised a finding the Dependency check published on this PR: same path and title. */
+  function madeByCheck(job: Job) {
+    const made = store.checkFindings(job.repo, job.pr);
+    return (t: ReviewThread) => made.some((f) => titled(t, f));
   }
 
   /** Post the review and finish the run published, or failed keeping its record. A superseded run posts nothing. */
@@ -450,10 +460,14 @@ export function createApp(deps: {
     });
     // Lockfiles stay out of line review and the budget; the Dependency check compares them in full on every run.
     const dependencies = await checkDependencies(files, excluded, source.fileAtSide);
+    await lookUpAdvisories(dependencies, (name, version) => github.advisories(token, name, version));
+    if (dependencies.advisoryError !== undefined) logFailure(job, 'advisories', dependencies.advisoryError, false);
     store.recordDependencies(job.id, dependencies);
+    const advisories = dependencies.lockfiles.flatMap((l) => l.changes.flatMap((c) => c.advisories ?? []));
     progress(job, 'dependencies checked', {
       lockfiles: dependencies.lockfiles.length, changes: dependencies.lockfiles.reduce((n, l) => n + l.changes.length, 0),
       unreadable: dependencies.unreadable.length, unchecked: dependencies.unchecked.length,
+      advisories: outcomes(advisories.map((a) => ({ outcome: a.status }))),
     });
     if (store.superseded(job.id)) return;
     // Nothing added since then (a deletion has no line to comment on): no reviewer is worth paying for.
@@ -508,9 +522,11 @@ export function createApp(deps: {
     }
     // The verifier re-checks this app's open threads whether or not reviewers ran: a deletion can be the fix.
     let { threads, waivers, open, outsideResolved } = await readThreads(job, token);
+    const byCheck = madeByCheck(job);
     // Verified on an earlier run (the app's VERIFIED reply is still the last word): not checked again.
     // ponytail: a later push can't reopen a verified thread; a reviewer reporting the issue again keeps it open.
-    const unverified = open?.filter((t) => !isVerified(t));
+    // The Dependency check's threads never reach the verifier: no model decides them (ADR 0002).
+    const unverified = open?.filter((t) => !isVerified(t) && !byCheck(t));
     const verdicts = unverified?.length ? await verifyThreads(job, source, unverified, invocations) : [];
     if (store.superseded(job.id)) return;
     // A maintainer may have waived a thread meanwhile. The re-decision that queued finds nothing published here yet,
@@ -523,9 +539,33 @@ export function createApp(deps: {
     const verified = open?.filter(isVerified) ?? [];
     const fallbackUsed = orchestratorError !== undefined;
     const changed = addedLines(diff);
-    const findings = validate(reported, changed, store.postedFindings(job.repo, job.pr, job.headSha), {
-      minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
-    }, threads, waivers);
+    const checkFound = dependencyFindings(dependencies);
+    // The check's findings anchor on the compared lockfiles' changed lines; reviewers still only see the reviewed diff.
+    const anchored = new Set(checkFound.map((f) => f.path));
+    if (anchored.size) {
+      try {
+        const lockDiff = await source.reviewDiff(files.filter((f) => anchored.has(f.path)).flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
+        for (const [path, lines] of addedLines(lockDiff)) if (anchored.has(path)) changed.set(path, lines);
+      } catch (err) {
+        // Its findings are then unanchorable, which still blocks.
+        logFailure(job, 'dependencies', err, false);
+      }
+    }
+    // First, so a tie in the cap's ranking goes to the check.
+    const findings = validate([...checkFound.map((finding) => ({ focus: 'security', finding })), ...reported], changed,
+      store.postedFindings(job.repo, job.pr, job.headSha), {
+        minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
+      }, threads, waivers);
+    // The check decides its own threads: Fixed once it no longer finds their problem at a head it fully checked, else
+    // open, with a reply when the author spoke last. A lockfile it couldn't read, or failed lookups, fix nothing.
+    const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).flatMap((t) => {
+      const fixed = !checkFound.some((f) => titled(t, f)) && dependencies.advisoryError === undefined
+        && !dependencies.unreadable.includes(t.path);
+      return [{
+        thread: t, resolved: fixed,
+        reply: fixed ? 'The dependency check no longer finds this at the current head.' : CHECK_STILL_FINDS,
+      }];
+    });
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
@@ -536,7 +576,8 @@ export function createApp(deps: {
 
     // A thread whose finding a reviewer reported again stays open, even if the verifier thinks otherwise.
     const { closed, resolved } = await settleThreads(job, token,
-      (verdicts ?? []).filter((v) => open?.some((t) => t.id === v.thread.id) && (!v.resolved || !stillReported(v.thread, findings))),
+      [...(verdicts ?? []), ...checkVerdicts]
+        .filter((v) => open?.some((t) => t.id === v.thread.id) && (!v.resolved || !stillReported(v.thread, findings))),
       verified.filter((t) => !stillReported(t, findings)));
     const stillOpen = open?.filter((t) => !closed.has(t.id));
     const outsideOpen = outsideResolved.filter((t) => !isVerified(t) || stillReported(t, findings));
@@ -557,6 +598,7 @@ export function createApp(deps: {
       failed.length > 0 && `the ${listed(failed)} review failed`,
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
       dependencies.unreadable.length > 0 && `the dependency check couldn't understand ${pathList(dependencies.unreadable, ', ', 10)}`,
+      dependencies.advisoryError !== undefined && "the dependency check couldn't look up advisories",
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
     ].filter((b): b is string => typeof b === 'string');
@@ -616,8 +658,10 @@ export function createApp(deps: {
     const { threads, waivers, open, outsideResolved } = await readThreads(job, token);
     // Unsure where the PR stands: say nothing, rather than flip a verdict or dismiss an approval over a failed read.
     if (!open) return store.finish(job.id, 'failed', { error: "threads: the PR's review threads couldn't be read" });
-    // The code is as it was reviewed, so only threads where someone spoke after the app need the verifier.
-    const spoken = open.filter((t) => t.comments.at(-1)?.byApp === false);
+    // The code is as it was reviewed, so only threads where someone spoke after the app need the verifier. The
+    // Dependency check's threads stay as its run left them: no model decides them.
+    const byCheck = madeByCheck(job);
+    const spoken = open.filter((t) => t.comments.at(-1)?.byApp === false && !byCheck(t));
     let verdicts: Verdict[] | undefined = [];
     if (spoken.length) {
       const source = await fetchSource(job, token);
@@ -823,13 +867,21 @@ function dependencyLines(check: DependencyCheck): string[] {
   const move = (c: PackageChange) => `${c.name} ${describeMove(c)}`;
   // At most 50 packages per lockfile and 100 in all: the rest are counted.
   let room = 100;
+  // Introduced ones are inline comments; these are the ones the PR fixes or leaves as they were. Ids and severities
+  // are GitHub's, names the PR's: all go through pathList.
+  const advisories = (changes: PackageChange[], status: ClassifiedAdvisory['status'], what: string) => {
+    const list = changes.flatMap((c) => (c.advisories ?? []).filter((a) => a.status === status).map((a) => `${a.id} ${a.severity} in ${c.name}`));
+    return list.length ? `\n\n${what}:\n- ${pathList([...new Set(list)], '\n- ', 50)}` : '';
+  };
   return [
     ...capped(check.lockfiles.map(({ path, changes }) => {
       if (changes.length === 0) return `Dependencies in ${pathList([path], '', 1)}: no packages moved.`;
       const shown = Math.min(50, room);
       room -= Math.min(shown, changes.length);
-      return `Dependencies changed in ${pathList([path], '', 1)}:\n- ${pathList(changes.map(move), '\n- ', shown)}`;
+      return `Dependencies changed in ${pathList([path], '', 1)}:\n- ${pathList(changes.map(move), '\n- ', shown)}${
+        advisories(changes, 'fixed', 'Advisories fixed')}${advisories(changes, 'still open', 'Advisories still open')}`;
     }), 20),
+    ...(check.advisoryError !== undefined ? ["Advisories couldn't be looked up, so none are listed or commented on."] : []),
     ...(check.unreadable.length ? [`Not understood by the dependency check: ${pathList(check.unreadable, ', ', 20)}.`] : []),
     ...(check.unchecked.length ? [`Not checked (lockfile format not supported yet): ${pathList(check.unchecked, ', ', 20)}.`] : []),
   ];
@@ -873,6 +925,9 @@ function summary(job: Job, count: number, notes: {
     marker(job),
   ].filter(Boolean).join('\n\n');
 }
+
+const CHECK_STILL_FINDS = 'The dependency check still finds this at the current head. Resolving this thread or replying '
+  + '`Waive: <reason>` waives it.';
 
 /** Ends a reply that verified a thread fixed. Only the app's own comments are trusted to carry it. */
 const VERIFIED = '<!-- ai-review:verified -->';
