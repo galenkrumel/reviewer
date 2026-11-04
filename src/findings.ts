@@ -22,12 +22,10 @@ interface Thresholds {
 const score = (f: Finding) => rank(f.severity) * f.confidence;
 const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
 /**
- * A title as code wrote it: exact, but for the zero-width spaces sanitizing adds. The Dependency check's titles are its
- * identities, and package names that differ only in punctuation (`foo-bar`, `foo.bar`) are different packages.
+ * A finding's identity on its path: a reviewer's normalized title; the Dependency check's exact one, which it titles as
+ * posted (src/app.ts) and makes unique per package (src/dependencies.ts): `foo-bar` and `foo.bar` are two packages.
  */
-const exactTitle = (t: string) => t.replace(/​/g, '');
-/** A finding's identity on its path: the check's exact title, a reviewer's normalized one. */
-const titleKey = (f: { title: string; check?: true }) => (f.check ? `check\0${exactTitle(f.title)}` : normalizeTitle(f.title));
+const titleKey = (f: { title: string; check?: true }) => (f.check ? `check\0${f.title}` : normalizeTitle(f.title));
 
 /**
  * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor (snapping a miss of one
@@ -123,7 +121,7 @@ export function stillReported(thread: ReviewThread, findings: RecordedFinding[])
  * check's findings match, since code writes their titles exactly and one package's Advisories share a line.
  */
 export function sameTitle(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
-  return f.path === thread.path && exactTitle('comments' in thread ? threadTitle(thread) : thread.title) === exactTitle(f.title);
+  return f.path === thread.path && ('comments' in thread ? threadTitle(thread) : thread.title) === f.title;
 }
 
 /** Whether this run absorbed a re-report of the thread's finding into its waiver. */

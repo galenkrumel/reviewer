@@ -1,4 +1,5 @@
 // The Dependency check: code, never a model, compares a PR's lockfiles at base and head (ADR 0002).
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { ToolError, type FileChange, type Source } from './git.ts';
 import type { Advisory } from './ports.ts';
@@ -308,6 +309,16 @@ function offRegistry(resolved: string | undefined): string | undefined {
  * judged them. Titles name the package and the kind (and Advisory ID), never the version, so a later push that still
  * has the problem matches its Thread. A change with no version line (a minified lockfile) anchors on line 1.
  */
+/**
+ * A package name for a title, which is the Finding's identity once sanitized for posting. A plain name survives that
+ * unchanged but for a mark after a scope's `@`; any other (a link to remove, a zero-width space, anything odd) gets a
+ * hash of the name too, so two names sanitizing makes look alike stay two Findings.
+ */
+function titleName(name: string): string {
+  return /^(?:@[\w.-]+\/)?[\w.-]+$/.test(name) && !/www\./i.test(name) ? name
+    : `${name} (name ${createHash('sha256').update(name).digest('hex').slice(0, 12)})`;
+}
+
 export function dependencyFindings(check: DependencyCheck): Finding[] {
   return check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined).flatMap((c) => {
     const at = { path, line: c.line ?? 1, confidence: 1, check: true as const };
@@ -315,12 +326,12 @@ export function dependencyFindings(check: DependencyCheck): Finding[] {
     const where = offRegistry(c.resolved);
     return [
       ...(c.advisories ?? []).filter((a) => a.status === 'introduced').map((a): Finding => ({
-        ...at, title: `Advisory ${a.id} in ${c.name}`, severity: a.severity,
+        ...at, title: `Advisory ${a.id} in ${titleName(c.name)}`, severity: a.severity,
         evidence: `${a.id} (\`${a.severity}\`): ${a.summary}\n\nIt affects ${move}${c.from === undefined || c.from === c.to ? ''
           : ', and not the version it replaced'}. ${a.firstPatched ? `First patched in ${a.firstPatched}.` : 'No patched version is published yet.'}`,
       })),
       ...(where ? [{
-        ...at, title: `${c.name} resolves from outside the npm registry`, severity: 'medium' as const,
+        ...at, title: `${titleName(c.name)} resolves from outside the npm registry`, severity: 'medium' as const,
         evidence: `${move} resolves from ${where}, not registry.npmjs.org: what installs is not what the registry publishes, `
           + 'and its advisories may not cover it.',
       }] : []),

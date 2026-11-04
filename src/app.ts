@@ -569,7 +569,8 @@ export function createApp(deps: {
     const movedTo = new Map(files.filter((f) => f.oldPath).map((f) => [f.oldPath!, f.path]));
     const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).map((t) => {
       const still = checkFound.some((f) => sameTitle(t, f.path === movedTo.get(t.path) ? { ...f, path: t.path } : f));
-      const checked = dependencies.advisoryError === undefined && (compared.has(t.path) || !paths.includes(t.path));
+      // A lockfile the PR no longer changes needs no lookup to be clean.
+      const checked = !paths.includes(t.path) || (compared.has(t.path) && dependencies.advisoryError === undefined);
       return {
         thread: t, resolved: !still && checked,
         reply: still ? CHECK_STILL_FINDS : checked ? 'The dependency check no longer finds this at the current head.' : CHECK_COULDNT,
