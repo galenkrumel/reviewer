@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { delivery, FakeGitHub, gitFixture, openedPayload, ScriptedModel, testApp, toolCall } from './harness.ts';
+import { openSource } from '../src/git.ts';
+import { reviewScope } from '../src/scope.ts';
+import { delivery, FakeGitHub, gitFixture, openedPayload, ScriptedModel, tempDir, testApp, toolCall } from './harness.ts';
 
 const REPO = 'acme/widgets';
 
@@ -153,4 +155,17 @@ test('a failed focus produces a summary-only review naming it', async () => {
   const [run] = app.runs();
   assert.equal(run!.status, 'published');
   assert.match(run!.focuses.find((f) => f.focus === 'correctness')!.error ?? '', /no turn for correctness/);
+});
+
+test('reviewScope leaves excluded and over-budget files out of the diff and says which they were', async () => {
+  const fx = gitFixture({ 'src/a.ts': 'a\n' }, { 'src/a.ts': 'a\nb\n', 'docs/gen.ts': 'g\n', 'src/big.ts': lines(20) });
+  const source = await openSource({
+    dataDir: tempDir(), repo: REPO, url: fx.url, token: 'unused', headSha: fx.headSha, baseSha: fx.baseSha,
+  });
+  const { excluded, scope, diff } = await reviewScope(source, { exclude: ['docs/**'], tokenBudget: 100 });
+
+  assert.match(diff, /src\/a\.ts/);
+  assert.doesNotMatch(diff, /docs\/gen\.ts|src\/big\.ts/);
+  assert.deepEqual([...excluded], ['docs/gen.ts']);
+  assert.deepEqual(scope.skipped, ['src/big.ts']);
 });

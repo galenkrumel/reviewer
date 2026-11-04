@@ -1,6 +1,6 @@
 // Which changed files the reviewers see: exclusions, the review token budget, and the oversized-PR note.
-import { posix } from 'node:path';
-import type { FileChange } from './git.ts';
+import { matchesGlob, posix } from 'node:path';
+import type { FileChange, Source } from './git.ts';
 
 export const LOCKFILES = new Set([
   'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock', 'deno.lock',
@@ -56,4 +56,22 @@ export function selectFiles(files: FileChange[], excludedAtBase: Set<string>, to
     reviewableLines: reviewable.reduce((n, f) => n + churn(f), 0),
     directories: [...new Set(reviewable.map((f) => posix.dirname(f.path)))].sort(),
   };
+}
+
+/**
+ * The PR's changed files; `excluded`, the paths the repository excludes (.gitattributes marks at the base and
+ * `exclude` glob matches; the built-in lockfile, vendored and generated exclusions are applied by selectFiles and not
+ * listed); the reviewed scope; and the diff reviewers are given: empty when nothing is reviewed. Comments anchor only
+ * against it.
+ */
+export async function reviewScope(source: Source, opts: { exclude: string[]; tokenBudget: number }) {
+  const files = await source.changedFiles();
+  // Old paths too: the Dependency check reads a moved lockfile at its old path, where an exclusion may match.
+  const paths = files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
+  const excluded = await source.markedAtBase(paths);
+  for (const p of paths) if (opts.exclude.some((glob) => matchesGlob(p, glob))) excluded.add(p);
+  const scope = selectFiles(files, excluded, opts.tokenBudget);
+  const reviewedPaths = scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
+  const diff = scope.reviewed.length ? await source.reviewDiff(reviewedPaths) : '';
+  return { files, excluded, scope, diff };
 }
