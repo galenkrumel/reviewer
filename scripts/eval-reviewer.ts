@@ -8,7 +8,7 @@
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
 // one AGENT span named after the case id (its file name unless "id" is set), with an LLM span per model call. Its
 // metadata: case, focus, headSha, model (REVIEW_MODEL), servedModels (the models that answered) and fellBack (whether
-// any of them wasn't REVIEW_MODEL). Without a Phoenix server the spans are dropped.
+// any of them doesn't start with REVIEW_MODEL). Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
