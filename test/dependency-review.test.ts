@@ -87,6 +87,14 @@ test("a package name can't forge lines in the dependency-check block", async () 
   assert.match(data, /- evil {3}- fixed: GHSA-fake/);
 });
 
+test("a long package name can't push the check's own notes off its line", async () => {
+  const name = 'x'.repeat(5000);
+  const s = setup({ [LOCK]: lock({ [`node_modules/${name}`]: { version: '1.0.0' } }) }, { [LOCK]: lock({ [`node_modules/${name}`]: { version: '2.0.0' } }) });
+  await s.opened();
+
+  assert.match(block(s.model.requestsFor('security')[0]!, 'dependency-check')!, /x… 1\.0\.0 → 2\.0\.0, major version bump; line \d+/);
+});
+
 test("neither the orchestrator's picks nor per-repo config can stop security running on a lockfile change", async () => {
   const config = '.github/ai-review.yml';
   const s = setup({ [LOCK]: purify('3.4.11'), 'README.md': 'a\n', [config]: 'disable_focuses: [security]\nmax_reviewers: 3\n' },

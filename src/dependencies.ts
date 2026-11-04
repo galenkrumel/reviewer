@@ -367,7 +367,10 @@ export function dependencyFindings(check: DependencyCheck): Finding[] {
 
 // ponytail: past this many package changes the rest are only counted; page through them with a tool if big bumps need it.
 const MAX_DESCRIBED = 300;
-const MAX_LINE = 2000;
+// Each PR-controlled field is clipped on its own, so the check's notes after it always fit within the line's cap.
+const MAX_FIELD = 200;
+const MAX_LINE = 8000;
+const clip = (s: string, max = MAX_FIELD) => (s.length > max ? `${s.slice(0, max)}…` : s);
 const major = (v: string) => v.split('.')[0];
 
 /**
@@ -378,26 +381,27 @@ export function describeCheck(check: DependencyCheck): string {
   let room = MAX_DESCRIBED;
   const lines: string[] = [];
   // Names, paths and sources are the PR's: one line each, so none can forge another (a fake "fixed" Advisory).
-  const line = (l: string) => void lines.push(l.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').slice(0, MAX_LINE));
+  const line = (l: string) => void lines.push(l.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').slice(0, MAX_LINE));
   for (const { path, changes } of check.lockfiles) {
-    line(`${path}:`);
+    line(`${clip(path)}:`);
     if (!changes.length) line('- no packages moved');
     for (const c of changes.slice(0, Math.max(0, room))) {
       const notes = [
         c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
         c.line !== undefined && `line ${c.line}`,
-        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${c.resolved}`,
-        c.pulledBy && `pulled in by ${c.pulledBy.join(', ')}`,
+        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(c.resolved)}`,
+        c.pulledBy && `pulled in by ${c.pulledBy.map((d) => clip(d, 100)).join(', ')}`,
       ].filter(Boolean);
-      line(`- ${c.name} ${describeMove(c)}${notes.length ? `, ${notes.join('; ')}` : ''}`);
+      const move = describeMove({ ...c, from: c.from && clip(c.from), to: c.to && clip(c.to) });
+      line(`- ${clip(c.name)} ${move}${notes.length ? `, ${notes.join('; ')}` : ''}`);
       for (const a of c.advisories ?? []) {
-        line(`  - ${a.status}: ${a.id} (${a.severity}): ${a.summary}${a.firstPatched ? `. First patched in ${a.firstPatched}` : ''}`);
+        line(`  - ${a.status}: ${a.id} (${a.severity}): ${clip(a.summary, 1000)}${a.firstPatched ? `. First patched in ${a.firstPatched}` : ''}`);
       }
     }
     if (changes.length > room) line(`- …and ${changes.length - Math.max(0, room)} more package changes, not listed`);
     room -= changes.length;
   }
   if (check.advisoryError !== undefined) line("Advisories couldn't be looked up: none are listed.");
-  if (check.unreadable.length) line(`Lockfiles the check couldn't understand: ${check.unreadable.join(', ')}`);
+  if (check.unreadable.length) line(`Lockfiles the check couldn't understand: ${check.unreadable.slice(0, 20).map((p) => clip(p)).join(', ')}`);
   return lines.join('\n');
 }
