@@ -367,6 +367,7 @@ export function dependencyFindings(check: DependencyCheck): Finding[] {
 
 // ponytail: past this many package changes the rest are only counted; page through them with a tool if big bumps need it.
 const MAX_DESCRIBED = 300;
+const MAX_LINE = 2000;
 const major = (v: string) => v.split('.')[0];
 
 /**
@@ -375,10 +376,12 @@ const major = (v: string) => v.split('.')[0];
  */
 export function describeCheck(check: DependencyCheck): string {
   let room = MAX_DESCRIBED;
-  const out: string[] = [];
+  const lines: string[] = [];
+  // Names, paths and sources are the PR's: one line each, so none can forge another (a fake "fixed" Advisory).
+  const line = (l: string) => void lines.push(l.replace(/[\u0000-\u001f\u007f\u2028\u2029]/g, ' ').slice(0, MAX_LINE));
   for (const { path, changes } of check.lockfiles) {
-    out.push(`${path}:`);
-    if (!changes.length) out.push('- no packages moved');
+    line(`${path}:`);
+    if (!changes.length) line('- no packages moved');
     for (const c of changes.slice(0, Math.max(0, room))) {
       const notes = [
         c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
@@ -386,15 +389,15 @@ export function describeCheck(check: DependencyCheck): string {
         c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${c.resolved}`,
         c.pulledBy && `pulled in by ${c.pulledBy.join(', ')}`,
       ].filter(Boolean);
-      out.push(`- ${c.name} ${describeMove(c)}${notes.length ? `, ${notes.join('; ')}` : ''}`);
+      line(`- ${c.name} ${describeMove(c)}${notes.length ? `, ${notes.join('; ')}` : ''}`);
       for (const a of c.advisories ?? []) {
-        out.push(`  - ${a.status}: ${a.id} (${a.severity}): ${a.summary}${a.firstPatched ? `. First patched in ${a.firstPatched}` : ''}`);
+        line(`  - ${a.status}: ${a.id} (${a.severity}): ${a.summary}${a.firstPatched ? `. First patched in ${a.firstPatched}` : ''}`);
       }
     }
-    if (changes.length > room) out.push(`- …and ${changes.length - Math.max(0, room)} more package changes, not listed`);
+    if (changes.length > room) line(`- …and ${changes.length - Math.max(0, room)} more package changes, not listed`);
     room -= changes.length;
   }
-  if (check.advisoryError !== undefined) out.push("Advisories couldn't be looked up: none are listed.");
-  if (check.unreadable.length) out.push(`Lockfiles the check couldn't understand: ${check.unreadable.join(', ')}`);
-  return out.join('\n');
+  if (check.advisoryError !== undefined) line("Advisories couldn't be looked up: none are listed.");
+  if (check.unreadable.length) line(`Lockfiles the check couldn't understand: ${check.unreadable.join(', ')}`);
+  return lines.join('\n');
 }
