@@ -1,13 +1,12 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { matchesGlob } from 'node:path';
 import { createDashboard } from './dashboard.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import { absorbed, sanitize, stillReported, threadTitle, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
-import { BudgetExceeded, FOCUSES, InvalidReport, runReviewer, type Chat, type Focus } from './reviewer.ts';
-import { selectFiles, type Scope } from './scope.ts';
+import { BudgetExceeded, FOCUSES, InvalidReport, meteredChat, runReviewer, type Chat, type Focus } from './reviewer.ts';
+import { reviewScope, type Scope } from './scope.ts';
 import {
   isRedecision, openStore, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
 } from './store.ts';
@@ -127,20 +126,10 @@ export function createApp(deps: {
   }
 
   /** A chat for one agent invocation: its model and fallback, usage tallied into `invocations`, tokens budgeted. */
-  function meteredChat(job: Job, name: Agent, invocations: RecordedInvocation[]): Chat {
-    const { model: primary, fallbackModel, maxTokens } = agentConfig(name);
+  function chatFor(job: Job, name: Agent, invocations: RecordedInvocation[]): Chat {
     const used: RecordedInvocation = { agent: name, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
     invocations.push(used);
-    return async (messages, tools) => {
-      const res = await model.chat({ model: primary, models: fallbackModel ? [primary, fallbackModel] : undefined, messages, tools, session_id: `${job.repo.replace('/', '--')}--pr-${job.pr}` });
-      if (!used.models.includes(res.model)) used.models.push(res.model);
-      used.inputTokens += res.usage.inputTokens;
-      used.outputTokens += res.usage.outputTokens;
-      used.cost += res.usage.cost;
-      // ponytail: checked after each call, so spend can overshoot by one call; pass max_tokens if that matters.
-      if (used.inputTokens + used.outputTokens > maxTokens) throw new BudgetExceeded(`over its token budget of ${maxTokens}`);
-      return res.message;
-    };
+    return meteredChat(model, agentConfig(name), `${job.repo.replace('/', '--')}--pr-${job.pr}`, used);
   }
 
   /** One line per step of a run, so the logs alone show what it reviewed, who ran and what they found. */
@@ -234,7 +223,7 @@ export function createApp(deps: {
   /** The verifier's verdicts on the threads, or undefined when it failed. */
   async function verifyThreads(job: Job, source: Source, threads: ReviewThread[], invocations: RecordedInvocation[]) {
     const verify = () => runVerifier({
-      chat: meteredChat(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads,
+      chat: chatFor(job, 'verifier', invocations), maxTurns: agentConfig('verifier').maxTurns, source, threads,
     });
     try {
       // One retry for a malformed report, as reviewers get; a blown budget would only be spent again.
@@ -417,21 +406,15 @@ export function createApp(deps: {
     });
     const settings = parsed.settings;
     store.recordConfigWarnings(job.id, [...configWarnings, ...parsed.warnings]);
-    const files = await source.changedFiles();
-    const paths = files.map((f) => f.path);
-    const excluded = await source.markedAtBase(paths);
-    for (const p of paths) if (settings.exclude.some((glob) => matchesGlob(p, glob))) excluded.add(p);
-    const scope = selectFiles(files, excluded, config.reviewTokenBudget ?? 50_000);
-    const maxLines = settings.maxReviewableLines;
-
     // Comments anchor only against the reviewed files' diff, so excluded and skipped files are never commented on.
-    let diff = '';
+    const { files, excluded, scope, diff } = await reviewScope(source, {
+      exclude: settings.exclude, tokenBudget: config.reviewTokenBudget ?? 50_000,
+    });
+    const maxLines = settings.maxReviewableLines;
     const reported: { focus: string; finding: Finding }[] = [];
     const focuses: RecordedFocus[] = [];
     const invocations: RecordedInvocation[] = [];
     let orchestratorError: string | undefined;
-    const reviewedPaths = scope.reviewed.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
-    if (scope.reviewed.length) diff = await source.reviewDiff(reviewedPaths);
     // After a push, reviewers focus on what changed since the last full review, even if the base moved forward
     // (main merged in). A late finding on a line that review saw is still commented on. A label re-review asks for the
     // whole PR again.
@@ -451,7 +434,7 @@ export function createApp(deps: {
       let picks: Pick[];
       try {
         picks = await runOrchestrator({
-          chat: meteredChat(job, 'orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
+          chat: chatFor(job, 'orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
           pathHints: settings.pathHints,
         });
       } catch (err) {
@@ -471,7 +454,7 @@ export function createApp(deps: {
       for (const { focus, reason } of selected) {
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
-          focus, chat: meteredChat(job, focus, invocations), maxTurns: agentConfig(focus).maxTurns,
+          focus, chat: chatFor(job, focus, invocations), maxTurns: agentConfig(focus).maxTurns,
           source, diff, newDiff: newcomers.includes(focus) ? undefined : newDiff, title: job.title, body: job.body,
         });
         const failed = (err: unknown, final: boolean) =>
