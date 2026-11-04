@@ -2,7 +2,7 @@
 import { matchesGlob, posix } from 'node:path';
 import type { FileChange, Source } from './git.ts';
 
-const LOCKFILES = new Set([
+export const LOCKFILES = new Set([
   'package-lock.json', 'npm-shrinkwrap.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'bun.lock', 'deno.lock',
   'Cargo.lock', 'Gemfile.lock', 'poetry.lock', 'Pipfile.lock', 'uv.lock', 'pdm.lock', 'composer.lock', 'go.sum',
   'mix.lock', 'pubspec.lock', 'Podfile.lock', 'packages.lock.json', 'flake.lock', 'gradle.lockfile',
@@ -64,7 +64,8 @@ export function selectFiles(files: FileChange[], excludedAtBase: Set<string>, to
  */
 export async function reviewScope(source: Source, opts: { exclude: string[]; tokenBudget: number }) {
   const files = await source.changedFiles();
-  const paths = files.map((f) => f.path);
+  // Old paths too: the Dependency check reads a moved lockfile at its old path, where an exclusion may match.
+  const paths = files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path]));
   const excluded = await source.markedAtBase(paths);
   for (const p of paths) if (opts.exclude.some((glob) => matchesGlob(p, glob))) excluded.add(p);
   const scope = selectFiles(files, excluded, opts.tokenBudget);
