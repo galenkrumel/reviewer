@@ -1,7 +1,10 @@
 // The Dependency check: code, never a model, compares a PR's lockfiles at base and head (ADR 0002).
+import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { ToolError, type FileChange, type Source } from './git.ts';
+import type { Advisory } from './ports.ts';
 import { LOCKFILES } from './scope.ts';
+import type { Finding } from './store.ts';
 
 /**
  * One package the PR added, removed, or moved from one version to another (or to the same version from a new source
@@ -19,7 +22,15 @@ export interface PackageChange {
   integrity?: string;
   /** Its `"version"` line at head; unset for a removed package. */
   line?: number;
+  /** The Advisories open against either side, once looked up; unset when none are. */
+  advisories?: ClassifiedAdvisory[];
 }
+
+/**
+ * An Advisory relative to the PR: introduced (open against the version it moves to or adds, not the one it replaced),
+ * still open (both), or fixed (only the one replaced or removed).
+ */
+export type ClassifiedAdvisory = Omit<Advisory, 'withdrawn'> & { status: 'introduced' | 'still open' | 'fixed' };
 
 /** "3.4.11 → 3.4.17", "2.0.0 (added)" or "1.0.0 (removed)". */
 export const describeMove = (c: PackageChange) => c.from === undefined ? `${c.to} (added)`
@@ -33,9 +44,30 @@ export interface DependencyCheck {
   unreadable: string[];
   /** Changed lockfiles in formats the check doesn't support yet. */
   unchecked: string[];
+  /** Why the Advisories couldn't be looked up, when they couldn't. It blocks approval. */
+  advisoryError?: string;
 }
 
 const SUPPORTED = new Set(['package-lock.json']);
+/** npm's default registry: anything else a package resolves from is off-registry. */
+const REGISTRY = 'https://registry.npmjs.org/';
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+/**
+ * Whether a registry URL is exactly this package's tarball at this version, as fetched: a semver version, no escapes
+ * in the name, and a URL the parser leaves as written (no `..`, query or fragment). Names keep their case: old
+ * packages (`JSONStream`) have capitals.
+ */
+function isTarballOf(resolved: string, name: string, version: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(resolved);
+  } catch {
+    return false;
+  }
+  return SEMVER.test(version) && !name.includes('%') && url.href === resolved && !url.search && !url.hash
+    && resolved === `${REGISTRY}${name}/-/${name.split('/').pop()}-${version}.tgz`;
+}
 const MAX_ENTRIES = 50_000;
 // A PR can change any number of lockfiles: past these totals for the run, the rest are unreadable rather than read.
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
@@ -72,7 +104,12 @@ function entries(text: string | undefined): Entry[] | undefined {
     if (typeof e.version !== 'string') return;
     // An `npm:` alias is installed under its alias and records the real name.
     const name = typeof e.name === 'string' ? e.name : key.slice(at + 'node_modules/'.length);
-    out.push({ name, version: e.version, resolved: str(e.resolved), integrity: str(e.integrity), key });
+    // npm installs what `resolved` names, and advisories are looked up by name and version: a registry tarball of
+    // another package or version is not a lockfile the check understands. The name and version must be plain ones
+    // too, or the URL could still say something else once fetched (`a/../evil`, `1.0.0#`).
+    const resolved = str(e.resolved);
+    if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
+    out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
   return out;
 }
@@ -96,7 +133,8 @@ const source = (e: Entry) => `${e.resolved} ${e.integrity}`;
 
 /**
  * The line of each package key's first `"version"`, as npm writes lockfiles: one key per line, version before any
- * nested map. ponytail: line-based; a minified lockfile anchors nothing. Track JSON positions if one turns up.
+ * nested map. ponytail: line-based; a minified lockfile has no version lines, so the check's Findings fall back to
+ * line 1. Track JSON positions if one turns up.
  */
 function versionLines(text: string): Map<string, number> {
   const out = new Map<string, number>();
@@ -158,9 +196,9 @@ export async function checkDependencies(
   return check;
 }
 
-// ponytail: numeric string order, so a prerelease sorts after its release; only pairing of several moves of one name
-// depends on it. Compare by semver if mispaired moves show up.
-const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
+// ponytail: numeric string order, so a prerelease sorts after its release; pairing several moves of one name, and the
+// first patched version an Advisory names (src/github.ts), depend on it. Compare by semver if either goes wrong.
+export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
 
 /**
  * The packages a lockfile change added, removed or moved, by name then version, or undefined when either side isn't
@@ -203,4 +241,101 @@ export function compareLockfile(base: string | undefined, head: string | undefin
     }
   }
   return changes;
+}
+
+// ponytail: past this a run looks nothing up and blocks; batch by name (`affects` takes many) and match ranges in code
+// if big bumps hit it.
+const MAX_LOOKUPS = 1000;
+const LOOKUPS_AT_ONCE = 8;
+
+/**
+ * Look up the Advisories against both sides of every package change, once per name and version, and classify them on
+ * each change. Withdrawn ones don't count. Any failed lookup, or more lookups than a run makes, fails them all.
+ */
+export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: string, version: string) => Promise<Advisory[]>) {
+  const changes = check.lockfiles.flatMap((l) => l.changes);
+  const key = (name: string, version: string) => `${name}@${version}`;
+  const wanted = new Map<string, [string, string]>();
+  for (const c of changes) for (const v of [c.from, c.to]) if (v !== undefined) wanted.set(key(c.name, v), [c.name, v]);
+  if (wanted.size > MAX_LOOKUPS) {
+    check.advisoryError = `${wanted.size} package versions to look up, over the run's ${MAX_LOOKUPS}`;
+    return;
+  }
+  const found = new Map<string, Advisory[]>();
+  const queue = [...wanted];
+  try {
+    await Promise.all(Array.from({ length: LOOKUPS_AT_ONCE }, async () => {
+      for (let next = queue.shift(); next; next = queue.shift()) {
+        const [k, [name, version]] = next;
+        // The first failure empties the queue, so the other lookups stop too.
+        found.set(k, (await lookup(name, version).catch((err) => { queue.length = 0; throw err; })).filter((a) => !a.withdrawn));
+      }
+    }));
+  } catch (err) {
+    check.advisoryError = err instanceof Error ? err.message : String(err);
+    return;
+  }
+  const strip = ({ withdrawn: _, ...a }: Advisory) => a;
+  for (const c of changes) {
+    const [before, after] = [c.from, c.to].map((v) => (v === undefined ? [] : found.get(key(c.name, v))!)) as [Advisory[], Advisory[]];
+    const [was, is] = [new Set(before.map((a) => a.id)), new Set(after.map((a) => a.id))];
+    const advisories: ClassifiedAdvisory[] = [
+      ...after.map((a) => ({ ...strip(a), status: was.has(a.id) ? 'still open' as const : 'introduced' as const })),
+      ...before.filter((a) => !is.has(a.id)).map((a) => ({ ...strip(a), status: 'fixed' as const })),
+    ];
+    if (advisories.length) c.advisories = advisories;
+  }
+}
+
+/**
+ * Where an off-registry package resolves from, in words; undefined for the registry, or none recorded (bundled).
+ * ponytail: the kind is a guess from the URL's shape, for the comment's wording only; every kind is a Finding alike.
+ */
+function offRegistry(resolved: string | undefined): string | undefined {
+  if (resolved === undefined || resolved.startsWith(REGISTRY)) return;
+  let host: string | undefined;
+  try {
+    host = new URL(resolved.replace(/^git\+/, '')).hostname || undefined;
+  } catch { /* not a URL: a git shorthand or a local path */ }
+  const kind = /^(?:git[+:]|github:|gitlab:|bitbucket:)/.test(resolved) || /\.git(?:#|$)/.test(resolved) ? 'a git repository'
+    : resolved.startsWith('file:') ? 'a local path'
+      : /^https?:/.test(resolved) ? (resolved.includes('/-/') ? 'another registry' : 'a plain URL') : 'an unrecognised source';
+  return host ? `${kind} on \`${host}\`` : kind;
+}
+
+/**
+ * The Findings the check makes, attributed to the security focus: each introduced Advisory, at its own severity, and
+ * each package the PR moves to or adds that resolves from outside the registry, at medium. Confidence 1.0: no model
+ * judged them. Titles name the package and the kind (and Advisory ID), never the version, so a later push that still
+ * has the problem matches its Thread. A change with no version line (a minified lockfile) anchors on line 1.
+ */
+/**
+ * A package name for a title, which is the Finding's identity once sanitized for posting. A plain name survives that
+ * unchanged but for a mark after a scope's `@`. Any other (a link, a zero-width space, markdown, anything odd) keeps
+ * only plain characters, the rest shown as `?`, plus a hash of the whole name that sanitizing can't reach (hex, after a
+ * space, in parentheses), so two names that would look alike once posted stay two Findings.
+ */
+function titleName(name: string): string {
+  return /^(?:@[\w.-]+\/)?[\w.-]+$/.test(name) && !/www\./i.test(name) ? name
+    : `${name.replace(/[^\w.@/-]/g, '?')} (name ${createHash('sha256').update(name).digest('hex').slice(0, 32)})`;
+}
+
+export function dependencyFindings(check: DependencyCheck): Finding[] {
+  return check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined).flatMap((c) => {
+    const at = { path, line: c.line ?? 1, confidence: 1, check: true as const };
+    const move = `${c.name} ${describeMove(c)}`;
+    const where = offRegistry(c.resolved);
+    return [
+      ...(c.advisories ?? []).filter((a) => a.status === 'introduced').map((a): Finding => ({
+        ...at, title: `Advisory ${a.id} in ${titleName(c.name)}`, severity: a.severity,
+        evidence: `${a.id} (\`${a.severity}\`): ${a.summary}\n\nIt affects ${move}${c.from === undefined || c.from === c.to ? ''
+          : ', and not the version it replaced'}. ${a.firstPatched ? `First patched in ${a.firstPatched}.` : 'No patched version is published yet.'}`,
+      })),
+      ...(where ? [{
+        ...at, title: `${titleName(c.name)} resolves from outside the npm registry`, severity: 'medium' as const,
+        evidence: `${move} resolves from ${where}, not registry.npmjs.org: what installs is not what the registry publishes, `
+          + 'and its advisories may not cover it.',
+      }] : []),
+    ];
+  }));
 }

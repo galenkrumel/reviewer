@@ -31,6 +31,8 @@ export interface Finding {
   suggested_fix?: string;
   /** The reviewer's claim that suggested_fix is replacement code for exactly start_line..line. */
   fix_replaces_anchor?: boolean;
+  /** Made by the Dependency check, never a reviewer: code alone decides when its Thread is Fixed. */
+  check?: true;
 }
 
 export interface RecordedFinding extends Finding {
@@ -281,6 +283,13 @@ export function openStore(dataDir: string, clock: Clock) {
       return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
         WHERE r.repo = ? AND r.pr = ? AND r.head_sha != ? AND r.status = 'published' AND f.outcome = 'published'`)
         .all(repo, pr, headSha).map((row: any) => JSON.parse(row.data));
+    },
+
+    /** Findings the Dependency check published on this PR, at any head: their Threads are decided by code. */
+    checkFindings(repo: string, pr: number): RecordedFinding[] {
+      return db.prepare(`SELECT f.data FROM findings f JOIN runs r ON r.id = f.run_id
+        WHERE r.repo = ? AND r.pr = ? AND r.status = 'published' AND f.outcome = 'published' AND json_extract(f.data, '$.check') = 1`)
+        .all(repo, pr).map((row: any) => JSON.parse(row.data));
     },
 
     /**

@@ -32,11 +32,11 @@ One kind of review a Run can ask for: correctness, security, performance, archit
 _Avoid_: Reviewer type, authorize (for selecting a focus)
 
 **Dependency check**:
-The part of a Run that compares a PR's lockfiles at base and head and lists the packages that changed. It is not a Focus: no model runs it and the orchestrator cannot skip it. So far it compares npm lockfiles only. Still to come (ADR 0002): looking up known advisories for the changed packages, and giving the security focus what it found.
+The part of a Run that compares a PR's lockfiles at base and head, lists the packages that changed and looks up their Advisories. It is not a Focus: no model runs it and the orchestrator cannot skip it. It makes Findings of its own (an introduced Advisory, a package resolved from outside the registry), and code alone decides when their Threads are Fixed. So far it compares npm lockfiles only. Still to come (ADR 0002): giving the security focus what it found.
 _Avoid_: Dependency review (that's what the security focus does with it), audit
 
 **Advisory**:
-A published report that a range of a package's versions is vulnerable, with its own severity. Relative to a PR, an Advisory is **introduced** (open against a version the PR moves to or adds, and not against the version it replaced), **still open** (open before and after), or **fixed** (open before, not after). Only an introduced Advisory is a Finding, at the Advisory's own severity; a model never lowers it, and a Maintainer can waive it. Advisories are not looked up yet (ADR 0002).
+A published report that a range of a package's versions is vulnerable, with its own severity. Relative to a PR, an Advisory is **introduced** (open against a version the PR moves to or adds, and not against the version it replaced), **still open** (open before and after), or **fixed** (open before, not after). Only an introduced Advisory is a Finding, at the Advisory's own severity; a model never lowers it, and a Maintainer can waive it. Withdrawn Advisories don't count.
 _Avoid_: Vulnerability, CVE (one Advisory may carry several IDs)
 
 **Doc drift**:

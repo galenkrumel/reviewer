@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path';
 import { after } from 'node:test';
 import { createApp, type AppConfig } from '../src/app.ts';
 import type {
-  AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest, ReviewThread,
+  Advisory, AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest, ReviewThread,
 } from '../src/ports.ts';
 
 const tmpRoots: string[] = [];
@@ -70,6 +70,12 @@ export class FakeGitHub implements GitHubPort {
   /** Every dismissal attempted, refused or not. */
   dismissals: number[] = [];
   tokensMinted: number[] = [];
+  /** The advisory database: each advisory names the versions of one package it affects. */
+  advisoryDb: (Advisory & { package: string; versions: string[] })[] = [];
+  /** Advisory lookups throw while set. */
+  advisoriesDown = false;
+  /** Every advisory lookup, as `name@version`. */
+  lookups: string[] = [];
   private nextId = 1;
 
   addPullRequest(repo: string, url: string, pr: PullRequest) {
@@ -172,6 +178,14 @@ export class FakeGitHub implements GitHubPort {
     this.checkToken(token);
     if (this.resolveRefused) throw new Error('GitHub GraphQL: Resource not accessible by integration');
     this.thread(threadId).resolved = true;
+  }
+
+  async advisories(token: string, name: string, version: string) {
+    this.checkToken(token);
+    this.lookups.push(`${name}@${version}`);
+    if (this.advisoriesDown) throw new Error('GitHub GET /advisories: 502');
+    return this.advisoryDb.filter((a) => a.package === name && a.versions.includes(version))
+      .map(({ package: _, versions: __, ...a }) => ({ ...a }));
   }
 }
 

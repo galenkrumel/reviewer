@@ -21,6 +21,11 @@ interface Thresholds {
 
 const score = (f: Finding) => rank(f.severity) * f.confidence;
 const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+/**
+ * A finding's identity on its path: a reviewer's normalized title; the Dependency check's exact one, which it titles as
+ * posted (src/app.ts) and makes unique per package (src/dependencies.ts): `foo-bar` and `foo.bar` are two packages.
+ */
+const titleKey = (f: { title: string; check?: true }) => (f.check ? `check\0${f.title}` : normalizeTitle(f.title));
 
 /**
  * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor (snapping a miss of one
@@ -30,7 +35,7 @@ const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu
  */
 export function validate(
   reported: { focus: string; finding: Finding }[], changed: Map<string, Set<number>>,
-  posted: Pick<RecordedFinding, 'path' | 'title' | 'line' | 'fileLevel'>[], limits: Thresholds,
+  posted: Pick<RecordedFinding, 'path' | 'title' | 'line' | 'fileLevel' | 'check'>[], limits: Thresholds,
   threads: ReviewThread[] | undefined, waivers: Waiver[],
 ): RecordedFinding[] {
   const isWaived = waivedBy(threads, waivers);
@@ -63,23 +68,27 @@ export function validate(
   // Doc drift is a different problem from a bug on the same line, so documentation findings never merge with other focuses.
   // A file-level finding never merges with an anchored one either: the merged comment would post on one and lose the other's
   // place (its line, or its thread on the file).
+  // Nor does one the Dependency check made with a reviewer's: code decides its Thread, a model the other's.
+  // The check's are all security's, so they merge with nothing: skipping the scan keeps a lockfile with many thousands of
+  // them linear.
   const isDoc = (x: RecordedFinding) => x.focus === 'documentation';
   for (const f of ranked) {
-    const into = kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus)
-      && isDoc(k) === isDoc(f) && !k.fileLevel === !f.fileLevel);
+    const into = f.check ? undefined : kept.find((k) => k.path === f.path && Math.abs(k.line - f.line) <= MERGE_WINDOW && !k.focuses!.includes(f.focus)
+      && isDoc(k) === isDoc(f) && !k.fileLevel === !f.fileLevel && !k.check === !f.check);
     if (into) { f.outcome = 'merged'; into.focuses!.push(f.focus); continue; }
     f.focuses = [f.focus];
     kept.push(f);
   }
 
   // An earlier comment still counts while its line is in the current diff; once that line is gone, the finding is new again.
-  // A file-level comment counts while its file is in the diff.
+  // A file-level comment counts while its file is in the diff, and so does the Dependency check's: its title names the
+  // package, and a lockfile's lines shift whenever a package is added above.
   // ponytail: same title on the same path is the identity, and the old line number isn't mapped to the new head.
-  const seen = new Set(posted.filter((p) => (p.fileLevel ? changed.has(p.path) : changed.get(p.path)?.has(p.line)))
-    .map((p) => `${p.path}\0${normalizeTitle(p.title)}`));
+  const seen = new Set(posted.filter((p) => (p.fileLevel || p.check ? changed.has(p.path) : changed.get(p.path)?.has(p.line)))
+    .map((p) => `${p.path}\0${titleKey(p)}`));
   let published = 0;
   for (const f of kept) {
-    if (seen.has(`${f.path}\0${normalizeTitle(f.title)}`)) f.outcome = 'duplicate';
+    if (seen.has(`${f.path}\0${titleKey(f)}`)) f.outcome = 'duplicate';
     else if (published++ >= limits.maxComments) f.outcome = 'over_cap';
   }
   return out;
@@ -95,7 +104,8 @@ export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[])
   // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
   const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
   const others = threads.filter((t) => !waivedIds.has(t.id));
-  return (f: Pick<Finding, 'path' | 'line' | 'title'>) => waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f));
+  return (f: Pick<Finding, 'path' | 'line' | 'title' | 'check'>) => (f.check ? waived.some((t) => sameTitle(t, f))
+    : waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f)));
 }
 
 /**
@@ -103,7 +113,15 @@ export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[])
  * same path, and a nearby line or the same title. Such a thread must stay open.
  */
 export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
-  return findings.some((f) => f.outcome === 'duplicate' && raises(thread, f));
+  return findings.some((f) => f.outcome === 'duplicate' && (f.check ? sameTitle(thread, f) : raises(thread, f)));
+}
+
+/**
+ * Whether a thread (or a waiver's record of one) raised a finding with this very title, on its path: how the Dependency
+ * check's findings match, since code writes their titles exactly and one package's Advisories share a line.
+ */
+export function sameTitle(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
+  return f.path === thread.path && ('comments' in thread ? threadTitle(thread) : thread.title) === f.title;
 }
 
 /** Whether this run absorbed a re-report of the thread's finding into its waiver. */

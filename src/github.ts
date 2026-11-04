@@ -1,6 +1,7 @@
 // Real GitHub adapter: App JWT -> installation token -> REST calls.
 import { sign } from 'node:crypto';
-import type { GitHubPort, NewReview, ReviewThread } from './ports.ts';
+import { byVersion } from './dependencies.ts';
+import type { Advisory, GitHubPort, NewReview, ReviewThread } from './ports.ts';
 
 const API = 'https://api.github.com';
 const b64url = (s: string | Buffer) => Buffer.from(s).toString('base64url');
@@ -14,7 +15,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
     return `${unsigned}.${b64url(sign('sha256', Buffer.from(unsigned), privateKey))}`;
   }
 
-  async function api(auth: string, method: string, path: string, body?: unknown): Promise<any> {
+  async function request(auth: string, method: string, path: string, body?: unknown) {
     const res = await fetch(API + path, {
       method,
       headers: {
@@ -26,9 +27,12 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       },
       body: body ? JSON.stringify(body) : undefined,
     });
-    if (!res.ok) throw new Error(`GitHub ${method} ${path}: ${res.status}`);
-    return res.json();
+    // The path alone: a query can carry PR-controlled text (a package name).
+    if (!res.ok) throw new Error(`GitHub ${method} ${path.split('?')[0]}: ${res.status}`);
+    return res;
   }
+  const api = async (auth: string, method: string, path: string, body?: unknown): Promise<any> =>
+    (await request(auth, method, path, body)).json();
 
   async function graphql(token: string, query: string, variables: object): Promise<any> {
     const res = await api(token, 'POST', '/graphql', { query, variables });
@@ -130,6 +134,30 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       await graphql(token, `mutation($id: ID!, $body: String!) {
         addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }`,
       { id: threadId, body });
+    },
+    async advisories(token, name, version) {
+      const out: Advisory[] = [];
+      // `affects` filters by version on GitHub's side; pages follow the Link header's cursor.
+      let path: string | undefined = `/advisories?${new URLSearchParams({ type: 'reviewed', ecosystem: 'npm', affects: `${name}@${version}`, per_page: '100' })}`;
+      while (path) {
+        const res = await request(token, 'GET', path);
+        for (const a of await res.json()) {
+          // One advisory can list several ranges of the package: the lowest fix above this version is the one to take.
+          const patched = (a.vulnerabilities ?? [])
+            // A string on this endpoint; `{ identifier }` elsewhere in GitHub's API, so either is read.
+            .filter((v: any) => v.package?.ecosystem === 'npm' && v.package?.name === name)
+            .map((v: any) => (typeof v.first_patched_version === 'string' ? v.first_patched_version : v.first_patched_version?.identifier))
+            .filter((p: unknown): p is string => typeof p === 'string')
+            .filter((p: string) => byVersion(p, version) > 0).sort(byVersion);
+          out.push({
+            id: a.ghsa_id, summary: a.summary ?? '', withdrawn: a.withdrawn_at != null,
+            severity: ['critical', 'high', 'medium', 'low'].includes(a.severity) ? a.severity : 'medium',
+            ...(patched.length && { firstPatched: patched[0] }),
+          });
+        }
+        path = /<https:\/\/api\.github\.com(\/[^>]*)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1];
+      }
+      return out;
     },
     async resolveThread(token, threadId) {
       await graphql(token, `mutation($id: ID!) { resolveReviewThread(input: { threadId: $id }) { thread { id } } }`,

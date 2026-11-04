@@ -78,15 +78,34 @@ test("a run's page shows what the Dependency check found, escaped", async () => 
   const pr = { number: 8, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
   const { app, github } = testApp({ model: new ScriptedModel([]), config: { adminPassword: PASSWORD } });
   github.addPullRequest(REPO, fx.url, pr);
+  github.advisoryDb.push(
+    { id: 'GHSA-new', severity: 'high', summary: XSS, withdrawn: false, package: XSS, versions: ['1.1.0'] },
+    { id: 'GHSA-old', severity: 'low', summary: 'x', withdrawn: false, package: XSS, versions: ['1.0.0'] },
+  );
   await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
   await app.drain();
 
   const body = get(app, `/admin/runs/${app.runs()[0]!.id}`)!.body;
   assert.match(body, /<h2>Dependency check<\/h2>/);
   assert.ok(body.includes('&#60;img src=x onerror=alert(1)&#62;</td><td>1.0.0 → 1.1.0'), body);
+  assert.ok(body.includes('<code>GHSA-new</code> high, <span class="err">introduced</span><br><code>GHSA-old</code> low, <span>fixed</span>'), body);
   assert.ok(!body.includes(XSS));
   assert.match(body, /Not understood[^]*<code>a\/package-lock.json<\/code>/);
   assert.match(body, /Not checked[^]*<code>yarn.lock<\/code>/);
+});
+
+test("a run's page names a failed advisory lookup", async () => {
+  const lock = (v: string) => JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/a': { version: v } } });
+  const fx = gitFixture({ 'package-lock.json': lock('1.0.0') }, { 'package-lock.json': lock('1.1.0') });
+  const pr = { number: 8, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const { app, github } = testApp({ model: new ScriptedModel([]), config: { adminPassword: PASSWORD } });
+  github.addPullRequest(REPO, fx.url, pr);
+  github.advisoriesDown = true;
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  assert.match(get(app, `/admin/runs/${app.runs()[0]!.id}`)!.body,
+    /<p class="err">Advisories couldn't be looked up, blocking approval: GitHub GET \/advisories: 502<\/p>/);
 });
 
 test('queued runs show their place in line, and the list filters and pages', async () => {
