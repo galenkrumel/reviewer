@@ -5,6 +5,9 @@
 // A missing argument, malformed case JSON, an unknown focus, an unsupported url or a missing required environment
 // variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
 // The run prints { findings | error, transcript, usage } as JSON; a fetching, scoping or reviewer error exits 1.
+// It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
+// one AGENT span for the review, with an LLM span per model call. Without a Phoenix server the spans are dropped.
+import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,21 +44,59 @@ const metered = meteredChat(
 );
 // runTools passes the same growing array on every turn, so the last one seen is the whole conversation.
 let transcript: ChatMessage[] = [];
-const chat: Chat = (messages, tools) => { transcript = messages; return metered(messages, tools); };
 
-try {
-  // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
-  // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
-  const source = await openSource({
-    dataDir: join(tmpdir(), 'reviewer-eval'), repo: testCase.url.replace(/\.git$/, '').split('/').slice(-2).join('/'),
-    url: testCase.url, token, headSha: testCase.headSha, baseSha: testCase.baseSha,
-  });
-  const { diff } = await reviewScope(source, { exclude: testCase.exclude ?? [], tokenBudget: TOKEN_BUDGET });
-  const findings = await runReviewer({
-    focus: testCase.focus, chat, maxTurns: MAX_TURNS, source, diff, title: testCase.title, body: testCase.body,
-  });
-  console.log(JSON.stringify({ findings, transcript, usage }, null, 2));
-} catch (err) {
-  console.log(JSON.stringify({ error: err instanceof Error ? err.message : String(err), transcript, usage }, null, 2));
-  process.exitCode = 1;
-}
+const provider = register({ projectName: process.env.PHOENIX_PROJECT ?? 'reviewer-eval' });
+const tracer = trace.getTracer('reviewer-eval');
+const json = (key: 'input' | 'output', value: unknown) => key === 'input'
+  ? { [SC.INPUT_VALUE]: JSON.stringify(value), [SC.INPUT_MIME_TYPE]: 'application/json' }
+  : { [SC.OUTPUT_VALUE]: JSON.stringify(value), [SC.OUTPUT_MIME_TYPE]: 'application/json' };
+
+// Tool results show up in the next call's input messages, so there are no separate tool spans.
+const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (span) => {
+  transcript = messages;
+  const before = { input: usage.inputTokens, output: usage.outputTokens, cost: usage.cost };
+  span.setAttributes({ [SC.OPENINFERENCE_SPAN_KIND]: 'LLM', [SC.LLM_MODEL_NAME]: model, ...json('input', messages) });
+  try {
+    const reply = await metered(messages, tools);
+    span.setAttributes({
+      ...json('output', reply),
+      [SC.LLM_TOKEN_COUNT_PROMPT]: usage.inputTokens - before.input,
+      [SC.LLM_TOKEN_COUNT_COMPLETION]: usage.outputTokens - before.output,
+      [SC.LLM_COST_TOTAL]: usage.cost - before.cost,
+    });
+    return reply;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    throw err;
+  } finally {
+    span.end();
+  }
+});
+
+await tracer.startActiveSpan('review', async (span) => {
+  span.setAttributes({ [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase) });
+  try {
+    // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
+    // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
+    const source = await openSource({
+      dataDir: join(tmpdir(), 'reviewer-eval'), repo: testCase.url.replace(/\.git$/, '').split('/').slice(-2).join('/'),
+      url: testCase.url, token, headSha: testCase.headSha, baseSha: testCase.baseSha,
+    });
+    const { diff } = await reviewScope(source, { exclude: testCase.exclude ?? [], tokenBudget: TOKEN_BUDGET });
+    const findings = await runReviewer({
+      focus: testCase.focus, chat, maxTurns: MAX_TURNS, source, diff, title: testCase.title, body: testCase.body,
+    });
+    span.setAttributes(json('output', findings));
+    console.log(JSON.stringify({ findings, transcript, usage }, null, 2));
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    console.log(JSON.stringify({ error: err instanceof Error ? err.message : String(err), transcript, usage }, null, 2));
+    process.exitCode = 1;
+  } finally {
+    span.end();
+  }
+});
+// Spans are batched, so flush them before the script exits.
+await provider.shutdown();
