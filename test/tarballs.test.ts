@@ -163,6 +163,45 @@ test('a package.json named by a pax header or a GNU long name is the one read, a
   assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**g adds an install script**', '**p adds an install script**']);
 });
 
+test('a tarball a reader could take another way than npm is not inspected, rather than read one way', async () => {
+  const names = ['inner', 'chain', 'dot', 'glob'];
+  const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
+    Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
+  const manifest = JSON.stringify({ name: 'x' });
+  // A path line hidden inside another record's value: only a line-by-line reader sees it.
+  const hidden = pax({ comment: `x\n27 path=package/package.json` });
+  const scripted = JSON.stringify({ name: 'x', scripts: { postinstall: 'node a.js' } });
+  s.registry.tarballs.set(url('inner', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': hidden, 'package/a': scripted }, { 'PaxHeader/a': 'x' }));
+  s.registry.tarballs.set(url('chain', '1.0.1'), tarball({
+    'package/package.json': manifest, '././@LongLink': 'package/a\0', 'PaxHeader/b': pax({ path: 'package/b' }), 'package/c': manifest,
+  }, { '././@LongLink': 'L', 'PaxHeader/b': 'x' }));
+  s.registry.tarballs.set(url('dot', '1.0.1'), tarball({ 'package/package.json': manifest, './x/package.json': manifest }));
+  s.registry.tarballs.set(url('glob', '1.0.1'), tarball({ 'pax_global_header': pax({ path: 'package/package.json' }), 'package/package.json': manifest }, { 'pax_global_header': 'g' }));
+  const review = await s.opened();
+
+  // The hidden line is a comment's value, as node-tar reads it: `package/a` stays `package/a`.
+  assert.equal(review.comments.length, 0);
+  assert.match(review.body, /3 packages weren't inspected/);
+  assert.match(review.body, /- `chain 1\.0\.1`\n- `dot 1\.0\.1`\n- `glob 1\.0\.1`\n\n/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 3);
+});
+
+test('a lockfile entry is bundled only as npm writes one: inBundle, no source, under a package that moved and was inspected', async () => {
+  const inner = (v: string, extra: object = {}) => ({ version: v, inBundle: true, ...extra });
+  const s = setup(
+    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0') },
+    {
+      'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.1'),
+      'node_modules/b': pkg('b', '1.0.1', { inBundle: true }),
+    },
+  );
+  const review = await s.opened();
+
+  assert.ok(s.registry.fetched.includes(url('b', '1.0.1')), 'an inBundle entry with a source of its own is fetched');
+  assert.match(review.body, /1 package wasn't inspected/);
+  assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.1`\n\n/);
+});
+
 test('a binding.gyp with no install script runs node-gyp on install, so it counts as one', async () => {
   const s = setup({ 'node_modules/native': pkg('native', '1.0.0') }, { 'node_modules/native': pkg('native', '1.1.0') });
   s.registry.tarballs.set(url('native', '1.1.0'), packageTarball('native', '1.1.0', {}, { 'binding.gyp': '{}' }));
