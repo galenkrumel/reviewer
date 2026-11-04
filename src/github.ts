@@ -153,8 +153,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
             ...(patched.length && { firstPatched: patched[0] }),
           });
         }
-        const next = /<https:\/\/api\.github\.com(\/[^>]*)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1];
-        path = next;
+        path = /<https:\/\/api\.github\.com(\/[^>]*)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1];
       }
       return out;
     },

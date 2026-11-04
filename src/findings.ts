@@ -97,7 +97,7 @@ export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[])
   // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
   const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
   const others = threads.filter((t) => !waivedIds.has(t.id));
-  return (f: Pick<Finding, 'path' | 'line' | 'title' | 'check'>) => (f.check ? waived.some((t) => titled(t, f))
+  return (f: Pick<Finding, 'path' | 'line' | 'title' | 'check'>) => (f.check ? waived.some((t) => sameTitle(t, f))
     : waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f)));
 }
 
@@ -106,14 +106,14 @@ export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[])
  * same path, and a nearby line or the same title. Such a thread must stay open.
  */
 export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
-  return findings.some((f) => f.outcome === 'duplicate' && (f.check ? titled(thread, f) : raises(thread, f)));
+  return findings.some((f) => f.outcome === 'duplicate' && (f.check ? sameTitle(thread, f) : raises(thread, f)));
 }
 
 /**
  * Whether a thread (or a waiver's record of one) raised a finding with this very title, on its path: how the Dependency
  * check's findings match, since code writes their titles and one package's Advisories share a line.
  */
-export function titled(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
+export function sameTitle(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
   return f.path === thread.path && normalizeTitle('comments' in thread ? threadTitle(thread) : thread.title) === normalizeTitle(f.title);
 }
 

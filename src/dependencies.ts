@@ -50,6 +50,9 @@ export interface DependencyCheck {
 const SUPPORTED = new Set(['package-lock.json']);
 /** npm's default registry: anything else a package resolves from is off-registry. */
 const REGISTRY = 'https://registry.npmjs.org/';
+/** npm's package-name grammar, and a semver version: nothing in either that a URL reads specially. */
+const NPM_NAME = /^(?:@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*$/;
+const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const MAX_ENTRIES = 50_000;
 // A PR can change any number of lockfiles: past these totals for the run, the rest are unreadable rather than read.
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
@@ -87,9 +90,11 @@ function entries(text: string | undefined): Entry[] | undefined {
     // An `npm:` alias is installed under its alias and records the real name.
     const name = typeof e.name === 'string' ? e.name : key.slice(at + 'node_modules/'.length);
     // npm installs what `resolved` names, and advisories are looked up by name and version: a registry tarball of
-    // another package or version is not a lockfile the check understands.
+    // another package or version is not a lockfile the check understands. The name and version must be plain ones
+    // too, or the URL could still say something else once fetched (`a/../evil`, `1.0.0#`).
     const resolved = str(e.resolved);
-    if (resolved?.startsWith(REGISTRY) && resolved !== `${REGISTRY}${name}/-/${name.split('/').pop()}-${e.version}.tgz`) return;
+    if (resolved?.startsWith(REGISTRY) && (!NPM_NAME.test(name) || !SEMVER.test(e.version)
+      || resolved !== `${REGISTRY}${name}/-/${name.split('/').pop()}-${e.version}.tgz`)) return;
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
   return out;
@@ -176,8 +181,8 @@ export async function checkDependencies(
   return check;
 }
 
-// ponytail: numeric string order, so a prerelease sorts after its release; only pairing of several moves of one name
-// depends on it. Compare by semver if mispaired moves show up.
+// ponytail: numeric string order, so a prerelease sorts after its release; pairing several moves of one name, and the
+// first patched version an Advisory names (src/github.ts), depend on it. Compare by semver if either goes wrong.
 export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
 
 /**
@@ -223,6 +228,8 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   return changes;
 }
 
+// ponytail: past this a run looks nothing up and blocks; batch by name (`affects` takes many) and match ranges in code
+// if big bumps hit it.
 const MAX_LOOKUPS = 1000;
 const LOOKUPS_AT_ONCE = 8;
 
@@ -265,7 +272,10 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
   }
 }
 
-/** Where an off-registry package resolves from, in words; undefined for the registry, or none recorded (bundled). */
+/**
+ * Where an off-registry package resolves from, in words; undefined for the registry, or none recorded (bundled).
+ * ponytail: the kind is a guess from the URL's shape, for the comment's wording only; every kind is a Finding alike.
+ */
 function offRegistry(resolved: string | undefined): string | undefined {
   if (resolved === undefined || resolved.startsWith(REGISTRY)) return;
   let host: string | undefined;

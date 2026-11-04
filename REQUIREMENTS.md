@@ -336,7 +336,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 24. Correctness, security and documentation run on every PR that changes code, regardless of orchestrator output, unless the repo disables documentation.
 25. An Advisory open against a version a PR moves to or adds, and not the one it replaced, is posted on that package's lockfile line at the Advisory's severity; fixed and still-open Advisories appear only in the summary.
 26. A package resolved from outside the npm registry is posted as a `medium` Finding on its lockfile line.
-27. A Dependency check Finding is waived like any other; a later push that moves past it resolves its thread Fixed without a model, and one that still has it keeps it on its thread without a duplicate.
+27. A Dependency check Finding is waived like any other; a later push that moves past it has its thread verified Fixed without a model, and one that still has it keeps it on its thread without a duplicate.
 28. A failed advisory lookup blocks approval and is named in the summary.
 
 Every criterion must have a deterministic test using a fake GitHub client and a stubbed model.

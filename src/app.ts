@@ -7,7 +7,7 @@ import {
 } from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import {
-  absorbed, sanitize, stillReported, threadTitle, titled, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity,
+  absorbed, sanitize, stillReported, threadTitle, sameTitle, toComment, TRUSTED_AUTHORS, validate, waivedBy, type Severity,
 } from './findings.ts';
 import { fallbackPicks, runOrchestrator, selectFocuses, type Pick } from './orchestrator.ts';
 import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
@@ -256,7 +256,7 @@ export function createApp(deps: {
   /** Whether a thread raised a finding the Dependency check published on this PR: same path and title. */
   function madeByCheck(job: Job) {
     const made = store.checkFindings(job.repo, job.pr);
-    return (t: ReviewThread) => made.some((f) => titled(t, f));
+    return (t: ReviewThread) => made.some((f) => sameTitle(t, f));
   }
 
   /** Post the review and finish the run published, or failed keeping its record. A superseded run posts nothing. */
@@ -560,13 +560,10 @@ export function createApp(deps: {
     // open, with a reply when the author spoke last. It fully checked a lockfile it compared, with every lookup made,
     // or one the PR no longer changes; one it couldn't read, or now leaves out, fixes nothing.
     const compared = new Set(dependencies.lockfiles.map((l) => l.path));
-    const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).flatMap((t) => {
-      const fixed = !checkFound.some((f) => titled(t, f)) && dependencies.advisoryError === undefined
+    const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).map((t) => {
+      const fixed = !checkFound.some((f) => sameTitle(t, f)) && dependencies.advisoryError === undefined
         && (compared.has(t.path) || !paths.includes(t.path));
-      return [{
-        thread: t, resolved: fixed,
-        reply: fixed ? 'The dependency check no longer finds this at the current head.' : CHECK_STILL_FINDS,
-      }];
+      return { thread: t, resolved: fixed, reply: fixed ? 'The dependency check no longer finds this at the current head.' : CHECK_STILL_FINDS };
     });
     const comments: ReviewComment[] = findings
       .filter((f) => f.outcome === 'published')
