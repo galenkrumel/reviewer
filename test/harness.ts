@@ -190,8 +190,11 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
-/** A gzipped ustar archive of the given files, as `npm pack` writes one (each path as given, under no prefix). */
-export function tarball(files: Record<string, string>): Buffer {
+/**
+ * A gzipped ustar archive of the given files, as `npm pack` writes one (each path as given, under no prefix). `types`
+ * sets an entry's type flag (`x` for a pax header, `L` for a GNU long name), else it is a regular file.
+ */
+export function tarball(files: Record<string, string>, types: Record<string, string> = {}): Buffer {
   const blocks: Buffer[] = [];
   for (const [name, content] of Object.entries(files)) {
     const data = Buffer.from(content);
@@ -202,7 +205,7 @@ export function tarball(files: Record<string, string>): Buffer {
     h.write('0000000\0', 116);
     h.write(data.length.toString(8).padStart(11, '0') + '\0', 124);
     h.write('00000000000\0', 136);
-    h.write('0', 156);
+    h.write(types[name] ?? '0', 156);
     h.write('ustar\0' + '00', 257);
     h.write(' '.repeat(8), 148);
     h.write(h.reduce((n, b) => n + b, 0).toString(8).padStart(6, '0') + '\0 ', 148);

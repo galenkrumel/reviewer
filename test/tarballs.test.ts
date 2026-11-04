@@ -114,20 +114,73 @@ test('a package whose tarball 404s, is over the byte cap, or resolves off the re
   assert.match(review.body, /3 packages weren't inspected/);
   assert.match(review.body, /- `big 1\.1\.0`\n- `forked 1\.0\.0`\n- `gone 1\.1\.0`/);
   assert.equal(s.logs.find((l) => l.msg === 'dependencies checked')!.notInspected, 3);
+  assert.deepEqual(s.logs.filter((l) => l.msg === 'package fetch failed').map((l) => l.url).sort(), [url('big', '1.1.0'), url('gone', '1.1.0')]);
 });
 
 test('a tarball entry escaping the package folder is ignored, even one that would land on package.json', async () => {
   const s = setup({ 'node_modules/sly': pkg('sly', '1.0.0') }, { 'node_modules/sly': pkg('sly', '1.0.1') });
-  const evil = JSON.stringify({ name: 'sly', scripts: { postinstall: 'node evil.js' } });
+  const other = JSON.stringify({ name: 'sly', scripts: { preinstall: 'node other.js' } });
   s.registry.tarballs.set(url('sly', '1.0.1'), tarball({
-    'package/package.json': JSON.stringify({ name: 'sly', version: '1.0.1' }),
-    'package/../../package.json': evil,
-    'package/../package.json': evil,
+    'package/package.json': JSON.stringify({ name: 'sly', scripts: { postinstall: 'node real.js' } }),
+    'package/../../package.json': other,
+    'package/../package.json': other,
+    // Normalized first, this would replace the root package.json and hide its script.
+    'package/../x/package.json': JSON.stringify({ name: 'sly' }),
   }));
   const review = await s.opened();
 
-  assert.equal(review.comments.length, 0);
-  assert.equal(review.event, 'APPROVE');
+  assert.equal(review.comments.length, 1);
+  assert.match(review.comments[0]!.body, /`postinstall`: `node real\.js`/);
+  assert.doesNotMatch(review.comments[0]!.body, /preinstall/);
+});
+
+test("the real registry adapter refuses any host but the npm registry's, before any network", async () => {
+  const { npmRegistry } = await import('../src/registry.ts');
+  await assert.rejects(npmRegistry().tarball('https://evil.example/registry.npmjs.org/a/-/a-1.0.0.tgz', 1000), /refused/);
+  await assert.rejects(npmRegistry().tarball('https://registry.npmjs.org.evil.example/a/-/a-1.0.0.tgz', 1000), /refused/);
+});
+
+/** A pax extended header's records, each prefixed by its own length. */
+const pax = (fields: Record<string, string>) => Object.entries(fields).map(([k, v]) => {
+  const rest = ` ${k}=${v}\n`;
+  let n = rest.length;
+  while (`${n}${rest}`.length !== n) n = `${n}${rest}`.length;
+  return `${n}${rest}`;
+}).join('');
+
+test('a package.json named by a pax header or a GNU long name is the one read, as npm extracts it', async () => {
+  const s = setup({ 'node_modules/p': pkg('p', '1.0.0'), 'node_modules/g': pkg('g', '1.0.0') },
+    { 'node_modules/p': pkg('p', '1.0.1'), 'node_modules/g': pkg('g', '1.0.1') });
+  const evil = JSON.stringify({ name: 'x', scripts: { postinstall: 'node evil.js' } });
+  s.registry.tarballs.set(url('p', '1.0.1'), tarball({
+    'package/package.json': JSON.stringify({ name: 'p' }), 'PaxHeader/decoy': pax({ path: 'package/package.json' }), 'package/decoy': evil,
+  }, { 'PaxHeader/decoy': 'x' }));
+  s.registry.tarballs.set(url('g', '1.0.1'), tarball({
+    'package/package.json': JSON.stringify({ name: 'g' }), '././@LongLink': 'package/package.json\0', 'package/decoy2': evil,
+  }, { '././@LongLink': 'L', 'package/decoy2': '7' }));
+  const review = await s.opened();
+
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**g adds an install script**', '**p adds an install script**']);
+});
+
+test('a binding.gyp with no install script runs node-gyp on install, so it counts as one', async () => {
+  const s = setup({ 'node_modules/native': pkg('native', '1.0.0') }, { 'node_modules/native': pkg('native', '1.1.0') });
+  s.registry.tarballs.set(url('native', '1.1.0'), packageTarball('native', '1.1.0', {}, { 'binding.gyp': '{}' }));
+  const review = await s.opened();
+
+  assert.equal(review.comments.length, 1);
+  assert.match(review.comments[0]!.body, /`install`: `node-gyp rebuild`/);
+});
+
+test('a package with no recorded source is not inspected unless it is bundled', async () => {
+  const s = setup(
+    { 'node_modules/bare': { version: '1.0.0' }, 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/inner': { version: '1.0.0', inBundle: true } },
+    { 'node_modules/bare': { version: '1.0.1' }, 'node_modules/host': pkg('host', '1.0.1'), 'node_modules/host/node_modules/inner': { version: '1.0.1', inBundle: true } },
+  );
+  const review = await s.opened();
+
+  assert.match(review.body, /1 package wasn't inspected/);
+  assert.match(review.body, /Not inspected[^\n]*\n- `bare 1\.0\.1`\n\n/);
 });
 
 test('fetches are logged one by one, and a Run superseded mid-fetch stops before the next', async () => {

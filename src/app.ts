@@ -448,9 +448,12 @@ export function createApp(deps: {
     const dependencies = await checkDependencies(files, excluded, source.fileAtSide);
     await lookUpAdvisories(dependencies, (name, version) => github.advisories(token, name, version));
     if (dependencies.advisoryError !== undefined) logFailure(job, 'advisories', dependencies.advisoryError, false);
-    await inspectPackages(dependencies, (url, maxBytes) => deps.registry.tarball(url, maxBytes), {
-      packages: config.registryFetchPackages ?? 20, bytes: config.registryFetchBytes ?? 5 * 1024 * 1024,
-    }, () => store.superseded(job.id), (url, bytes) => progress(job, 'package fetched', { url, bytes }));
+    await inspectPackages(dependencies, {
+      fetch: (url, maxBytes) => deps.registry.tarball(url, maxBytes),
+      caps: { packages: config.registryFetchPackages ?? 20, bytes: config.registryFetchBytes ?? 5 * 1024 * 1024 },
+      stopped: () => store.superseded(job.id),
+      fetched: (url, result) => progress(job, 'error' in result ? 'package fetch failed' : 'package fetched', { url, ...result }),
+    });
     store.recordDependencies(job.id, dependencies);
     const advisories = dependencies.lockfiles.flatMap((l) => l.changes.flatMap((c) => c.advisories ?? []));
     progress(job, 'dependencies checked', {
