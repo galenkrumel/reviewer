@@ -37,6 +37,9 @@ export interface DependencyCheck {
 
 const SUPPORTED = new Set(['package-lock.json']);
 const MAX_ENTRIES = 50_000;
+// A PR can change any number of lockfiles: past these totals for the run, the rest are unreadable rather than read.
+const MAX_RUN_TEXT = 128 * 1024 * 1024;
+const MAX_RUN_CHANGES = 100_000;
 
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
@@ -55,11 +58,11 @@ function entries(text: string | undefined): Entry[] | undefined {
   }
   const packages = lock?.packages;
   if (![2, 3].includes(lock?.lockfileVersion) || typeof packages !== 'object' || packages === null || Array.isArray(packages)) return;
-  const keys = Object.keys(packages);
   // Far past any real lockfile (big monorepos have about 10,000): a PR can't make the comparison hold more than this.
-  if (keys.length > MAX_ENTRIES) return;
+  let count = 0;
+  for (const _ in packages) if (++count > MAX_ENTRIES) return;
   const out: Entry[] = [];
-  for (const key of keys) {
+  for (const key in packages) {
     const e = packages[key];
     if (typeof e !== 'object' || e === null) return;
     const at = key.lastIndexOf('node_modules/');
@@ -115,12 +118,13 @@ function versionLines(text: string): Map<string, number> {
 /**
  * Compare every changed lockfile that per-repo `exclude` globs and `.gitattributes` marks (`excluded`, holding old and
  * new paths) leave in, on the side or sides they leave in.
- * A lockfile too big or odd to read (a symlink) is as unreadable as one that doesn't parse.
+ * A lockfile too big or odd to read (a symlink), or past the run's budget, is as unreadable as one that doesn't parse.
  */
 export async function checkDependencies(
   files: FileChange[], excluded: ReadonlySet<string>, read: Source['fileAtSide'],
 ): Promise<DependencyCheck> {
   const check: DependencyCheck = { lockfiles: [], unreadable: [], unchecked: [] };
+  let [text, kept] = [0, 0];
   // A rename that changes the file's name (package-lock.json to yarn.lock, or to some other file) is a deletion and an
   // addition, so each side is checked as the kind of file it is. A move that keeps the name compares like an edit.
   const sides = files.flatMap((f): FileChange[] => f.oldPath && posix.basename(f.oldPath) !== posix.basename(f.path)
@@ -135,8 +139,12 @@ export async function checkDependencies(
     const path = useHead ? f.path : old;
     if (!SUPPORTED.has(name)) { check.unchecked.push(path); continue; }
     let changes: PackageChange[] | undefined;
-    try {
-      changes = compareLockfile(useBase ? await read('base', old) : undefined, useHead ? await read('head', f.path) : undefined);
+    if (text <= MAX_RUN_TEXT && kept <= MAX_RUN_CHANGES) try {
+      const base = useBase ? await read('base', old) : undefined;
+      const head = useHead ? await read('head', f.path) : undefined;
+      text += (base?.length ?? 0) + (head?.length ?? 0);
+      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head);
+      if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
     }

@@ -148,6 +148,25 @@ test('a lockfile with more package entries than any real one is not understood',
   assert.equal(compareLockfile(undefined, huge), undefined);
 });
 
+test("lockfiles past the run's budget of text read or changes kept are unreadable, and later ones are never read", async () => {
+  const files = ['a', 'b', 'c', 'd'].map((d) => ({ path: `${d}/package-lock.json`, added: 0, deleted: 0 }));
+  const run = async (text: string) => {
+    const reads: string[] = [];
+    const check = await checkDependencies(files, new Set(), async (side, path) => {
+      reads.push(path);
+      return side === 'head' ? text : undefined;
+    });
+    return [check.lockfiles.map((l) => l.path), check.unreadable, reads];
+  };
+  const [kept, unreadable, read] = [['a/package-lock.json', 'b/package-lock.json'], ['c/package-lock.json', 'd/package-lock.json'],
+    ['a/package-lock.json', 'a/package-lock.json', 'b/package-lock.json', 'b/package-lock.json', 'c/package-lock.json', 'c/package-lock.json']];
+  // 40,000 added packages each: the third takes the run past 100,000 changes.
+  const many = lock(Object.fromEntries(Array.from({ length: 40_000 }, (_, i) => [`node_modules/p${i}`, pkg('1.0.0')])));
+  assert.deepEqual(await run(many), [kept, unreadable, read]);
+  // 50 MiB each: the third takes the run past 128 MiB.
+  assert.deepEqual(await run(lock({ 'node_modules/a': pkg('1.0.0') }) + ' '.repeat(50 * 1024 * 1024)), [kept, unreadable, read]);
+});
+
 test('unparseable text, a v1 lockfile or a missing packages map on either side is not understood', () => {
   const ok = lock({ 'node_modules/a': pkg('1.0.0') });
   for (const bad of ['{', '{}', '[]', 'null', lock({}, 1), JSON.stringify({ lockfileVersion: 3, packages: [] }),
