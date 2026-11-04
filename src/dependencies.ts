@@ -40,6 +40,7 @@ const MAX_ENTRIES = 50_000;
 // A PR can change any number of lockfiles: past these totals for the run, the rest are unreadable rather than read.
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
 const MAX_RUN_CHANGES = 100_000;
+const MAX_RUN_LOCKFILES = 200;
 
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
@@ -139,10 +140,12 @@ export async function checkDependencies(
     const path = useHead ? f.path : old;
     if (!SUPPORTED.has(name)) { check.unchecked.push(path); continue; }
     let changes: PackageChange[] | undefined;
-    if (text <= MAX_RUN_TEXT && kept <= MAX_RUN_CHANGES) try {
-      const base = useBase ? await read('base', old) : undefined;
-      const head = useHead ? await read('head', f.path) : undefined;
-      text += (base?.length ?? 0) + (head?.length ?? 0);
+    const tried = check.lockfiles.length + check.unreadable.length;
+    if (text <= MAX_RUN_TEXT && kept <= MAX_RUN_CHANGES && tried < MAX_RUN_LOCKFILES) try {
+      // Each side counts once read, so a failed read of the other side doesn't hide it.
+      let base: string | undefined, head: string | undefined;
+      if (useBase) text += (base = await read('base', old))?.length ?? 0;
+      if (useHead && text <= MAX_RUN_TEXT) text += (head = await read('head', f.path))?.length ?? 0;
       if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head);
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {

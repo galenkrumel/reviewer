@@ -450,6 +450,7 @@ export function createApp(deps: {
     });
     // Lockfiles stay out of line review and the budget; the Dependency check compares them in full on every run.
     const dependencies = await checkDependencies(files, excluded, source.fileAtSide);
+    store.recordDependencies(job.id, dependencies);
     progress(job, 'dependencies checked', {
       lockfiles: dependencies.lockfiles.length, changes: dependencies.lockfiles.reduce((n, l) => n + l.changes.length, 0),
       unreadable: dependencies.unreadable.length, unchecked: dependencies.unchecked.length,
@@ -565,7 +566,7 @@ export function createApp(deps: {
       ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
     ];
     const record = {
-      findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped, dependencies,
+      findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped,
       // Here the inline comments block; once they are threads a waiver can close, the ones over the cap still do.
       blockers: [...unwaivable, ...(overCap > 0 ? [`${count(overCap, 'issue')} left uncommented over the comment cap`] : [])],
     };
@@ -749,11 +750,17 @@ function authorReason(pr: any, policy: OutsidePolicy, label: string): string | u
 
 /**
  * Paths come from the PR: code spans keep them from mentioning anyone or breaking out, dropping angle brackets keeps
- * them from forging a marker (and so skipping a later review) in the raw body, and long lists are capped.
+ * them from forging a marker (and so skipping a later review) in the raw body, and long lists and items are capped
+ * to keep the body under GitHub's limit.
  */
 function pathList(paths: string[], sep: string, max: number): string {
-  return capped(paths.map((p) => '`' + p.replace(/[`<>\r\n]/g, '') + '`'), max).join(sep);
+  return capped(paths.map((p) => {
+    const clean = p.replace(/[`<>\r\n]/g, '');
+    return '`' + (clean.length > MAX_ITEM ? `${clean.slice(0, MAX_ITEM)}…` : clean) + '`';
+  }), max).join(sep);
 }
+
+const MAX_ITEM = 150;
 
 /** The first `max` items, then a count of the rest. */
 function capped(items: string[], max: number): string[] {
@@ -814,10 +821,15 @@ function outcomes(findings: { outcome: string }[]): Record<string, number> {
  */
 function dependencyLines(check: DependencyCheck): string[] {
   const move = (c: PackageChange) => `${c.name} ${describeMove(c)}`;
+  // At most 50 packages per lockfile and 100 in all: the rest are counted.
+  let room = 100;
   return [
-    ...capped(check.lockfiles.map(({ path, changes }) => changes.length === 0
-      ? `Dependencies in ${pathList([path], '', 1)}: no packages moved.`
-      : `Dependencies changed in ${pathList([path], '', 1)}:\n- ${pathList(changes.map(move), '\n- ', 50)}`), 20),
+    ...capped(check.lockfiles.map(({ path, changes }) => {
+      if (changes.length === 0) return `Dependencies in ${pathList([path], '', 1)}: no packages moved.`;
+      const shown = Math.min(50, room);
+      room -= Math.min(shown, changes.length);
+      return `Dependencies changed in ${pathList([path], '', 1)}:\n- ${pathList(changes.map(move), '\n- ', shown)}`;
+    }), 20),
     ...(check.unreadable.length ? [`Not understood by the dependency check: ${pathList(check.unreadable, ', ', 20)}.`] : []),
     ...(check.unchecked.length ? [`Not checked (lockfile format not supported yet): ${pathList(check.unchecked, ', ', 20)}.`] : []),
   ];

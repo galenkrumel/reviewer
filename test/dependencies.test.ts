@@ -167,6 +167,30 @@ test("lockfiles past the run's budget of text read or changes kept are unreadabl
   assert.deepEqual(await run(lock({ 'node_modules/a': pkg('1.0.0') }) + ' '.repeat(50 * 1024 * 1024)), [kept, unreadable, read]);
 });
 
+test("a side read counts toward the run's text even when the lockfile's other side can't be read", async () => {
+  const big = lock({}) + ' '.repeat(50 * 1024 * 1024);
+  const reads: string[] = [];
+  const check = await checkDependencies(['a', 'b', 'c', 'd'].map((d) => ({ path: `${d}/package-lock.json`, added: 0, deleted: 0 })),
+    new Set(), async (side, path) => {
+      reads.push(`${side}:${path[0]}`);
+      if (side === 'head') throw new ToolError(`${path} is over 32 MiB`);
+      return big;
+    });
+  // The third base read takes the run past 128 MiB: its head and the fourth lockfile are never read.
+  assert.deepEqual(reads, ['base:a', 'head:a', 'base:b', 'head:b', 'base:c']);
+  assert.equal(check.unreadable.length, 4);
+});
+
+test("lockfiles past the run's first 200 are unreadable and never read", async () => {
+  const text = lock({ 'node_modules/a': pkg('1.0.0') });
+  let reads = 0;
+  const check = await checkDependencies(Array.from({ length: 202 }, (_, i) => ({ path: `${i}/package-lock.json`, added: 0, deleted: 0 })),
+    new Set(), async (side) => (reads++, side === 'head' ? text : undefined));
+  assert.equal(check.lockfiles.length, 200);
+  assert.deepEqual(check.unreadable, ['200/package-lock.json', '201/package-lock.json']);
+  assert.equal(reads, 400);
+});
+
 test('unparseable text, a v1 lockfile or a missing packages map on either side is not understood', () => {
   const ok = lock({ 'node_modules/a': pkg('1.0.0') });
   for (const bad of ['{', '{}', '[]', 'null', lock({}, 1), JSON.stringify({ lockfileVersion: 3, packages: [] }),
@@ -303,6 +327,21 @@ test("the package list is capped, and package text can't break out of its code s
   assert.ok(review!.body.includes('`x@here !-- ai-review:acme/widgets#256:a:b -- 1 → 2`'), review!.body);
 });
 
+test('the summary lists at most 100 packages in all, each cut to 150 characters', async () => {
+  const many = (v: string) => lock(Object.fromEntries(Array.from({ length: 60 }, (_, i) => [`node_modules/p${i}`, pkg(v)])));
+  const long = (v: string) => lock({ 'node_modules/x': pkg(v, { name: 'n'.repeat(1000) }) });
+  const s = prFor(
+    { 'a/package-lock.json': many('1.0.0'), 'b/package-lock.json': many('1.0.0'), 'c/package-lock.json': many('1.0.0'), '0/package-lock.json': long('1') },
+    { 'a/package-lock.json': many('2.0.0'), 'b/package-lock.json': many('2.0.0'), 'c/package-lock.json': many('2.0.0'), '0/package-lock.json': long('2') },
+  );
+  const { review } = await run(s);
+
+  assert.ok(review!.body.includes(`in \`0/package-lock.json\`:\n- \`${'n'.repeat(150)}…\``), review!.body);
+  assert.equal(review!.body.match(/→ 2\.0\.0`/g)?.length, 99);
+  assert.match(review!.body, /in `b\/package-lock\.json`:\n(- `[^\n]*\n){49}- …and 11 more/);
+  assert.match(review!.body, /in `c\/package-lock\.json`:\n- …and 60 more/);
+});
+
 test('a lockfile renamed to a name that is not a lockfile has its packages reported removed', async () => {
   const text = lock(Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`node_modules/p${i}`, pkg('1.0.0')])));
   const s = prFor({ 'package-lock.json': text }, { 'package-lock.json': null, 'old/lock.json': text });
@@ -349,6 +388,8 @@ test('a Run superseded during the dependency check stops there', async () => {
   await app.drain();
 
   assert.equal(app.runs()[0]!.status, 'superseded');
+  // Recorded when the check finished, so the superseded Run keeps it.
+  assert.deepEqual(app.runs()[0]!.dependencies?.lockfiles.map((l) => l.path), ['package-lock.json']);
   assert.ok(!logs.some((l) => l.run === 1 && l.msg === 'reviewers picked'));
   assert.deepEqual(s.github.reviews.map((r) => r.review.commit_id), [next.headSha]);
 });

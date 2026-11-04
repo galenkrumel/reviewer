@@ -356,6 +356,13 @@ export function openStore(dataDir: string, clock: Clock) {
         .map((row: any) => JSON.parse(row.data));
     },
 
+    /** Recorded as soon as the check runs, so it survives a run that later fails or is superseded. */
+    recordDependencies(id: number, check: DependencyCheck) {
+      // A run requeued after a restart checks again.
+      db.prepare('DELETE FROM dependency_checks WHERE run_id = ?').run(id);
+      db.prepare('INSERT INTO dependency_checks (run_id, data) VALUES (?, ?)').run(id, JSON.stringify(check));
+    },
+
     /** Recorded as soon as the config is read, so they survive a run that later fails or is superseded. */
     recordConfigWarnings(id: number, warnings: string[]) {
       // A run requeued after a restart reads the config again.
@@ -371,7 +378,6 @@ export function openStore(dataDir: string, clock: Clock) {
       blockers?: string[];
       /** Whether the published review approved. */
       approved?: boolean;
-      dependencies?: DependencyCheck;
     } = {}) {
       const insert = db.prepare('INSERT INTO findings (run_id, focus, outcome, data) VALUES (?, ?, ?, ?)');
       for (const f of opts.findings ?? []) insert.run(id, f.focus, f.outcome, JSON.stringify(f));
@@ -382,7 +388,6 @@ export function openStore(dataDir: string, clock: Clock) {
       const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
       for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
       if (opts.approved !== undefined) db.prepare('INSERT INTO verdicts (run_id, approved) VALUES (?, ?)').run(id, opts.approved ? 1 : 0);
-      if (opts.dependencies) db.prepare('INSERT INTO dependency_checks (run_id, data) VALUES (?, ?)').run(id, JSON.stringify(opts.dependencies));
       if (opts.blockers) db.prepare('INSERT INTO decisions (run_id, blockers) VALUES (?, ?)').run(id, JSON.stringify(opts.blockers));
       if (opts.fallbackUsed !== undefined) {
         db.prepare('INSERT INTO orchestrations (run_id, fallback_used, error) VALUES (?, ?, ?)')
