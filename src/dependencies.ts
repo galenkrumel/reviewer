@@ -23,8 +23,10 @@ export interface PackageChange {
   integrity?: string;
   /** Where the version it moved from resolved, at base; unset for an added or removed package. */
   fromResolved?: string;
-  /** The name of the package whose tarball it is installed from (`inBundle`), at head (at base for a removal). */
-  bundledIn?: string;
+  /** For a bundled package (`inBundle`), the package whose tarball installs it and its folder in there, at head. */
+  bundledIn?: Bundler;
+  /** The same for the install it moved from, at base, when that was bundled. */
+  fromBundledIn?: Bundler;
   /** Its `"version"` line at head; unset for a removed package. */
   line?: number;
   /** The Advisories open against either side, once looked up; unset when none are. */
@@ -32,6 +34,9 @@ export interface PackageChange {
   /** Install scripts its fetched tarball has that the version it moved from didn't (any, when added), by name. */
   installScripts?: Record<string, string>;
 }
+
+/** A package that bundles another: its name, version and source, and the bundled one's folder in its tarball. */
+export interface Bundler { name: string; version: string; resolved?: string; folder: string }
 
 /** A package change whose code the check couldn't fetch and read, so nothing vouches for it. */
 export interface NotInspected { path: string; name: string; version: string; reason: string }
@@ -87,7 +92,11 @@ const MAX_RUN_CHANGES = 100_000;
 const MAX_RUN_LOCKFILES = 200;
 
 /** One installed package as a lockfile records it. */
-interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string; bundledBy?: string }
+interface Entry {
+  name: string; version: string; resolved?: string; integrity?: string; key: string;
+  /** For a bundled package, the key of the installed package whose tarball holds it, and its folder in there. */
+  bundledBy?: { key: string; folder: string };
+}
 
 /**
  * A package-lock.json's installed packages (lockfile versions 2 and 3), or undefined when it isn't one. Workspace
@@ -121,9 +130,16 @@ function entries(text: string | undefined): Entry[] | undefined {
     // too, or the URL could still say something else once fetched (`a/../evil`, `1.0.0#`).
     const resolved = str(e.resolved);
     if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
-    // Bundled only as npm writes it: `inBundle`, no source of its own, nested in the package that bundles it.
-    const bundledBy = e.inBundle === true && resolved === undefined && at > 0 ? key.slice(0, at - 1) : undefined;
-    out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundledBy !== undefined && { bundledBy }) });
+    // Bundled only as npm writes it: `inBundle`, no source of its own, nested in a package. Its code is in the tarball
+    // of the nearest enclosing package that isn't bundled itself.
+    let bundledBy: Entry['bundledBy'];
+    if (e.inBundle === true && resolved === undefined && at > 0) {
+      const up = (k: string) => k.slice(0, k.lastIndexOf('/node_modules/'));
+      let root = up(key);
+      while (packages[root]?.inBundle === true && root.lastIndexOf('/node_modules/') > 0) root = up(root);
+      bundledBy = { key: root, folder: key.slice(root.length + 1) };
+    }
+    out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundledBy && { bundledBy }) });
   }
   return out;
 }
@@ -214,6 +230,12 @@ export async function checkDependencies(
 // first patched version an Advisory names (src/github.ts), depend on it. Compare by semver if either goes wrong.
 export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { numeric: true });
 
+/** The package at `by.key` that bundles a package, as one side's lockfile records it (name and version unset if none). */
+function bundler(at: Map<string, Entry>, by: NonNullable<Entry['bundledBy']>): Bundler {
+  const e = at.get(by.key);
+  return { name: e?.name ?? by.key, version: e?.version ?? '', ...(e?.resolved !== undefined && { resolved: e.resolved }), folder: by.folder };
+}
+
 /**
  * The packages a lockfile change added, removed or moved, by name then version, or undefined when either side isn't
  * a lockfile the check understands. Undefined text is a side where the lockfile doesn't exist. A name's removed and
@@ -236,7 +258,8 @@ export function compareLockfile(base: string | undefined, head: string | undefin
       name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
       ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
       ...(to !== undefined && baseInstall?.resolved !== undefined && { fromResolved: baseInstall.resolved }),
-      ...(e.bundledBy !== undefined && { bundledIn: (to !== undefined ? atHead : atKey).get(e.bundledBy)?.name ?? e.bundledBy }),
+      ...(to !== undefined && e.bundledBy && { bundledIn: bundler(atHead, e.bundledBy) }),
+      ...(to !== undefined && baseInstall?.bundledBy && { fromBundledIn: bundler(atKey, baseInstall.bundledBy) }),
       ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
     });
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
@@ -317,8 +340,8 @@ export const onRegistry = (url: string) => url.startsWith(REGISTRY);
  * name), as npm extracts them (node-tar, stripping that folder): a pax `path` or GNU long name replaces the next entry's
  * own name (and a pax `size` its size), a path with a `..` segment or an absolute one is dropped, and a later entry for
  * a path replaces an earlier one. Anything a reader might take another way than node-tar throws instead, so the package
- * is not inspected: truncated input, a malformed pax record, meta headers chained or global, a path with an empty, `.`
- * or backslashed segment.
+ * is not inspected: truncated input, a malformed pax record or one holding a newline, meta headers chained, any entry
+ * type but a file, directory or link, a path with an empty, `.` or backslashed segment.
  */
 export function untar(archive: Buffer): Map<string, Buffer> {
   const files = new Map<string, Buffer>();
@@ -334,7 +357,6 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const data = archive.subarray(at + 512, at + 512 + size);
     at += 512 + Math.ceil(size / 512) * 512;
     const type = field(h, 156, 1);
-    if (type === 'g') throw malformed();
     if (type === 'x' || type === 'L') {
       if (next) throw malformed();
       next = type === 'L' ? { path: text(data) } : paxRecords(data);
@@ -343,7 +365,9 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const prefix = field(h, 257, 6) === 'ustar' ? field(h, 345, 155) : '';
     const raw = next?.path ?? (prefix ? `${prefix}/` : '') + field(h, 0, 100);
     next = undefined;
-    if (!['0', '', '7'].includes(type)) continue;
+    // Directories and links hold no code; any other type (devices, GNU or Solaris extensions, unknown) is refused.
+    if (['5', '1', '2'].includes(type)) continue;
+    if (!['0', '', '7'].includes(type)) throw malformed();
     const segments = raw.split('/');
     if (raw.startsWith('/') || segments.includes('..')) continue;
     if (raw.includes('\\') || segments.some((x) => x === '' || x === '.')) throw malformed();
@@ -363,6 +387,8 @@ function paxRecords(data: Buffer): { path?: string; size?: number } {
     if (space < 0 || !/^[1-9]\d*$/.test(data.subarray(at, space).toString('latin1')) || at + len > data.length
       || !record.endsWith('\n') || eq < 0) throw new Error('malformed tar archive');
     const [key, value] = [record.slice(space - at + 1, eq), record.slice(eq + 1, -1)];
+    // node-tar splits records on newlines: one holding another would be read two ways.
+    if (value.includes('\n')) throw new Error('malformed tar archive');
     if (key === 'path') out.path = value;
     if (key === 'size') {
       if (!/^\d+$/.test(value)) throw new Error('malformed tar archive');
@@ -378,13 +404,20 @@ const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 // ordinary packages hit it.
 const UNPACKED_PER_FETCHED = 8;
 
-/** A package's install scripts, from its tarball's files: npm runs `node-gyp rebuild` for a `binding.gyp` with neither `install` nor `preinstall`. */
-function installScripts(files: Map<string, Buffer>): Record<string, string> {
-  const manifest = files.get('package.json');
-  if (manifest === undefined) throw new Error('no package.json');
-  const scripts = JSON.parse(manifest.toString('utf8'))?.scripts;
+/**
+ * The install scripts of the package in `folder` of a tarball's files (the tarball's own package when empty), whose
+ * version must be `version` when given: npm runs `node-gyp rebuild` for a `binding.gyp` with neither `install` nor
+ * `preinstall`.
+ */
+function installScripts(files: Map<string, Buffer>, folder = '', version?: string): Record<string, string> {
+  const dir = folder && `${folder}/`;
+  const manifest = files.get(`${dir}package.json`);
+  if (manifest === undefined) throw new Error(`no ${dir}package.json`);
+  const pkg = JSON.parse(manifest.toString('utf8'));
+  if (version !== undefined && pkg?.version !== version) throw new Error(`${dir}package.json isn't version ${version}`);
+  const scripts = pkg?.scripts;
   const found: Record<string, string> = Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof scripts?.[k] === 'string').map((k) => [k, scripts[k]]));
-  if (files.has('binding.gyp') && !found.install && !found.preinstall) found.install = 'node-gyp rebuild';
+  if (files.has(`${dir}binding.gyp`) && !found.install && !found.preinstall) found.install = 'node-gyp rebuild';
   return found;
 }
 
@@ -392,9 +425,9 @@ function installScripts(files: Map<string, Buffer>): Record<string, string> {
  * Fetch the tarball of every package change the PR moves to or adds, and of the version it moved from, and record each
  * install script the new one adds. Packages go in order of risk (added, then major bumps, then the rest), at most
  * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run; one tarball is fetched
- * once. A package past either cap, or whose tarball (old or new) couldn't be fetched or read, isn't on the registry or
- * isn't recorded, is not inspected. A bundled one isn't fetched: its code is in its bundling package's tarball, so it is
- * inspected only when that package is.
+ * once. A bundled package is read from its bundler's tarball, at the folder and version the lockfile records. A package
+ * past either cap, or whose code (old or new) couldn't be fetched or found and read, isn't on the registry or isn't
+ * recorded, is not inspected.
  * Between fetches, once `stopped` says so, it returns at once, leaving the check incomplete: the run is superseded.
  * `fetched` hears each fetch, or why it failed.
  */
@@ -405,13 +438,13 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   const { caps } = opts;
   const major = (v: string) => v.split('.')[0];
   const risk = (c: PackageChange) => (c.from === undefined ? 0 : major(c.from) !== major(c.to!) ? 1 : 2);
-  const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined && c.bundledIn === undefined)
+  const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined)
     .map((c) => ({ path, c }))).sort((a, b) => risk(a.c) - risk(b.c));
   const allowed = new Set([...new Set(wanted.map(({ c }) => `${c.name}@${c.to}`))].slice(0, caps.packages));
-  const byUrl = new Map<string, Record<string, string> | Error>();
+  const byUrl = new Map<string, Map<string, Buffer> | Error>();
   let [bytes, unpacked] = [0, 0];
-  /** A tarball's install scripts, fetched once per run; undefined once the run is superseded. */
-  const scriptsAt = async (url: string | undefined) => {
+  /** A tarball's files, fetched once per run; undefined once the run is superseded. */
+  const filesAt = async (url: string | undefined) => {
     if (url === undefined) throw new Error('no source recorded');
     if (!onRegistry(url)) throw new Error('not on the npm registry');
     if (!byUrl.has(url)) {
@@ -423,7 +456,7 @@ export async function inspectPackages(check: DependencyCheck, opts: {
         opts.fetched(url, { bytes: body.length });
         const tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
         unpacked += tar.length;
-        byUrl.set(url, installScripts(untar(tar)));
+        byUrl.set(url, untar(tar));
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         opts.fetched(url, { error: error.message });
@@ -434,26 +467,24 @@ export async function inspectPackages(check: DependencyCheck, opts: {
     if (result instanceof Error) throw result;
     return result;
   };
+  /** One side's install scripts: its own tarball's, or its bundler's at its folder and version. */
+  const scripts = async (resolved: string | undefined, bundledIn: Bundler | undefined, version: string) => {
+    const files = await filesAt(bundledIn ? bundledIn.resolved : resolved);
+    return files && (bundledIn ? installScripts(files, bundledIn.folder, version) : installScripts(files));
+  };
   const notInspected: NotInspected[] = [];
   for (const { path, c } of wanted) {
     const skip = (reason: string) => notInspected.push({ path, name: c.name, version: c.to!, reason });
     if (!allowed.has(`${c.name}@${c.to}`)) { skip(`over the run's cap of ${caps.packages} packages`); continue; }
     try {
-      const now = await scriptsAt(c.resolved);
-      const before = c.from === undefined ? {} : await scriptsAt(c.fromResolved);
+      const now = await scripts(c.resolved, c.bundledIn, c.to!);
+      const before = c.from === undefined ? {} : await scripts(c.fromResolved, c.fromBundledIn, c.from);
       if (!now || !before) return;
       const added = Object.entries(now).filter(([k]) => !(k in before));
       if (added.length) c.installScripts = Object.fromEntries(added);
     } catch (err) {
-      skip((err as Error).message);
+      skip(c.bundledIn ? `bundled in ${c.bundledIn.name} ${c.bundledIn.version}: ${(err as Error).message}` : (err as Error).message);
     }
-  }
-  // A bundled package's code is its bundling package's: inspected along with it, when that moved too and was inspected.
-  for (const { path, changes } of check.lockfiles) for (const c of changes) {
-    if (c.to === undefined || c.bundledIn === undefined) continue;
-    const parent = wanted.some((w) => w.path === path && w.c.name === c.bundledIn)
-      && !notInspected.some((n) => n.path === path && n.name === c.bundledIn);
-    if (!parent) notInspected.push({ path, name: c.name, version: c.to, reason: `bundled in ${c.bundledIn}, which wasn't inspected` });
   }
   if (notInspected.length) check.notInspected = notInspected.sort((a, b) => a.path.localeCompare(b.path) || a.name.localeCompare(b.name));
 }

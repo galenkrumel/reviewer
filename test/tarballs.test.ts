@@ -164,14 +164,14 @@ test('a package.json named by a pax header or a GNU long name is the one read, a
 });
 
 test('a tarball a reader could take another way than npm is not inspected, rather than read one way', async () => {
-  const names = ['inner', 'chain', 'dot', 'glob'];
+  const names = ['nl', 'chain', 'dot', 'glob', 'odd'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const manifest = JSON.stringify({ name: 'x' });
-  // A path line hidden inside another record's value: only a line-by-line reader sees it.
-  const hidden = pax({ comment: `x\n27 path=package/package.json` });
-  const scripted = JSON.stringify({ name: 'x', scripts: { postinstall: 'node a.js' } });
-  s.registry.tarballs.set(url('inner', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': hidden, 'package/a': scripted }, { 'PaxHeader/a': 'x' }));
+  // A path record hidden inside another record's value: read by lengths it's a comment, split on newlines (node-tar) a path.
+  const hidden = pax({ comment: `x\n29 path=package/package.json` });
+  s.registry.tarballs.set(url('nl', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': hidden, 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
+  s.registry.tarballs.set(url('odd', '1.0.1'), tarball({ 'package/package.json': manifest, '././@LongLink': 'x\0', 'package/l': '' }, { '././@LongLink': 'K', 'package/l': '2' }));
   s.registry.tarballs.set(url('chain', '1.0.1'), tarball({
     'package/package.json': manifest, '././@LongLink': 'package/a\0', 'PaxHeader/b': pax({ path: 'package/b' }), 'package/c': manifest,
   }, { '././@LongLink': 'L', 'PaxHeader/b': 'x' }));
@@ -179,26 +179,45 @@ test('a tarball a reader could take another way than npm is not inspected, rathe
   s.registry.tarballs.set(url('glob', '1.0.1'), tarball({ 'pax_global_header': pax({ path: 'package/package.json' }), 'package/package.json': manifest }, { 'pax_global_header': 'g' }));
   const review = await s.opened();
 
-  // The hidden line is a comment's value, as node-tar reads it: `package/a` stays `package/a`.
-  assert.equal(review.comments.length, 0);
-  assert.match(review.body, /3 packages weren't inspected/);
-  assert.match(review.body, /- `chain 1\.0\.1`\n- `dot 1\.0\.1`\n- `glob 1\.0\.1`\n\n/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 3);
+  assert.match(review.body, /5 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 5);
 });
 
-test('a lockfile entry is bundled only as npm writes one: inBundle, no source, under a package that moved and was inspected', async () => {
+test("a bundled package is read from its bundler's tarball, at the folder and version the lockfile records", async () => {
   const inner = (v: string, extra: object = {}) => ({ version: v, inBundle: true, ...extra });
   const s = setup(
-    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0') },
     {
-      'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.1'),
-      'node_modules/b': pkg('b', '1.0.1', { inBundle: true }),
+      'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'),
+      'node_modules/host/node_modules/gone': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0'),
+    },
+    {
+      'node_modules/host': pkg('host', '1.1.0'), 'node_modules/host/node_modules/a': inner('1.0.1'),
+      'node_modules/host/node_modules/gone': inner('1.0.1'), 'node_modules/b': pkg('b', '1.0.1', { inBundle: true }),
     },
   );
+  const bundled = (v: string, scripts = {}) => JSON.stringify({ name: 'a', version: v, scripts });
+  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, {
+    'node_modules/a/package.json': bundled('1.0.0'), 'node_modules/gone/package.json': JSON.stringify({ version: '1.0.0' }),
+  }));
+  // `gone` isn't in there at the version the lockfile says.
+  s.registry.tarballs.set(url('host', '1.1.0'), packageTarball('host', '1.1.0', {}, {
+    'node_modules/a/package.json': bundled('1.0.1', { postinstall: 'node a.js' }), 'node_modules/gone/package.json': JSON.stringify({ version: '9.9.9' }),
+  }));
   const review = await s.opened();
 
   assert.ok(s.registry.fetched.includes(url('b', '1.0.1')), 'an inBundle entry with a source of its own is fetched');
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**a adds an install script**']);
   assert.match(review.body, /1 package wasn't inspected/);
+  assert.match(review.body, /Not inspected[^\n]*\n- `gone 1\.0\.1`\n\n/);
+});
+
+test("a bundled package moved under a bundler that didn't move isn't in that bundler's tarball, so it is not inspected", async () => {
+  const inner = (v: string) => ({ version: v, inBundle: true });
+  const s = setup({ 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0') },
+    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.1') });
+  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, { 'node_modules/a/package.json': JSON.stringify({ version: '1.0.0' }) }));
+  const review = await s.opened();
+
   assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.1`\n\n/);
 });
 
@@ -211,11 +230,8 @@ test('a binding.gyp with no install script runs node-gyp on install, so it count
   assert.match(review.comments[0]!.body, /`install`: `node-gyp rebuild`/);
 });
 
-test('a package with no recorded source is not inspected unless it is bundled', async () => {
-  const s = setup(
-    { 'node_modules/bare': { version: '1.0.0' }, 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/inner': { version: '1.0.0', inBundle: true } },
-    { 'node_modules/bare': { version: '1.0.1' }, 'node_modules/host': pkg('host', '1.0.1'), 'node_modules/host/node_modules/inner': { version: '1.0.1', inBundle: true } },
-  );
+test('a package with no recorded source, not bundled, is not inspected', async () => {
+  const s = setup({ 'node_modules/bare': { version: '1.0.0' } }, { 'node_modules/bare': { version: '1.0.1' } });
   const review = await s.opened();
 
   assert.match(review.body, /1 package wasn't inspected/);
