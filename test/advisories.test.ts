@@ -134,6 +134,19 @@ test('waiving an Advisory Thread re-decides to approval when nothing else blocks
   assert.deepEqual(again.comments, []);
 });
 
+test("several Advisories on one package's line are waived one Thread each, and stay waived on later pushes", async () => {
+  const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
+  s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] },
+    { ...XSS, id: 'GHSA-c6gr-qvv4-5v3f', severity: 'medium', package: 'dompurify', versions: ['3.4.16'] });
+  const first = await s.opened();
+  assert.equal(first.comments.length, 2);
+  for (const c of first.comments) s.github.resolveAs(threadFor(s, c).id, 'octo-maint', 'MEMBER');
+
+  const review = await s.push({ 'src/a.ts': 'c\n' });
+  assert.equal(review.event, 'APPROVE', review.body);
+  assert.deepEqual(s.app.runs().at(-1)!.findings.map((f) => f.outcome), ['waived', 'waived']);
+});
+
 test('a later push that moves past the Advisory has its Thread verified Fixed by the check, no model asked', async () => {
   const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
   s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
@@ -167,6 +180,19 @@ test('a later push that still has the Advisory keeps it on its Thread, even with
   assert.equal(s.model.requestsFor('verifier').length, 0);
   assert.equal(s.github.thread(thread.id).resolved, false);
   assert.match(s.github.thread(thread.id).comments.at(-1)!.body, /^The dependency check still finds this/);
+});
+
+test("an Advisory Thread isn't Fixed by a push the check couldn't fully check", async () => {
+  const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
+  s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
+  const thread = threadFor(s, (await s.opened()).comments[0]!);
+
+  await s.push({ [LOCK]: '{', 'src/a.ts': 'c\n' });
+  assert.equal(s.github.thread(thread.id).resolved, false);
+  s.github.advisoriesDown = true;
+  const review = await s.push({ [LOCK]: purify('3.4.17'), 'src/a.ts': 'd\n' });
+  assert.equal(s.github.thread(thread.id).resolved, false);
+  assert.equal(review.event, 'COMMENT');
 });
 
 test('a failed advisory lookup blocks approval with its own line, named in the summary and the record', async () => {

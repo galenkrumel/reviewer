@@ -557,10 +557,12 @@ export function createApp(deps: {
         minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
       }, threads, waivers);
     // The check decides its own threads: Fixed once it no longer finds their problem at a head it fully checked, else
-    // open, with a reply when the author spoke last. A lockfile it couldn't read, or failed lookups, fix nothing.
+    // open, with a reply when the author spoke last. It fully checked a lockfile it compared, with every lookup made,
+    // or one the PR no longer changes; one it couldn't read, or now leaves out, fixes nothing.
+    const compared = new Set(dependencies.lockfiles.map((l) => l.path));
     const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).flatMap((t) => {
       const fixed = !checkFound.some((f) => titled(t, f)) && dependencies.advisoryError === undefined
-        && !dependencies.unreadable.includes(t.path);
+        && (compared.has(t.path) || !paths.includes(t.path));
       return [{
         thread: t, resolved: fixed,
         reply: fixed ? 'The dependency check no longer finds this at the current head.' : CHECK_STILL_FINDS,

@@ -48,6 +48,8 @@ export interface DependencyCheck {
 }
 
 const SUPPORTED = new Set(['package-lock.json']);
+/** npm's default registry: anything else a package resolves from is off-registry. */
+const REGISTRY = 'https://registry.npmjs.org/';
 const MAX_ENTRIES = 50_000;
 // A PR can change any number of lockfiles: past these totals for the run, the rest are unreadable rather than read.
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
@@ -84,7 +86,11 @@ function entries(text: string | undefined): Entry[] | undefined {
     if (typeof e.version !== 'string') return;
     // An `npm:` alias is installed under its alias and records the real name.
     const name = typeof e.name === 'string' ? e.name : key.slice(at + 'node_modules/'.length);
-    out.push({ name, version: e.version, resolved: str(e.resolved), integrity: str(e.integrity), key });
+    // npm installs what `resolved` names, and advisories are looked up by name and version: a registry tarball of
+    // another package or version is not a lockfile the check understands.
+    const resolved = str(e.resolved);
+    if (resolved?.startsWith(REGISTRY) && resolved !== `${REGISTRY}${name}/-/${name.split('/').pop()}-${e.version}.tgz`) return;
+    out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
   return out;
 }
@@ -258,9 +264,6 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
     if (advisories.length) c.advisories = advisories;
   }
 }
-
-/** npm's default registry: anything else a package resolves from is off-registry. */
-const REGISTRY = 'https://registry.npmjs.org/';
 
 /** Where an off-registry package resolves from, in words; undefined for the registry, or none recorded (bundled). */
 function offRegistry(resolved: string | undefined): string | undefined {

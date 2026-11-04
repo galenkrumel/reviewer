@@ -97,23 +97,22 @@ export function waivedBy(threads: ReviewThread[] | undefined, waivers: Waiver[])
   // A live thread's line follows the code; the stored one is the fallback when the thread wasn't read.
   const waived = waivers.map((w) => threads.find((t) => t.id === w.thread) ?? w);
   const others = threads.filter((t) => !waivedIds.has(t.id));
-  // A waived thread with the finding's very title is its thread, whatever else sits nearby (one package's Advisories
-  // share a line); a thread that isn't waived with that title is too.
-  return (f: Pick<Finding, 'path' | 'line' | 'title'>) => waived.some((t) => titled(t, f))
-    || (!threads.some((t) => titled(t, f)) && waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f)));
+  return (f: Pick<Finding, 'path' | 'line' | 'title' | 'check'>) => (f.check ? waived.some((t) => titled(t, f))
+    : waived.some((t) => raises(t, f)) && !others.some((t) => raises(t, f)));
 }
 
 /**
  * Whether a finding this run reported again (a duplicate of an earlier comment) is the one a thread raised:
- * same path, and a nearby line or the same title; when a finding has the thread's very title, only that one.
- * Such a thread must stay open.
+ * same path, and a nearby line or the same title. Such a thread must stay open.
  */
 export function stillReported(thread: ReviewThread, findings: RecordedFinding[]): boolean {
-  const again = findings.filter((f) => f.outcome === 'duplicate');
-  return again.some((f) => titled(thread, f)) || (!findings.some((f) => titled(thread, f)) && again.some((f) => raises(thread, f)));
+  return findings.some((f) => f.outcome === 'duplicate' && (f.check ? titled(thread, f) : raises(thread, f)));
 }
 
-/** Whether a thread (or a waiver's record of one) raised a finding with this very title, on its path. */
+/**
+ * Whether a thread (or a waiver's record of one) raised a finding with this very title, on its path: how the Dependency
+ * check's findings match, since code writes their titles and one package's Advisories share a line.
+ */
 export function titled(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
   return f.path === thread.path && normalizeTitle('comments' in thread ? threadTitle(thread) : thread.title) === normalizeTitle(f.title);
 }
