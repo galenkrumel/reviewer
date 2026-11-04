@@ -1,19 +1,21 @@
 // Runs one reviewer focus on one pinned PR, outside the App, and prints what it found and how it got there (#88).
 // Usage: OPENROUTER_API_KEY=… REVIEW_MODEL=… GITHUB_TOKEN="$(gh auth token)" node scripts/eval-reviewer.ts case.json
-// case.json: { "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
+// case.json: { "id"?, "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
 // https://github.com/…; GITHUB_TOKEN is only needed for the latter. REVIEW_FALLBACK_MODEL is optional, as in the App.
 // A missing argument, malformed case JSON, an unknown focus, an unsupported url or a missing required environment
 // variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
 // The run prints { findings | error, transcript, usage } as JSON; a fetching, scoping or reviewer error exits 1.
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
-// one AGENT span for the review, with an LLM span per model call. Without a Phoenix server the spans are dropped.
+// one AGENT span named after the case id (its file name unless "id" is set), with an LLM span per model call. Its
+// metadata: case, focus, headSha, model (REVIEW_MODEL), servedModels (the models that answered) and fellBack (whether
+// any of them doesn't start with REVIEW_MODEL). Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { openSource } from '../src/git.ts';
 import { openRouter } from '../src/openrouter.ts';
-import type { ChatMessage } from '../src/ports.ts';
+import type { ChatMessage, ModelPort } from '../src/ports.ts';
 import { FOCUSES, meteredChat, runReviewer, type Chat, type Focus } from '../src/reviewer.ts';
 import { reviewScope } from '../src/scope.ts';
 import type { RecordedInvocation } from '../src/store.ts';
@@ -26,8 +28,10 @@ const TOKEN_BUDGET = 50_000;
 const [casePath] = process.argv.slice(2);
 if (!casePath) throw new Error('usage: eval-reviewer.ts case.json');
 const testCase = JSON.parse(readFileSync(casePath, 'utf8')) as {
-  url: string; baseSha: string; headSha: string; title: string; body: string; focus: Focus; exclude?: string[];
+  id?: string; url: string; baseSha: string; headSha: string; title: string; body: string; focus: Focus; exclude?: string[];
 };
+// The span name, so every run of a case groups under one name in Phoenix.
+const caseId = testCase.id ?? basename(casePath, '.json');
 if (!FOCUSES.includes(testCase.focus)) throw new Error(`focus must be one of ${FOCUSES.join(', ')}`);
 const { OPENROUTER_API_KEY: apiKey, REVIEW_MODEL: model, GITHUB_TOKEN = '' } = process.env;
 const fallbackModel = process.env.REVIEW_FALLBACK_MODEL || undefined;
@@ -39,9 +43,18 @@ if (!local && !GITHUB_TOKEN) throw new Error('set GITHUB_TOKEN to fetch from Git
 const token = local ? '' : GITHUB_TOKEN;
 
 const usage: RecordedInvocation = { agent: testCase.focus, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
-const metered = meteredChat(
-  openRouter(apiKey), { model, fallbackModel, maxTokens: MAX_TOKENS }, `eval-${testCase.focus}`, usage,
-);
+// The model that served the last call, which is the fallback when OpenRouter fell back.
+let served = model;
+const router = openRouter(apiKey);
+const port: ModelPort = {
+  listModels: () => router.listModels(),
+  chat: async (req) => {
+    const res = await router.chat(req);
+    served = res.model;
+    return res;
+  },
+};
+const metered = meteredChat(port, { model, fallbackModel, maxTokens: MAX_TOKENS }, `eval-${testCase.focus}`, usage);
 // runTools passes the same growing array on every turn, so the last one seen is the whole conversation.
 let transcript: ChatMessage[] = [];
 
@@ -59,7 +72,7 @@ const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (sp
   try {
     const reply = await metered(messages, tools);
     span.setAttributes({
-      ...json('output', reply),
+      ...json('output', reply), [SC.LLM_MODEL_NAME]: served,
       [SC.LLM_TOKEN_COUNT_PROMPT]: usage.inputTokens - before.input,
       [SC.LLM_TOKEN_COUNT_COMPLETION]: usage.outputTokens - before.output,
       [SC.LLM_COST_TOTAL]: usage.cost - before.cost,
@@ -74,8 +87,19 @@ const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (sp
   }
 });
 
-await tracer.startActiveSpan('review', async (span) => {
-  span.setAttributes({ [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase) });
+await tracer.startActiveSpan(caseId, async (span) => {
+  span.setAttributes({
+    [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase),
+  });
+  // model stays one identifier to filter on; servedModels and fellBack say what answered, set once the calls are done.
+  const metadata = (servedModels: string[]) => ({
+    [SC.METADATA]: JSON.stringify({
+      case: caseId, focus: testCase.focus, headSha: testCase.headSha, model, servedModels,
+      // ponytail: prefix match, as OpenRouter may answer with a dated id; misses a fallback named after the primary.
+      fellBack: servedModels.some((m) => !m.startsWith(model)),
+    }),
+  });
+  span.setAttributes(metadata([]));
   try {
     // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
     // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
@@ -95,6 +119,7 @@ await tracer.startActiveSpan('review', async (span) => {
     console.log(JSON.stringify({ error: err instanceof Error ? err.message : String(err), transcript, usage }, null, 2));
     process.exitCode = 1;
   } finally {
+    span.setAttributes(metadata(usage.models));
     span.end();
   }
 });
