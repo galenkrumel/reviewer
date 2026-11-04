@@ -1,4 +1,4 @@
-// One focused reviewer: a tool-use loop that ends with a report_findings call.
+// One focused reviewer: a tool-use loop that ends with a report_findings call. Also the metered model chat every agent uses.
 import type { AssistantMessage, ChatMessage, ModelPort, ToolDef } from './ports.ts';
 import { ToolError, type Source } from './git.ts';
 import { SEVERITIES } from './findings.ts';
@@ -27,6 +27,7 @@ export function meteredChat(
     return res.message;
   };
 }
+
 /** The reviewer's report failed the schema check. */
 export class InvalidReport extends Error {}
 
