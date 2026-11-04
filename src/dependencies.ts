@@ -24,6 +24,8 @@ export interface PackageChange {
   line?: number;
   /** The Advisories open against either side, once looked up; unset when none are. */
   advisories?: ClassifiedAdvisory[];
+  /** What depends on it by name, from the same side as `resolved`: other packages, the root project or workspaces. */
+  pulledBy?: string[];
 }
 
 /**
@@ -76,13 +78,17 @@ const MAX_RUN_LOCKFILES = 200;
 
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
+/** A lockfile's installed packages, and what depends on each name. */
+interface Lock { list: Entry[]; pulledBy: Map<string, Set<string>> }
+const DEPENDENCY_MAPS = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];
 
 /**
  * A package-lock.json's installed packages (lockfile versions 2 and 3), or undefined when it isn't one. Workspace
  * folders and links are the repo's own code; bundled packages count, though they have no source of their own.
  */
-function entries(text: string | undefined): Entry[] | undefined {
-  if (text === undefined) return [];
+function entries(text: string | undefined): Lock | undefined {
+  const pulledBy = new Map<string, Set<string>>();
+  if (text === undefined) return { list: [], pulledBy };
   let lock: any;
   try {
     lock = JSON.parse(text);
@@ -99,6 +105,18 @@ function entries(text: string | undefined): Entry[] | undefined {
     const e = packages[key];
     if (typeof e !== 'object' || e === null) return;
     const at = key.lastIndexOf('node_modules/');
+    // ponytail: by name, not by the version node would resolve from where it sits; good enough for the security
+    // focus's context, resolve nested node_modules if it misleads.
+    const by = typeof e.name === 'string' ? e.name : at < 0 ? key || '(root)' : key.slice(at + 'node_modules/'.length);
+    for (const map of DEPENDENCY_MAPS) {
+      const deps = e[map];
+      if (typeof deps !== 'object' || deps === null) continue;
+      for (const d in deps) {
+        const set = pulledBy.get(d) ?? new Set();
+        set.add(by);
+        pulledBy.set(d, set);
+      }
+    }
     if (at < 0 || e.link) continue;
     // An installed package always records its version: one without is not a lockfile the check understands.
     if (typeof e.version !== 'string') return;
@@ -111,7 +129,7 @@ function entries(text: string | undefined): Entry[] | undefined {
     if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
-  return out;
+  return { list: out, pulledBy };
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
@@ -207,10 +225,13 @@ export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { nu
  * install now resolves from elsewhere, or with another integrity, is a change from that version to itself.
  */
 export function compareLockfile(base: string | undefined, head: string | undefined): PackageChange[] | undefined {
-  const [before, after] = [entries(base), entries(head)];
-  if (!before || !after) return;
+  const [baseLock, headLock] = [entries(base), entries(head)];
+  if (!baseLock || !headLock) return;
+  const [before, after] = [baseLock.list, headLock.list];
   const [old, now] = [byName(before), byName(after)];
   const atKey = new Map(before.map((e) => [e.key, e]));
+  // At most 20 dependents each: context for the security focus, not an inventory.
+  const dependents = (name: string, removed: boolean) => [...((removed ? baseLock : headLock).pulledBy.get(name) ?? [])].sort().slice(0, 20);
   const lines = head === undefined ? new Map<string, number>() : versionLines(head);
   const changes: PackageChange[] = [];
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
@@ -220,6 +241,7 @@ export function compareLockfile(base: string | undefined, head: string | undefin
       name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
       ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
       ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
+      ...(dependents(name, to === undefined).length && { pulledBy: dependents(name, to === undefined) }),
     });
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
     const added = [...is.keys()].filter((v) => !was.has(v)).sort(byVersion);
@@ -338,4 +360,38 @@ export function dependencyFindings(check: DependencyCheck): Finding[] {
       }] : []),
     ];
   }));
+}
+
+// ponytail: past this many package changes the rest are only counted; page through them with a tool if big bumps need it.
+const MAX_DESCRIBED = 300;
+const major = (v: string) => v.split('.')[0];
+
+/**
+ * The check's output as the security focus reads it, inside an untrusted-data block: package names, versions, sources
+ * and advisory summaries all come from the PR or the advisory database.
+ */
+export function describeCheck(check: DependencyCheck): string {
+  let room = MAX_DESCRIBED;
+  const out: string[] = [];
+  for (const { path, changes } of check.lockfiles) {
+    out.push(`${path}:`);
+    if (!changes.length) out.push('- no packages moved');
+    for (const c of changes.slice(0, Math.max(0, room))) {
+      const notes = [
+        c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
+        c.line !== undefined && `line ${c.line}`,
+        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${c.resolved}`,
+        c.pulledBy && `pulled in by ${c.pulledBy.join(', ')}`,
+      ].filter(Boolean);
+      out.push(`- ${c.name} ${describeMove(c)}${notes.length ? `, ${notes.join('; ')}` : ''}`);
+      for (const a of c.advisories ?? []) {
+        out.push(`  - ${a.status}: ${a.id} (${a.severity}): ${a.summary}${a.firstPatched ? `. First patched in ${a.firstPatched}` : ''}`);
+      }
+    }
+    if (changes.length > room) out.push(`- …and ${changes.length - Math.max(0, room)} more package changes, not listed`);
+    room -= changes.length;
+  }
+  if (check.advisoryError !== undefined) out.push("Advisories couldn't be looked up: none are listed.");
+  if (check.unreadable.length) out.push(`Lockfiles the check couldn't understand: ${check.unreadable.join(', ')}`);
+  return out.join('\n');
 }

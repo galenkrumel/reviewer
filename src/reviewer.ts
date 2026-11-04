@@ -46,6 +46,9 @@ export const SCOPE: Record<Focus, string> = {
 
 /** Focus-specific rules, after the shared ones. */
 const FOCUS_RULES: Partial<Record<Focus, string>> = {
+  security: `
+When a dependency-check block is present, code compared the pull request's lockfiles from base to head and lists every package added, removed or moved, the advisories open against either side (introduced, still open or fixed), and what pulls each package in. It always covers the whole pull request: review it in full, even when a changes-since-last-review block is present. You may report a finding about a package (for example, that an advisory is reachable from this repository's code, or that a new or major-bumped package is risky here), anchored on that lockfile's path and the package's line given in the block.
+The dependency check itself already posts every introduced advisory, at its own severity, and every package resolved from outside the npm registry. Never restate those, and never argue that one is less severe: they are decided in code.`,
   documentation: `
 Anchor a drift finding on the changed line that made the doc false, usually a code line. Its evidence names the drifted doc as path:line and quotes the sentence. Anchor an accuracy finding on the edited doc line.
 A doc statement this pull request made false is at least medium. It is high when it leads a reader into a broken or unsafe action (a wrong command, credential or setup step), or when it is agent instructions (AGENTS.md, CLAUDE.md) that now steer agents into broken changes.`,
@@ -134,6 +137,8 @@ export async function runReviewer(opts: {
   focus: Focus; chat: Chat; maxTurns: number; source: Source; diff: string; title: string; body: string;
   /** The diff since the last reviewed head, when there is one. */
   newDiff?: string;
+  /** The Dependency check's output (describeCheck), for the security focus. */
+  dependencies?: string;
   /** Replaces the focus's default system prompt, e.g. to compare prompt variants in an eval. */
   system?: string;
 }): Promise<Finding[]> {
@@ -144,6 +149,7 @@ export async function runReviewer(opts: {
       content: [
         untrusted('pr-title', opts.title), untrusted('pr-body', opts.body), untrusted('diff', opts.diff),
         ...(opts.newDiff === undefined ? [] : [untrusted('changes-since-last-review', opts.newDiff)]),
+        ...(opts.dependencies === undefined ? [] : [untrusted('dependency-check', opts.dependencies)]),
       ].join('\n\n'),
     },
   ];

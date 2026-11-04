@@ -262,11 +262,11 @@ async function run(s: ReturnType<typeof prFor>, config: Partial<AppConfig> = {})
 
 const dompurify = (v: string) => lock({ 'node_modules/dompurify': pkg(v), 'node_modules/left-pad': pkg('1.3.0') });
 
-test('a lockfile-only PR gets a Review listing its package changes, and no reviewer runs', async () => {
+test('a lockfile-only PR gets a Review listing its package changes, and only the security focus runs', async () => {
   const s = prFor({ 'studio/package-lock.json': dompurify('3.4.11') }, { 'studio/package-lock.json': dompurify('3.4.17') });
   const { model, review, record, logs } = await run(s);
 
-  assert.equal(model.requests.length, 0);
+  assert.deepEqual(model.agents(), ['security']);
   assert.equal(review!.comments.length, 0);
   assert.match(review!.body, /Dependencies changed in `studio\/package-lock\.json`:\n- `dompurify 3\.4\.11 → 3\.4\.17`/);
   assert.ok(!review!.body.includes('left-pad'));

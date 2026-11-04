@@ -2,7 +2,7 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { createDashboard } from './dashboard.ts';
 import {
-  checkDependencies, dependencyFindings, describeMove, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
+  checkDependencies, dependencyFindings, describeCheck, describeMove, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
 } from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import {
@@ -452,10 +452,17 @@ export function createApp(deps: {
       advisories: outcomes(advisories.map((a) => ({ outcome: a.status }))),
     });
     if (store.superseded(job.id)) return;
-    // Nothing added since then (a deletion has no line to comment on): no reviewer is worth paying for.
-    if (scope.reviewed.length && (!fresh || [...fresh.values()].some((lines) => lines.size))) {
-      let picks: Pick[];
-      try {
+    // Nothing added since then (a deletion has no line to comment on): no code reviewer is worth paying for.
+    const codeReview = scope.reviewed.length > 0 && (!fresh || [...fresh.values()].some((lines) => lines.size));
+    // The security focus reviews the dependency changes of every supported lockfile the check compared or tried to, in
+    // full, whatever the orchestrator or per-repo config says. After an earlier review, only when a lockfile changed
+    // since, or security didn't run on that review: otherwise it already saw them.
+    const checked = new Set([...dependencies.lockfiles.map((l) => l.path), ...dependencies.unreadable]);
+    const dependencyReview = checked.size > 0 && (since === undefined || !last!.focuses.has('security')
+      || await source.diffSince(last!.headSha, last!.baseSha, files.filter((f) => checked.has(f.path) || checked.has(f.oldPath!))) !== '');
+    if (codeReview || dependencyReview) {
+      let picks: Pick[] = [];
+      if (codeReview) try {
         picks = await runOrchestrator({
           chat: chatFor(job, 'orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
           pathHints: settings.pathHints,
@@ -468,7 +475,9 @@ export function createApp(deps: {
       }
 
       // Sequential: one reviewer's failure never stops the others.
-      const selected = selectFocuses(picks, scope.reviewed.map((f) => f.path), settings.maxReviewers, settings.disabledFocuses);
+      const selected = selectFocuses(picks, codeReview ? scope.reviewed.map((f) => f.path) : [], settings.maxReviewers,
+        settings.disabledFocuses, dependencyReview);
+      const dependencyBlock = dependencyReview ? describeCheck(dependencies) : undefined;
       progress(job, 'reviewers picked', { focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined });
       // A focus that didn't run on the last review never saw its lines, so it reviews the whole PR.
       // ponytail: compares with the last reviewed run only; a focus that ran two runs ago redoes the whole PR too. Track a
@@ -479,6 +488,7 @@ export function createApp(deps: {
         const review = () => runReviewer({
           focus, chat: chatFor(job, focus, invocations), maxTurns: agentConfig(focus).maxTurns,
           source, diff, newDiff: newcomers.includes(focus) ? undefined : newDiff, title: job.title, body: job.body,
+          dependencies: focus === 'security' ? dependencyBlock : undefined,
         });
         const failed = (err: unknown, final: boolean) =>
           logFailure(job, err instanceof InvalidReport ? 'validation' : 'reviewer', err, final, { focus });
@@ -524,8 +534,9 @@ export function createApp(deps: {
     // Titled as they will be posted (sanitizing again changes nothing), so the title recorded, the thread's and this
     // run's agree even for a package name sanitizing rewrites: a mismatch would hand the thread to the verifier.
     const checkFound = dependencyFindings(dependencies).map((f) => ({ ...f, title: sanitize(f.title.replace(/\s+/g, ' '), job.repo) }));
-    // The check's findings anchor on the compared lockfiles' changed lines; reviewers still only see the reviewed diff.
-    const anchored = new Set(checkFound.map((f) => f.path));
+    // The check's findings, and the security focus's on a package, anchor on the compared lockfiles' changed lines;
+    // reviewers still only see the reviewed diff.
+    const anchored = new Set(dependencies.lockfiles.filter((l) => l.changes.length).map((l) => l.path));
     if (anchored.size) {
       try {
         const lockDiff = await source.reviewDiff(files.filter((f) => anchored.has(f.path)).flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
@@ -582,11 +593,12 @@ export function createApp(deps: {
     const overCap = findings.filter((f) => f.outcome === 'over_cap').length;
     // What no waiver can lift, kept for re-decisions at this head.
     const unwaivable = [
-      // A push that runs no reviewers is never clean: a deleted check is what it would hide. Only after an earlier
-      // review does the label help; a PR with nothing reviewable in it runs no reviewers on a full review either.
-      focuses.length === 0 && (since !== undefined
-        ? `no reviewers ran on this push; add the \`${label}\` label for a full review`
-        : 'no reviewers ran: nothing reviewable changed'),
+      // A push that runs no reviewers, or changes reviewed code without a code reviewer running, is never clean: a
+      // deleted check is what it would hide. Only after an earlier review does the label help; a PR with nothing
+      // reviewable in it, and no lockfile the Dependency check compared, runs no reviewers on a full review either.
+      since !== undefined && (focuses.length === 0 || (!codeReview && newDiff !== ''))
+        && `no reviewers ran on this push; add the \`${label}\` label for a full review`,
+      since === undefined && focuses.length === 0 && 'no reviewers ran: nothing reviewable changed',
       failed.length > 0 && `the ${listed(failed)} review failed`,
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
       dependencies.unreadable.length > 0 && `the dependency check couldn't understand ${pathList(dependencies.unreadable, ', ', 10)}`,
