@@ -2,8 +2,9 @@
 // Usage: OPENROUTER_API_KEY=… REVIEW_MODEL=… GITHUB_TOKEN="$(gh auth token)" node scripts/eval-reviewer.ts case.json
 // case.json: { "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
 // https://github.com/…; GITHUB_TOKEN is only needed for the latter. REVIEW_FALLBACK_MODEL is optional, as in the App.
-// A bad argument, case or environment variable throws before anything runs. After that, prints
-// { findings | error, transcript, usage } as JSON, exiting 1 when fetching, scoping or the reviewer fails.
+// A missing argument, malformed case JSON, an unknown focus, an unsupported url or a missing environment variable
+// throws before the run.
+// The run prints { findings | error, transcript, usage } as JSON; a fetching, scoping or reviewer error exits 1.
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
