@@ -153,13 +153,16 @@ test("a package name that sanitizing rewrites still matches its Thread, so a pus
 test('names that sanitizing would make look alike stay distinct Findings', async () => {
   const git = (name: string) => pkg(name, '1.0.0', { resolved: `git+ssh://git@github.com/someone/${name}.git#abc` });
   // Both lose their link to sanitizing; a zero-width space must not make one name pass for another either.
-  const names = ['a-www.one.com', 'a-www.two.com', 'foo', 'fo​o'];
+  // Nor may markdown in a name swallow what tells it apart.
+  const names = ['a-www.one.com', 'a-www.two.com', 'foo', 'fo​o', '[q](x ', '[q](y '];
   const s = setup({ [LOCK]: lock({}), 'src/a.ts': 'a\n' }, { [LOCK]: lock({ 'node_modules/a-www.one.com': git('a-www.one.com'), 'node_modules/foo': git('foo') }), 'src/a.ts': 'b\n' },
     { approveWhenClean: true });
   for (const c of (await s.opened()).comments) s.github.resolveAs(threadFor(s, c).id, 'octo-maint', 'MEMBER');
 
   const review = await s.push({ [LOCK]: lock(Object.fromEntries(names.map((n) => [`node_modules/${n}`, git(n)]))) });
-  assert.equal(review.comments.length, 2, review.comments.map((c) => c.body.split('\n')[0]).join('\n'));
+  assert.equal(review.comments.length, 4, review.comments.map((c) => c.body.split('\n')[0]).join('\n'));
+  const titles = new Set(s.app.runs().at(-1)!.findings.map((f) => f.title));
+  assert.equal(titles.size, names.length);
 });
 
 test("a Thread on a lockfile the PR no longer changes is Fixed even when this run's lookups failed", async () => {

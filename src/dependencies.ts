@@ -311,12 +311,13 @@ function offRegistry(resolved: string | undefined): string | undefined {
  */
 /**
  * A package name for a title, which is the Finding's identity once sanitized for posting. A plain name survives that
- * unchanged but for a mark after a scope's `@`; any other (a link to remove, a zero-width space, anything odd) gets a
- * hash of the name too, so two names sanitizing makes look alike stay two Findings.
+ * unchanged but for a mark after a scope's `@`. Any other (a link, a zero-width space, markdown, anything odd) keeps
+ * only plain characters, the rest shown as `?`, plus a hash of the whole name that sanitizing can't reach (hex, after a
+ * space, in parentheses), so two names that would look alike once posted stay two Findings.
  */
 function titleName(name: string): string {
   return /^(?:@[\w.-]+\/)?[\w.-]+$/.test(name) && !/www\./i.test(name) ? name
-    : `${name} (name ${createHash('sha256').update(name).digest('hex').slice(0, 12)})`;
+    : `${name.replace(/[^\w.@/-]/g, '?')} (name ${createHash('sha256').update(name).digest('hex').slice(0, 32)})`;
 }
 
 export function dependencyFindings(check: DependencyCheck): Finding[] {
