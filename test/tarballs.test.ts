@@ -164,7 +164,7 @@ test('a package.json named by a pax header or a GNU long name is the one read, a
 });
 
 test('a tarball a reader could take another way than npm is not inspected, rather than read one way', async () => {
-  const names = ['nl', 'chain', 'dot', 'glob', 'odd'];
+  const names = ['nl', 'chain', 'dot', 'glob', 'odd', 'key'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const manifest = JSON.stringify({ name: 'x' });
@@ -177,10 +177,13 @@ test('a tarball a reader could take another way than npm is not inspected, rathe
   }, { '././@LongLink': 'L', 'PaxHeader/b': 'x' }));
   s.registry.tarballs.set(url('dot', '1.0.1'), tarball({ 'package/package.json': manifest, './x/package.json': manifest }));
   s.registry.tarballs.set(url('glob', '1.0.1'), tarball({ 'pax_global_header': pax({ path: 'package/package.json' }), 'package/package.json': manifest }, { 'pax_global_header': 'g' }));
+  // The same, hidden in a key.
+  const inKey = pax({ [`x\n29 path=package/package.json\nc`]: 'v' });
+  s.registry.tarballs.set(url('key', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': inKey, 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
   const review = await s.opened();
 
-  assert.match(review.body, /5 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 5);
+  assert.match(review.body, /6 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 6);
 });
 
 test("a bundled package is read from its bundler's tarball, at the folder and version the lockfile records", async () => {

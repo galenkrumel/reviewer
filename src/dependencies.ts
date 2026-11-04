@@ -387,8 +387,8 @@ function paxRecords(data: Buffer): { path?: string; size?: number } {
     if (space < 0 || !/^[1-9]\d*$/.test(data.subarray(at, space).toString('latin1')) || at + len > data.length
       || !record.endsWith('\n') || eq < 0) throw new Error('malformed tar archive');
     const [key, value] = [record.slice(space - at + 1, eq), record.slice(eq + 1, -1)];
-    // node-tar splits records on newlines: one holding another would be read two ways.
-    if (value.includes('\n')) throw new Error('malformed tar archive');
+    // node-tar splits records on newlines: one holding another, in its key or value, would be read two ways.
+    if (record.slice(0, -1).includes('\n') || !/^[\w.-]+$/.test(key)) throw new Error('malformed tar archive');
     if (key === 'path') out.path = value;
     if (key === 'size') {
       if (!/^\d+$/.test(value)) throw new Error('malformed tar archive');
