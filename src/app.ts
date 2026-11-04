@@ -539,7 +539,9 @@ export function createApp(deps: {
     const verified = open?.filter(isVerified) ?? [];
     const fallbackUsed = orchestratorError !== undefined;
     const changed = addedLines(diff);
-    const checkFound = dependencyFindings(dependencies);
+    // Titled as they will be posted (sanitizing again changes nothing), so the title recorded, the thread's and this
+    // run's agree even for a package name sanitizing rewrites: a mismatch would hand the thread to the verifier.
+    const checkFound = dependencyFindings(dependencies).map((f) => ({ ...f, title: sanitize(f.title.replace(/\s+/g, ' '), job.repo) }));
     // The check's findings anchor on the compared lockfiles' changed lines; reviewers still only see the reviewed diff.
     const anchored = new Set(checkFound.map((f) => f.path));
     if (anchored.size) {

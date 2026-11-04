@@ -135,6 +135,21 @@ test('package names that differ only in punctuation are different Findings, neve
   assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**foo.bar resolves from outside the npm registry**']);
 });
 
+test("a package name that sanitizing rewrites still matches its Thread, so a push that keeps it can't close it", async () => {
+  const name = 'evil-www.example.com';
+  const git = pkg(name, '1.0.0', { resolved: 'git+ssh://git@github.com/someone/evil.git#abc' });
+  const s = setup({ [LOCK]: lock({}), 'src/a.ts': 'a\n' }, { [LOCK]: lock({ [`node_modules/${name}`]: git }), 'src/a.ts': 'b\n' },
+    { approveWhenClean: true });
+  const first = (await s.opened()).comments[0]!;
+  assert.match(first.body, /link removed/);
+  const thread = threadFor(s, first);
+
+  const review = await s.push({ 'src/a.ts': 'c\n' });
+  assert.equal(s.github.thread(thread.id).resolved, false);
+  assert.deepEqual(review.comments, []);
+  assert.equal(s.model.requestsFor('verifier').length, 0);
+});
+
 test('waiving an Advisory Thread re-decides to approval when nothing else blocks, and covers later re-reports', async () => {
   const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
   s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
