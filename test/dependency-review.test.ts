@@ -87,6 +87,25 @@ test("a package name can't forge lines in the dependency-check block", async () 
   assert.match(data, /- evil {3}- fixed: GHSA-fake/);
 });
 
+test('credentials in a dependency URL never reach the model', async () => {
+  const resolved = 'https://deploy:s3cret@npm.example.com/private/-/private-1.0.0.tgz?token=abc123';
+  const s = setup({ [LOCK]: lock({}) }, { [LOCK]: lock({ 'node_modules/private': { version: '1.0.0', resolved } }) });
+  await s.opened();
+
+  const data = block(s.model.requestsFor('security')[0]!, 'dependency-check')!;
+  assert.match(data, /resolved from https:\/\/npm\.example\.com\/private\/-\/private-1\.0\.0\.tgz/);
+  assert.ok(!/s3cret|deploy|abc123/.test(data), data);
+});
+
+test('an npm alias keeps the dependents that install it under its alias', async () => {
+  const s = setup({ [LOCK]: purify('3.4.11') }, {
+    [LOCK]: lock({ 'node_modules/my-purify': pkg('dompurify', '3.4.17', { name: 'dompurify' }) }, { dependencies: { 'my-purify': 'npm:dompurify@^3' } }),
+  });
+  await s.opened();
+
+  assert.match(block(s.model.requestsFor('security')[0]!, 'dependency-check')!, /- dompurify 3\.4\.11 → 3\.4\.17, line \d+; pulled in by app/);
+});
+
 test("a long package name can't push the check's own notes off its line", async () => {
   const name = 'x'.repeat(5000);
   const s = setup({ [LOCK]: lock({ [`node_modules/${name}`]: { version: '1.0.0' } }) }, { [LOCK]: lock({ [`node_modules/${name}`]: { version: '2.0.0' } }) });

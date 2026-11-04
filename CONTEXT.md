@@ -32,7 +32,7 @@ One kind of review a Run can ask for: correctness, security, performance, archit
 _Avoid_: Reviewer type, authorize (for selecting a focus)
 
 **Dependency check**:
-The part of a Run that compares a PR's lockfiles at base and head, lists the packages that changed and looks up their Advisories. It is not a Focus: no model runs it and the orchestrator cannot skip it. It makes Findings of its own (an introduced Advisory, a package resolved from outside the registry), and code alone decides when their Threads are Fixed. So far it compares npm lockfiles only. The security focus always runs when it compared a lockfile, and is given what it found.
+The part of a Run that compares a PR's lockfiles at base and head, lists the packages that changed and looks up their Advisories. It is not a Focus: no model runs it and the orchestrator cannot skip it. It makes Findings of its own (an introduced Advisory, a package resolved from outside the registry), and code alone decides when their Threads are Fixed. So far it compares npm lockfiles only. When it compared a lockfile, the security focus runs and is given what it found: on every full review, and after an earlier review only when a checked lockfile changed since or security didn't run on that review.
 _Avoid_: Dependency review (that's what the security focus does with it), audit
 
 **Advisory**:

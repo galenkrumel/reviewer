@@ -129,6 +129,12 @@ function entries(text: string | undefined): Lock | undefined {
     if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
+  // Dependents name what they install (an alias); changes are by the real name, so an alias's dependents count there too.
+  for (const e of out) {
+    const installed = e.key.slice(e.key.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    const via = installed === e.name ? undefined : pulledBy.get(installed);
+    if (via) pulledBy.set(e.name, new Set([...(pulledBy.get(e.name) ?? []), ...via]));
+  }
   return { list: out, pulledBy };
 }
 
@@ -374,6 +380,20 @@ const clip = (s: string, max = MAX_FIELD) => (s.length > max ? `${s.slice(0, max
 const major = (v: string) => v.split('.')[0];
 
 /**
+ * A source without what could be a credential: URL userinfo (`user:token@`) and the query string. A git URL's `#commit`
+ * stays: it says what installs.
+ */
+function redact(resolved: string): string {
+  try {
+    const url = new URL(resolved);
+    url.username = url.password = url.search = '';
+    return url.href;
+  } catch {
+    return resolved.replace(/^([^/?#]*\/\/)[^/?#@]*@/, '$1').replace(/\?[^#]*/, '');
+  }
+}
+
+/**
  * The check's output as the security focus reads it, inside an untrusted-data block: package names, versions, sources
  * and advisory summaries all come from the PR or the advisory database.
  */
@@ -389,7 +409,7 @@ export function describeCheck(check: DependencyCheck): string {
       const notes = [
         c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
         c.line !== undefined && `line ${c.line}`,
-        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(c.resolved)}`,
+        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(redact(c.resolved))}`,
         c.pulledBy && `pulled in by ${c.pulledBy.map((d) => clip(d, 100)).join(', ')}`,
       ].filter(Boolean);
       const move = describeMove({ ...c, from: c.from && clip(c.from), to: c.to && clip(c.to) });
