@@ -6,15 +6,15 @@
 // variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
 // The run prints { findings | error, transcript, usage } as JSON; a fetching, scoping or reviewer error exits 1.
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
-// one AGENT span named after the case id (its file name unless "id" is set), with case, focus, model and headSha as
-// metadata, and an LLM span per model call. Without a Phoenix server the spans are dropped.
+// one AGENT span named after the case id (its file name unless "id" is set), with case, focus, the models that served
+// it, the requested model and headSha as metadata, and an LLM span per model call. Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { openSource } from '../src/git.ts';
 import { openRouter } from '../src/openrouter.ts';
-import type { ChatMessage } from '../src/ports.ts';
+import type { ChatMessage, ModelPort } from '../src/ports.ts';
 import { FOCUSES, meteredChat, runReviewer, type Chat, type Focus } from '../src/reviewer.ts';
 import { reviewScope } from '../src/scope.ts';
 import type { RecordedInvocation } from '../src/store.ts';
@@ -42,9 +42,18 @@ if (!local && !GITHUB_TOKEN) throw new Error('set GITHUB_TOKEN to fetch from Git
 const token = local ? '' : GITHUB_TOKEN;
 
 const usage: RecordedInvocation = { agent: testCase.focus, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
-const metered = meteredChat(
-  openRouter(apiKey), { model, fallbackModel, maxTokens: MAX_TOKENS }, `eval-${testCase.focus}`, usage,
-);
+// The model that served the last call, which is the fallback when OpenRouter fell back.
+let served = model;
+const router = openRouter(apiKey);
+const port: ModelPort = {
+  listModels: () => router.listModels(),
+  chat: async (req) => {
+    const res = await router.chat(req);
+    served = res.model;
+    return res;
+  },
+};
+const metered = meteredChat(port, { model, fallbackModel, maxTokens: MAX_TOKENS }, `eval-${testCase.focus}`, usage);
 // runTools passes the same growing array on every turn, so the last one seen is the whole conversation.
 let transcript: ChatMessage[] = [];
 
@@ -62,7 +71,7 @@ const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (sp
   try {
     const reply = await metered(messages, tools);
     span.setAttributes({
-      ...json('output', reply),
+      ...json('output', reply), [SC.LLM_MODEL_NAME]: served,
       [SC.LLM_TOKEN_COUNT_PROMPT]: usage.inputTokens - before.input,
       [SC.LLM_TOKEN_COUNT_COMPLETION]: usage.outputTokens - before.output,
       [SC.LLM_COST_TOTAL]: usage.cost - before.cost,
@@ -80,8 +89,14 @@ const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (sp
 await tracer.startActiveSpan(caseId, async (span) => {
   span.setAttributes({
     [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase),
-    [SC.METADATA]: JSON.stringify({ case: caseId, focus: testCase.focus, model, headSha: testCase.headSha }),
   });
+  // model is what served the calls, set once they are done; requestedModel is REVIEW_MODEL.
+  const metadata = (models: string) => ({
+    [SC.METADATA]: JSON.stringify({
+      case: caseId, focus: testCase.focus, model: models, requestedModel: model, headSha: testCase.headSha,
+    }),
+  });
+  span.setAttributes(metadata(model));
   try {
     // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
     // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
@@ -101,6 +116,7 @@ await tracer.startActiveSpan(caseId, async (span) => {
     console.log(JSON.stringify({ error: err instanceof Error ? err.message : String(err), transcript, usage }, null, 2));
     process.exitCode = 1;
   } finally {
+    span.setAttributes(metadata(usage.models.join(', ') || model));
     span.end();
   }
 });
