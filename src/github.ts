@@ -138,7 +138,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
     async advisories(token, name, version) {
       const out: Advisory[] = [];
       // `affects` filters by version on GitHub's side; pages follow the Link header's cursor.
-      let path: string | undefined = `/advisories?${new URLSearchParams({ ecosystem: 'npm', affects: `${name}@${version}`, per_page: '100' })}`;
+      let path: string | undefined = `/advisories?${new URLSearchParams({ type: 'reviewed', ecosystem: 'npm', affects: `${name}@${version}`, per_page: '100' })}`;
       while (path) {
         const res = await request(token, 'GET', path);
         for (const a of await res.json()) {

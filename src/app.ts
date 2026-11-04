@@ -560,7 +560,9 @@ export function createApp(deps: {
     // The check decides its own threads: Fixed once it no longer finds their problem at a head it fully checked, else
     // open, with a reply when the author spoke last. It fully checked a lockfile it compared, with every lookup made,
     // or one the PR no longer changes; one it couldn't read, or now leaves out, fixes nothing.
+    // A moved lockfile was checked under its old path too.
     const compared = new Set(dependencies.lockfiles.map((l) => l.path));
+    for (const f of files) if (f.oldPath && compared.has(f.path)) compared.add(f.oldPath);
     const checkVerdicts: Verdict[] = (open ?? []).filter((t) => byCheck(t) && !isVerified(t)).map((t) => {
       const fixed = !checkFound.some((f) => sameTitle(t, f)) && dependencies.advisoryError === undefined
         && (compared.has(t.path) || !paths.includes(t.path));

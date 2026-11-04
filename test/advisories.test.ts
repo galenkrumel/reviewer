@@ -192,6 +192,15 @@ test('a later push that still has the Advisory keeps it on its Thread, even with
   assert.match(s.github.thread(thread.id).comments.at(-1)!.body, /^The dependency check still finds this/);
 });
 
+test("a lockfile moved elsewhere has its old path's Advisory Thread Fixed once the moved one doesn't have it", async () => {
+  const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
+  s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
+  const thread = threadFor(s, (await s.opened()).comments[0]!);
+
+  await s.push({ [LOCK]: null, [`web/${LOCK}`]: purify('3.4.17'), 'src/a.ts': 'c\n' });
+  assert.equal(s.github.thread(thread.id).resolved, true);
+});
+
 test("an Advisory Thread isn't Fixed by a push the check couldn't fully check", async () => {
   const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
   s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
