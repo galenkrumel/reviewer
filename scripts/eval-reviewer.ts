@@ -6,8 +6,9 @@
 // variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
 // The run prints { findings | error, transcript, usage } as JSON; a fetching, scoping or reviewer error exits 1.
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
-// one AGENT span named after the case id (its file name unless "id" is set), with case, focus, the models that served
-// it, the requested model and headSha as metadata, and an LLM span per model call. Without a Phoenix server the spans are dropped.
+// one AGENT span named after the case id (its file name unless "id" is set), with an LLM span per model call. Its
+// metadata: case, focus, headSha, model (REVIEW_MODEL), servedModels (the models that answered) and fellBack (whether
+// any of them wasn't REVIEW_MODEL). Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -90,13 +91,15 @@ await tracer.startActiveSpan(caseId, async (span) => {
   span.setAttributes({
     [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase),
   });
-  // model is what served the calls, set once they are done; requestedModel is REVIEW_MODEL.
-  const metadata = (models: string) => ({
+  // model stays one identifier to filter on; servedModels and fellBack say what answered, set once the calls are done.
+  const metadata = (servedModels: string[]) => ({
     [SC.METADATA]: JSON.stringify({
-      case: caseId, focus: testCase.focus, model: models, requestedModel: model, headSha: testCase.headSha,
+      case: caseId, focus: testCase.focus, headSha: testCase.headSha, model, servedModels,
+      // ponytail: prefix match, as OpenRouter may answer with a dated id; misses a fallback named after the primary.
+      fellBack: servedModels.some((m) => !m.startsWith(model)),
     }),
   });
-  span.setAttributes(metadata(model));
+  span.setAttributes(metadata([]));
   try {
     // A fixed directory, so repeat runs reuse the repository copy instead of cloning again; the pinned commits are still
     // fetched each run. It is named after the url's last two segments, which are owner/repo for a GitHub url.
@@ -116,7 +119,7 @@ await tracer.startActiveSpan(caseId, async (span) => {
     console.log(JSON.stringify({ error: err instanceof Error ? err.message : String(err), transcript, usage }, null, 2));
     process.exitCode = 1;
   } finally {
-    span.setAttributes(metadata(usage.models.join(', ') || model));
+    span.setAttributes(metadata(usage.models));
     span.end();
   }
 });
