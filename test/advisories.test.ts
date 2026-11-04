@@ -124,6 +124,17 @@ test('a package resolved from git is posted inline as medium; one from the regis
   assert.match(c.body, /a git repository on `github\.com`/);
 });
 
+test('package names that differ only in punctuation are different Findings, never one waiver', async () => {
+  const git = (name: string) => pkg(name, '1.0.0', { resolved: `git+ssh://git@github.com/someone/${name}.git#abc` });
+  const s = setup({ [LOCK]: lock({}), 'src/a.ts': 'a\n' }, { [LOCK]: lock({ 'node_modules/foo-bar': git('foo-bar') }), 'src/a.ts': 'b\n' },
+    { approveWhenClean: true });
+  const first = await s.opened();
+  s.github.resolveAs(threadFor(s, first.comments[0]!).id, 'octo-maint', 'MEMBER');
+
+  const review = await s.push({ [LOCK]: lock({ 'node_modules/foo-bar': git('foo-bar'), 'node_modules/foo.bar': git('foo.bar') }) });
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**foo.bar resolves from outside the npm registry**']);
+});
+
 test('waiving an Advisory Thread re-decides to approval when nothing else blocks, and covers later re-reports', async () => {
   const s = setup({ [LOCK]: purify('3.4.10'), 'src/a.ts': 'a\n' }, { [LOCK]: purify('3.4.16'), 'src/a.ts': 'b\n' }, { approveWhenClean: true });
   s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });

@@ -21,6 +21,13 @@ interface Thresholds {
 
 const score = (f: Finding) => rank(f.severity) * f.confidence;
 const normalizeTitle = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+/**
+ * A title as code wrote it: exact, but for the zero-width spaces sanitizing adds. The Dependency check's titles are its
+ * identities, and package names that differ only in punctuation (`foo-bar`, `foo.bar`) are different packages.
+ */
+const exactTitle = (t: string) => t.replace(/​/g, '');
+/** A finding's identity on its path: the check's exact title, a reviewer's normalized one. */
+const titleKey = (f: { title: string; check?: true }) => (f.check ? `check\0${exactTitle(f.title)}` : normalizeTitle(f.title));
 
 /**
  * Give every reported finding exactly one outcome, in reporting order: threshold, waived, anchor (snapping a miss of one
@@ -80,10 +87,10 @@ export function validate(
   // package, and a lockfile's lines shift whenever a package is added above.
   // ponytail: same title on the same path is the identity, and the old line number isn't mapped to the new head.
   const seen = new Set(posted.filter((p) => (p.fileLevel || p.check ? changed.has(p.path) : changed.get(p.path)?.has(p.line)))
-    .map((p) => `${p.path}\0${normalizeTitle(p.title)}`));
+    .map((p) => `${p.path}\0${titleKey(p)}`));
   let published = 0;
   for (const f of kept) {
-    if (seen.has(`${f.path}\0${normalizeTitle(f.title)}`)) f.outcome = 'duplicate';
+    if (seen.has(`${f.path}\0${titleKey(f)}`)) f.outcome = 'duplicate';
     else if (published++ >= limits.maxComments) f.outcome = 'over_cap';
   }
   return out;
@@ -113,10 +120,10 @@ export function stillReported(thread: ReviewThread, findings: RecordedFinding[])
 
 /**
  * Whether a thread (or a waiver's record of one) raised a finding with this very title, on its path: how the Dependency
- * check's findings match, since code writes their titles and one package's Advisories share a line.
+ * check's findings match, since code writes their titles exactly and one package's Advisories share a line.
  */
 export function sameTitle(thread: ReviewThread | Waiver, f: Pick<Finding, 'path' | 'title'>): boolean {
-  return f.path === thread.path && normalizeTitle('comments' in thread ? threadTitle(thread) : thread.title) === normalizeTitle(f.title);
+  return f.path === thread.path && exactTitle('comments' in thread ? threadTitle(thread) : thread.title) === exactTitle(f.title);
 }
 
 /** Whether this run absorbed a re-report of the thread's finding into its waiver. */
