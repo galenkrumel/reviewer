@@ -240,6 +240,28 @@ test('an excluded side of a moved lockfile is never read, so it cannot make the 
   assert.deepEqual(check.lockfiles.map((l) => [l.path, l.changes.map((c) => describeMove(c))]), [['app/package-lock.json', ['1.0.0 (added)']]]);
 });
 
+test('each .npmrc is read once a run, and one far bigger than any real one makes its pnpm lockfiles unreadable', async () => {
+  const pnpm = "lockfileVersion: '9.0'\n";
+  const reads: string[] = [];
+  const run = (npmrc: string) => checkDependencies(
+    ['a', 'b', 'c'].map((d) => ({ path: `${d}/pnpm-lock.yaml`, added: 1, deleted: 0 })), new Set(),
+    async (side, path) => (reads.push(`${side}:${path}`), path.endsWith('.npmrc') ? npmrc : pnpm),
+  );
+  assert.deepEqual((await run('registry=https://registry.npmjs.org/')).unreadable, []);
+  assert.equal(reads.filter((r) => r === 'head:.npmrc').length, 1);
+  assert.deepEqual((await run('x'.repeat(65 * 1024))).unreadable, ['a/pnpm-lock.yaml', 'b/pnpm-lock.yaml', 'c/pnpm-lock.yaml']);
+
+  // Their text counts toward the run's 128 MiB, so huge ones in many directories stop being fetched.
+  const huge = 'x'.repeat(50 * 1024 * 1024);
+  const fetched: string[] = [];
+  const check = await checkDependencies(
+    ['a', 'b', 'c', 'd', 'e'].map((d) => ({ path: `${d}/pnpm-lock.yaml`, added: 1, deleted: 0 })), new Set(),
+    async (side, path) => (path.endsWith('/.npmrc') ? (fetched.push(path), huge) : side === 'head' ? pnpm : undefined),
+  );
+  assert.equal(check.unreadable.length, 5);
+  assert.deepEqual(fetched, ['a/.npmrc', 'b/.npmrc', 'c/.npmrc']);
+});
+
 // Through the harness: what a Maintainer sees in the Review, and what the Run records.
 
 const REPO = 'acme/widgets';
