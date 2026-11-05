@@ -14,4 +14,4 @@ Untrusted input in a standard format is read with the library its ecosystem itse
 ## Consequences
 
 - `tar` is the first runtime dependency. Deploys already run `npm ci --omit=dev`.
-- A dependency is weighed on its merits. It isn't avoided by default. The pnpm lockfile reader (`src/pnpmlock.ts`) came from the same assumption and is a candidate for the `yaml` package.
+- A dependency is weighed on its merits. It isn't avoided by default. The pnpm lockfile reader (`src/pnpmlock.ts`) came from the same assumption. A PR author controls the lockfile, so it should be read with the YAML parser pnpm itself reads lockfiles with.

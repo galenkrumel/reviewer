@@ -593,8 +593,8 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     if (!isDir && !['File', 'OldFile', 'ContiguousFile'].includes(type)) throw new Error(`${type} entry`);
     const trimmed = isDir ? raw.replace(/\/+$/, '') : raw;
     const segments = trimmed.split('/');
-    if (segments.includes('..')) return;
     if (trimmed.startsWith('/')) throw new Error('absolute path');
+    if (segments.includes('..')) return;
     // Windows takes `package.json.`, `package.json ` and `package.json::$DATA` for `package.json`: refused, like `.`.
     if (trimmed.includes('\\') || trimmed.includes(':') || segments.some((x) => x === '' || x === '.' || /[. ]$/.test(x))) {
       throw new Error('ambiguous path');
@@ -619,6 +619,11 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     folded.set(fold, path);
     files.set(path, data);
   };
+  // The parser unzips gzip and zstd it sniffs. npm hands it the fetched body, so it unzips once, and then reads a
+  // layer still compressed as a broken tar; we gunzip first (under the unpacked cap), so such a layer is refused.
+  if (archive.subarray(0, 2).equals(Buffer.from([0x1f, 0x8b])) || archive.subarray(0, 4).equals(Buffer.from([0x28, 0xb5, 0x2f, 0xfd]))) {
+    throw new Error('malformed tar archive');
+  }
   let failed = false;
   let open = 0;
   const parser = new Parser({

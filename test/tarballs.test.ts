@@ -350,7 +350,7 @@ test('a failed fetch spends the bytes it received, so oversized tarballs can\'t 
 });
 
 test('a tarball node-tar warns on (bad checksum, cut off mid-entry) or with a non-ASCII path is not inspected', async () => {
-  const names = ['sum', 'cut', 'uni'];
+  const names = ['sum', 'cut', 'uni', 'twice', 'abs'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const plain = (n: string) => gunzipSync(packageTarball(n, '1.0.1'));
@@ -358,13 +358,17 @@ test('a tarball node-tar warns on (bad checksum, cut off mid-entry) or with a no
   sum[0] = 'q'.charCodeAt(0);
   // Cut inside the first entry's data, after its header.
   const cut = plain('cut').subarray(0, 520);
-  for (const [n, body] of [['sum', sum], ['cut', cut]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
+  // Gzipped twice: npm unzips once and reads the inner gzip as a broken tar, so it must not be unzipped again.
+  const twice = packageTarball('twice', '1.0.1', { postinstall: 'x' });
+  for (const [n, body] of [['sum', sum], ['cut', cut], ['twice', twice]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
   // A filesystem may fold `ſ` (long s) to `s`, or not.
   s.registry.tarballs.set(url('uni', '1.0.1'), tarball({ 'package/package.json': JSON.stringify({ name: 'uni' }), 'package/ſcript.js': '' }));
+  // An absolute path is refused even when it also has a `..` segment.
+  s.registry.tarballs.set(url('abs', '1.0.1'), tarball({ 'package/package.json': JSON.stringify({ name: 'abs' }), '/package/../x': '' }));
   const review = await s.opened();
 
-  assert.match(review.body, /3 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 3);
+  assert.match(review.body, /5 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 5);
 });
 
 test('on a case-insensitive filesystem two paths are one: such a tarball is not inspected, and any-case manifests count', async () => {
