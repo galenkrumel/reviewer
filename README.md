@@ -216,7 +216,8 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
     **Advanced → Recent Deliveries**.
   - Each event the service asks GitHub to send again logs `redelivered` with its `delivery` GUID, `event`, the `status`
     it failed with (0: no answer) and `at`; a refused ask logs `redelivery failed`. A delivery whose GUID already
-    started a run logs `delivery` with the reason `delivery already received` and starts no other.
+    started a run, or a `pull_request` delivery whose body did (a captured one replayed under a new GUID), logs
+    `delivery` with the reason `delivery already received` and starts no other.
   - Every run logs `run finished` with `run`, `repo`, `pr`, `status`, `reviewId`, `error` and `cost` (USD).
   - Failures also carry `step`, `run`, `repo`, `pr` and `error`. `step` is one of:
   - `fetch`: the git fetch of the PR's commits;
