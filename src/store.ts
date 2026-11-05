@@ -407,6 +407,13 @@ export function openStore(dataDir: string, clock: Clock) {
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
 
+    /** Record a run's model calls, unless finishing it already did. */
+    recordInvocations(id: number, invocations: RecordedInvocation[]) {
+      if (db.prepare('SELECT 1 FROM invocations WHERE run_id = ?').get(id)) return;
+      const insert = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
+      for (const i of invocations) insert.run(id, JSON.stringify(i));
+    },
+
     /** A run's status, review and error, with the cost summed over its invocations: what the end-of-run log line says. */
     outcome(id: number): { status: RunStatus; reviewId: number | null; error: string | null; cost: number } {
       const r: any = db.prepare(`SELECT status, review_id, error,
