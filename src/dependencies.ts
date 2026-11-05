@@ -24,10 +24,11 @@ export interface PackageChange {
   /** Where the version it moved from resolved, at base; unset for an added or removed package. */
   fromResolved?: string;
   /**
-   * Installed from the tarball of the package that bundles it (`inBundle`, no source of its own, nested in a package),
-   * at head (at base for a removal): its code is compared with that package's.
+   * For a bundled package (`inBundle`, no source of its own, nested in a package), at head: where the nearest enclosing
+   * package that isn't bundled itself resolves from (unset if it records none) and the bundled one's folder in its
+   * tarball. Its install scripts are compared with that package's.
    */
-  bundled?: true;
+  bundledIn?: { resolved?: string; folder: string };
   /** Its `"version"` line at head; unset for a removed package. */
   line?: number;
   /** The Advisories open against either side, once looked up; unset when none are. */
@@ -90,7 +91,11 @@ const MAX_RUN_CHANGES = 100_000;
 const MAX_RUN_LOCKFILES = 200;
 
 /** One installed package as a lockfile records it. */
-interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string; bundled?: true }
+interface Entry {
+  name: string; version: string; resolved?: string; integrity?: string; key: string;
+  /** For a bundled package, the key of the nearest enclosing package that isn't bundled, and its folder in there. */
+  bundledBy?: { key: string; folder: string };
+}
 
 /**
  * A package-lock.json's installed packages (lockfile versions 2 and 3), or undefined when it isn't one. Workspace
@@ -125,8 +130,14 @@ function entries(text: string | undefined): Entry[] | undefined {
     const resolved = str(e.resolved);
     if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
     // Bundled only as npm writes it: `inBundle`, no source of its own, nested in a package.
-    const bundled = e.inBundle === true && resolved === undefined && at > 0;
-    out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundled && { bundled: true as const }) });
+    let bundledBy: Entry['bundledBy'];
+    if (e.inBundle === true && resolved === undefined && at > 0) {
+      const up = (k: string) => k.slice(0, k.lastIndexOf('/node_modules/'));
+      let root = up(key);
+      while (packages[root]?.inBundle === true && root.lastIndexOf('/node_modules/') > 0) root = up(root);
+      bundledBy = { key: root, folder: key.slice(root.length + 1) };
+    }
+    out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundledBy && { bundledBy }) });
   }
   return out;
 }
@@ -228,6 +239,7 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   if (!before || !after) return;
   const [old, now] = [byName(before), byName(after)];
   const atKey = new Map(before.map((e) => [e.key, e]));
+  const atHead = new Map(after.map((e) => [e.key, e]));
   const lines = head === undefined ? new Map<string, number>() : versionLines(head);
   const changes: PackageChange[] = [];
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
@@ -238,7 +250,9 @@ export function compareLockfile(base: string | undefined, head: string | undefin
       name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
       ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
       ...(to !== undefined && baseInstall?.resolved !== undefined && { fromResolved: baseInstall.resolved }),
-      ...(e.bundled && { bundled: true as const }),
+      ...(to !== undefined && e.bundledBy && {
+        bundledIn: { ...(atHead.get(e.bundledBy.key)?.resolved !== undefined && { resolved: atHead.get(e.bundledBy.key)!.resolved }), folder: e.bundledBy.folder },
+      }),
       ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
     });
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
@@ -440,7 +454,9 @@ function installScripts(files: Map<string, Buffer>): Record<string, string> {
  * install script the new one adds. Packages go in order of risk (added, then major bumps, then the rest), at most
  * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run; one tarball is fetched
  * once. A bundled package isn't fetched: its code is in its bundler's tarball, whose bundled install scripts are compared
- * with the bundler's (so a bundler that moves can't change one unseen, and one that doesn't installs the same code).
+ * with the bundler's (so a bundler that moves can't change one unseen, and one that doesn't installs the same code). It
+ * must be in that tarball, at its folder and the version the lockfile records, or it is not inspected. An install
+ * script is new when its name or its command is.
  * A package past either cap, or whose code (old or new) couldn't be fetched and read, isn't on the registry or isn't
  * recorded, is not inspected. A failed fetch still spends the bytes it received.
  * Between fetches, once `stopped` says so, it returns at once, leaving the check incomplete: the run is superseded.
@@ -453,7 +469,7 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   const { caps } = opts;
   const major = (v: string) => v.split('.')[0];
   const risk = (c: PackageChange) => (c.from === undefined ? 0 : major(c.from) !== major(c.to!) ? 1 : 2);
-  const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined && !c.bundled)
+  const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined)
     .map((c) => ({ path, c }))).sort((a, b) => risk(a.c) - risk(b.c));
   const allowed = new Set([...new Set(wanted.map(({ c }) => `${c.name}@${c.to}`))].slice(0, caps.packages));
   const byUrl = new Map<string, Map<string, Buffer> | Error>();
@@ -492,10 +508,20 @@ export async function inspectPackages(check: DependencyCheck, opts: {
     const skip = (reason: string) => notInspected.push({ path, name: c.name, version: c.to!, reason });
     if (!allowed.has(`${c.name}@${c.to}`)) { skip(`over the run's cap of ${caps.packages} packages`); continue; }
     try {
+      if (c.bundledIn) {
+        const files = await filesAt(c.bundledIn.resolved);
+        if (!files) return;
+        const want = `${c.bundledIn.folder}/package.json`.toLowerCase();
+        const manifest = [...files].find(([k]) => k.toLowerCase() === want)?.[1];
+        if (!manifest || JSON.parse(manifest.toString('utf8'))?.version !== c.to) {
+          throw new Error(`not in its bundler's tarball at ${c.bundledIn.folder} ${c.to}`);
+        }
+        continue;
+      }
       const now = await scripts(c.resolved);
       const before = c.from === undefined ? {} : await scripts(c.fromResolved);
       if (!now || !before) return;
-      const added = Object.entries(now).filter(([k]) => !(k in before));
+      const added = Object.entries(now).filter(([k, v]) => before[k] !== v);
       if (added.length) c.installScripts = Object.fromEntries(added);
     } catch (err) {
       skip((err as Error).message);

