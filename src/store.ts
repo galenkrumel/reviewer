@@ -167,6 +167,14 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
     );
+    -- A redelivery keeps its GUID: receive() looks it up.
+    CREATE INDEX IF NOT EXISTS runs_delivery_id ON runs(delivery_id);
+    -- SHA-256 of the verified body that started the run: a replay under a fresh GUID still matches it.
+    CREATE TABLE IF NOT EXISTS delivery_digests (
+      run_id INTEGER PRIMARY KEY REFERENCES runs(id),
+      digest TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS delivery_digests_digest ON delivery_digests(digest);
     -- The Dashboard sums every listed run's cost.
     CREATE INDEX IF NOT EXISTS invocations_run_id ON invocations(run_id);
     CREATE TABLE IF NOT EXISTS waivers (
@@ -241,7 +249,7 @@ export function openStore(dataDir: string, clock: Clock) {
      * supersedes nothing: a late delivery's old head must not stop the review of the new one. The same goes for a
      * retry, which only a retry still queued at its SHAs absorbs.
      */
-    enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued') {
+    enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued', digest?: string) {
       const retry = job.event === RETRY;
       if (status === 'queued' && (retry || isRedecision(job.event))) {
         if (db.prepare(`SELECT 1 FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
@@ -257,10 +265,11 @@ export function openStore(dataDir: string, clock: Clock) {
           AND status IN ('queued', 'running') AND (head_sha != ? OR base_sha != ?)`)
           .run(now(), job.repo, job.pr, job.headSha, job.baseSha);
       }
-      db.prepare(`INSERT INTO runs (delivery_id, event, repo, pr, installation_id, head_sha, base_sha, title, body,
+      const { lastInsertRowid } = db.prepare(`INSERT INTO runs (delivery_id, event, repo, pr, installation_id, head_sha, base_sha, title, body,
         status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(job.deliveryId, job.event, job.repo, job.pr, job.installationId, job.headSha, job.baseSha,
           job.title, job.body, status, now(), now());
+      if (digest) db.prepare('INSERT INTO delivery_digests (run_id, digest) VALUES (?, ?)').run(lastInsertRowid, digest);
     },
 
     /** Runs for a PR created after `since`, not counting skipped ones. */
@@ -270,11 +279,23 @@ export function openStore(dataDir: string, clock: Clock) {
       return row.n;
     },
 
-    /** Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order. */
-    recordPrState(repo: string, pr: number, state: PrState, at: Date) {
+    /**
+     * Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order.
+     * Returns whether `at` is later than any recorded before. A tie still records: deliveries usually arrive in order,
+     * so a close and a reopen in the same second should show the reopen, though a tie is never trusted to cancel runs.
+     */
+    recordPrState(repo: string, pr: number, state: PrState, at: Date): boolean {
+      const prev = db.prepare('SELECT at FROM pr_states WHERE repo = ? AND pr = ?').get(repo, pr) as any;
       db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
         ON CONFLICT (repo, pr) DO UPDATE SET state = excluded.state, at = excluded.at WHERE excluded.at >= pr_states.at`)
         .run(repo, pr, state, at.toISOString());
+      return !prev || prev.at < at.toISOString();
+    },
+
+    /** Whether a run was ever recorded for this `X-GitHub-Delivery` or this body digest; an empty GUID never matches. */
+    hasDelivery(deliveryId: string, digest: string): boolean {
+      return db.prepare(`SELECT 1 FROM runs WHERE delivery_id = ? AND delivery_id != ''
+        UNION ALL SELECT 1 FROM delivery_digests WHERE digest = ? LIMIT 1`).get(deliveryId, digest) !== undefined;
     },
 
     /** The PR's state as GitHub last reported it, if it ever did. */
@@ -470,7 +491,7 @@ export function openStore(dataDir: string, clock: Clock) {
       db.exec('BEGIN');
       try {
         for (const table of [
-          'findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings', 'verdicts', 'dependency_checks',
+          'findings', 'focuses', 'skipped_files', 'invocations', 'decisions', 'orchestrations', 'config_warnings', 'verdicts', 'dependency_checks', 'delivery_digests',
         ]) {
           db.prepare(`DELETE FROM ${table} WHERE run_id IN (${old})`).run(cutoff);
         }

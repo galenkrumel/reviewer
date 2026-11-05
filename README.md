@@ -108,7 +108,10 @@ Open the service's logs in Render. Every webhook GitHub sends logs a `delivery` 
 `run finished` line.
 
 - **No `delivery` lines:** GitHub isn't reaching the service. Check the App's webhook URL, and look at
-  **Advanced → Recent Deliveries** in the App settings. You can redeliver a failed event from there.
+  **Advanced → Recent Deliveries** in the App settings. You can redeliver a failed event from there. The service
+  also asks GitHub to redeliver the events it never answered in the last 6 hours, a minute after it starts and every
+  15 minutes after that, so a push made during a deploy or crash can still be reviewed (unless the PR is at its run
+  cap). It gives up on an event after 3 attempts.
 - **`delivery` with status 401:** `GITHUB_WEBHOOK_SECRET` doesn't match the App's webhook secret.
 - **`delivery` but no review:** the line's `reason` says why it was skipped, e.g. the repository isn't in
   `REPO_ALLOWLIST`, the PR is a draft, or the author is outside and the PR lacks the label.
@@ -168,6 +171,9 @@ Optional:
 | `REVIEW_TOKEN_BUDGET` | `50000` | Estimated diff tokens given to reviewers; files past it are skipped and listed |
 | `WORKER_CONCURRENCY` | `2` | Jobs reviewed at once |
 | `RETENTION_DAYS` | `90` | Finished run records older than this are deleted, at startup and daily |
+| `REGISTRY_FETCH_PACKAGES` | `20` | Changed packages whose published tarballs the dependency check fetches per run; the rest are not inspected and block approval |
+| `REGISTRY_FETCH_BYTES` | `5242880` | Tarball bytes the dependency check downloads per run (5 MiB) |
+| `REGISTRY_FETCH_SECONDS` | `120` | Seconds the dependency check spends fetching tarballs per run, all fetches together |
 | `APPROVE_WHEN_CLEAN` | `false` | `true` approves the PR when every finding a run reports is below the publish threshold or already waived, every reviewer finished, nothing went unreviewed, and every thread the App started is verified fixed or disproved, or waived by a maintainer (the App tries to resolve threads it verifies; GitHub may refuse, and the threads stay visibly open). Otherwise every run posts a review whose **Not approved:** line names what blocks it. See the note below |
 | `ADMIN_PASSWORD` | unset | Turns on the read-only dashboard of PRs and their runs at `/admin` (HTTP Basic auth, any username, this password). Unset, `/admin` is 404. Run records quote PR code, so use a long random value |
 | `DATA_DIR` | `./data` | Persistent volume for SQLite and bare clones |
@@ -209,6 +215,10 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
     A `warn` with status 401 means the signature didn't match: `GITHUB_WEBHOOK_SECRET` differs from the App's secret.
     No `delivery` lines at all means GitHub isn't reaching the service: check the App's webhook URL and its
     **Advanced → Recent Deliveries**.
+  - Each event the service asks GitHub to send again logs `redelivered` with its `delivery` GUID, `event`, the `status`
+    it failed with (0: no answer) and `at`; a refused ask logs `redelivery failed`. A delivery whose GUID already
+    started a run, or a `pull_request` delivery whose body did (a captured one replayed under a new GUID), logs
+    `delivery` with the reason `delivery already received` and starts no other.
   - Every run logs `run finished` with `run`, `repo`, `pr`, `status`, `reviewId`, `error` and `cost` (USD).
   - Failures also carry `step`, `run`, `repo`, `pr` and `error`. `step` is one of:
   - `fetch`: the git fetch of the PR's commits;

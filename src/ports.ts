@@ -1,5 +1,5 @@
 // The edges of the service. Everything here has a real adapter (src/github.ts,
-// src/openrouter.ts) and a test fake (test/harness.ts).
+// src/openrouter.ts, src/registry.ts) and a test fake (test/harness.ts).
 
 export interface PullRequest {
   number: number;
@@ -70,8 +70,28 @@ export interface GitHubPort {
   reviewThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
   replyToThread(token: string, threadId: string, body: string): Promise<void>;
   resolveThread(token: string, threadId: string): Promise<void>;
+  /**
+   * The App's webhook delivery attempts back to at least `since`, newest first; each redelivery is an attempt of its
+   * own with the same `guid`. Authenticated as the App, not an installation.
+   */
+  listDeliveries(since: Date): Promise<HookDelivery[]>;
+  /** Ask GitHub to send one delivery attempt again, keeping its GUID. */
+  redeliver(id: number): Promise<void>;
   /** The GitHub Advisory Database's advisories affecting one npm package at one version, withdrawn ones included. */
   advisories(token: string, name: string, version: string): Promise<Advisory[]>;
+}
+
+export interface HookDelivery {
+  /** This attempt's. */
+  id: number;
+  /** The delivery's `X-GitHub-Delivery`, shared by all its attempts. */
+  guid: string;
+  deliveredAt: Date;
+  /** The HTTP status the service answered with; 0 when it never answered. */
+  statusCode: number;
+  event: string;
+  /** An attempt asked for after the first. */
+  redelivery: boolean;
 }
 
 export interface Advisory {
@@ -83,6 +103,24 @@ export interface Advisory {
   /** The first version that fixes it for this package, when one is published. */
   firstPatched?: string;
   withdrawn: boolean;
+}
+
+/** A tarball fetch that failed after `received` bytes arrived, which still count against the run's budget. */
+export class FetchError extends Error {
+  readonly received: number;
+  constructor(message: string, received: number) {
+    super(message);
+    this.received = received;
+  }
+}
+
+/** The npm registry, which code (never a model) fetches published tarballs from. */
+export interface RegistryPort {
+  /**
+   * The tarball at `url`, refused for any host but the registry's, past `maxBytes` downloaded, and once `signal` aborts.
+   * Once bytes have arrived, a failure is a FetchError saying how many.
+   */
+  tarball(url: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer>;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).

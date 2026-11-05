@@ -4,6 +4,7 @@ import { AGENTS, createApp, errorMessage, type Log, type OutsidePolicy } from '.
 import { SEVERITIES, type Severity } from './findings.ts';
 import { gitHubApp } from './github.ts';
 import { openRouter } from './openrouter.ts';
+import { npmRegistry } from './registry.ts';
 
 function env(name: string): string {
   const v = process.env[name];
@@ -81,9 +82,13 @@ const app = createApp({
     retentionDays: positiveInt('RETENTION_DAYS'),
     approveWhenClean: flag('APPROVE_WHEN_CLEAN'),
     adminPassword: process.env.ADMIN_PASSWORD || undefined,
+    registryFetchPackages: positiveInt('REGISTRY_FETCH_PACKAGES'),
+    registryFetchBytes: positiveInt('REGISTRY_FETCH_BYTES'),
+    registryFetchSeconds: positiveInt('REGISTRY_FETCH_SECONDS'),
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),
+  registry: npmRegistry(),
   model: openRouter(env('OPENROUTER_API_KEY')),
   clock: { now: () => new Date() },
   log,
@@ -142,6 +147,17 @@ const server = createServer((req, res) => {
   });
 }).listen(port, () => log({ level: 'info', msg: 'listening', port }));
 
+// Webhooks GitHub couldn't deliver while the service was down (every deploy: the disk means the old instance stops
+// first) are never retried by GitHub, so ask for them again. A minute after startup, once Render routes to this
+// instance, then every 15 minutes for an outage that didn't restart it.
+// One pass at a time: two would both see the same failed deliveries and redeliver them twice.
+let recovering: Promise<void> | undefined;
+const recover = () => recovering ??= app.recoverDeliveries()
+  .catch((err) => log({ level: 'error', msg: 'delivery recovery failed', error: errorMessage(err) }))
+  .finally(() => { recovering = undefined; });
+const firstRecovery = setTimeout(recover, 60_000);
+const recovery = setInterval(recover, 15 * 60_000);
+
 kick();
 
 // Render sends SIGTERM on deploy and kills the process after 30s. Stop taking webhooks and runs, let running ones stop
@@ -154,6 +170,8 @@ process.once('SIGTERM', async () => {
   app.stop();
   const closed = new Promise((r) => server.close(r));
   clearInterval(daily);
+  clearTimeout(firstRecovery);
+  clearInterval(recovery);
   const deadline = new Promise<'timeout'>((r) => setTimeout(r, SHUTDOWN_MS, 'timeout').unref());
   const settled = Promise.all([app.drain().catch(() => {}), closed]).then(() => 'drained' as const);
   const outcome = await Promise.race([settled, deadline]);

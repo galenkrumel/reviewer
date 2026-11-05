@@ -1,7 +1,7 @@
 // Real GitHub adapter: App JWT -> installation token -> REST calls.
 import { sign } from 'node:crypto';
 import { byVersion } from './dependencies.ts';
-import type { Advisory, GitHubPort, NewReview, ReviewThread } from './ports.ts';
+import type { Advisory, GitHubPort, HookDelivery, NewReview, ReviewThread } from './ports.ts';
 
 const API = 'https://api.github.com';
 const b64url = (s: string | Buffer) => Buffer.from(s).toString('base64url');
@@ -134,6 +134,24 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
       await graphql(token, `mutation($id: ID!, $body: String!) {
         addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $id, body: $body }) { comment { id } } }`,
       { id: threadId, body });
+    },
+    async listDeliveries(since) {
+      const out: HookDelivery[] = [];
+      // Newest first, pages following the Link header's cursor: stops at the first page reaching past `since`.
+      let path: string | undefined = '/app/hook/deliveries?per_page=100';
+      while (path) {
+        const res = await request(appJwt(), 'GET', path);
+        const page: any[] = await res.json();
+        for (const d of page) {
+          out.push({ id: d.id, guid: d.guid, deliveredAt: new Date(d.delivered_at), statusCode: d.status_code ?? 0, event: d.event, redelivery: !!d.redelivery });
+        }
+        if (!page.length || out.at(-1)!.deliveredAt < since) return out;
+        path = /<https:\/\/api\.github\.com(\/[^>]*)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1];
+      }
+      return out;
+    },
+    async redeliver(id) {
+      await request(appJwt(), 'POST', `/app/hook/deliveries/${id}/attempts`);
     },
     async advisories(token, name, version) {
       const out: Advisory[] = [];

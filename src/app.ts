@@ -1,8 +1,8 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createDashboard } from './dashboard.ts';
 import {
-  checkDependencies, dependencyFindings, describeCheck, describeMove, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
+  checkDependencies, dependencyFindings, describeCheck, describeMove, inspectPackages, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
 } from './dependencies.ts';
 import { addedLines, openSource, ToolError, type Source } from './git.ts';
 import {
@@ -16,7 +16,7 @@ import {
   isRedecision, openStore, RETRY, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
 } from './store.ts';
 import { runVerifier, type Verdict } from './verifier.ts';
-import type { Clock, GitHubPort, ModelPort, NewReview, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
+import type { Clock, GitHubPort, HookDelivery, ModelPort, NewReview, RegistryPort, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
 
 export const AGENTS = ['orchestrator', 'verifier', ...FOCUSES] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -66,6 +66,12 @@ export interface AppConfig {
   approveWhenClean?: boolean;
   /** Basic-auth password for the read-only Dashboard at /admin. Unset, the Dashboard is not served. */
   adminPassword?: string;
+  /** Packages whose tarballs the Dependency check fetches per run; the rest aren't inspected. Default 20. */
+  registryFetchPackages?: number;
+  /** Tarball bytes the Dependency check downloads per run. Default 5 MiB. */
+  registryFetchBytes?: number;
+  /** Seconds the Dependency check spends fetching tarballs per run, all fetches together. Default 120. */
+  registryFetchSeconds?: number;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -91,7 +97,7 @@ class Superseded extends Error {}
 class ShuttingDown extends Superseded {}
 
 export function createApp(deps: {
-  config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock;
+  config: AppConfig; github: GitHubPort; registry: RegistryPort; model: ModelPort; clock: Clock;
   /** Backoff waits. Default setTimeout. */
   sleep?: (ms: number) => Promise<void>;
   log: Log;
@@ -361,19 +367,32 @@ export function createApp(deps: {
     } catch {
       return { status: 400 };
     }
+    // A redelivery keeps its GUID: one that already started a run (received, but its answer never reached GitHub)
+    // mustn't start another. A label re-review or a re-decision is never a duplicate by its SHAs. The GUID is
+    // unsigned, so a captured delivery replayed under a fresh one is caught by its body's digest instead.
     const event = d.headers['x-github-event'];
+    const deliveryId = String(d.headers['x-github-delivery'] ?? '');
+    // Re-decisions aren't checked by body: resolving a thread again can repeat one exactly.
+    const digest = event === 'pull_request' ? createHash('sha256').update(d.body).digest('hex') : '';
+    if (store.hasDelivery(deliveryId, digest)) return { status: 202, ignored: 'delivery already received' };
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
     // Every pull_request delivery carries the PR's state, whatever its action and whether it starts a run.
+    // Whether this delivery is newer than anything recorded about the PR's state. An older or same-time close arriving
+    // late (a redelivery) cancels nothing: a run on a closed PR goes stale at its own check anyway.
+    let latest = true;
     if (event === 'pull_request' && repo && allowlist.has(repo.toLowerCase()) && Number.isInteger(pr?.number)) {
       const updated = new Date(pr.updated_at);
-      store.recordPrState(repo, pr.number,
+      const known = !Number.isNaN(updated.getTime());
+      // Without a time it can't be shown late, so it still cancels.
+      latest = store.recordPrState(repo, pr.number,
         pr.merged || pr.merged_at ? 'merged' : pr.state === 'closed' ? 'closed' : pr.draft ? 'draft' : 'open',
-        Number.isNaN(updated.getTime()) ? deps.clock.now() : updated);
+        known ? updated : deps.clock.now()) || !known;
     }
     if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
       if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
       if (!Number.isInteger(pr?.number)) return { status: 400 };
+      if (!latest) return { status: 202, ignored: `${payload.action}: not newer than the PR's recorded state` };
       store.supersede(repo, pr.number);
       return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
     }
@@ -384,13 +403,13 @@ export function createApp(deps: {
     let subject = pr, headSha: string | undefined = pr?.head?.sha, baseSha: string | undefined = pr?.base?.sha;
     if (event === 'issue_comment') {
       subject = payload.issue;
-      const latest = Number.isInteger(subject?.number) ? store.latestRun(repo, subject.number) : undefined;
-      if (!latest) return { status: 202, ignored: 'no review to retry on this PR' };
+      const run = Number.isInteger(subject?.number) ? store.latestRun(repo, subject.number) : undefined;
+      if (!run) return { status: 202, ignored: 'no review to retry on this PR' };
       // The comment's issue doesn't say whether the PR is a draft; its last pull_request delivery does.
       if (store.prState(repo, subject.number) === 'draft') return { status: 202, ignored: 'pull request is a draft' };
       // Retried as it stands when the comment lands: one still going has nothing to retry yet.
-      if (latest.status === 'queued' || latest.status === 'running') return { status: 202, ignored: 'the latest review is still in progress' };
-      ({ headSha, baseSha } = latest);
+      if (run.status === 'queued' || run.status === 'running') return { status: 202, ignored: 'the latest review is still in progress' };
+      ({ headSha, baseSha } = run);
     }
     if (!Number.isInteger(payload.installation?.id) || !headSha || !baseSha) return { status: 400 };
     const gated = authorReason(subject, policy, label);
@@ -399,7 +418,7 @@ export function createApp(deps: {
     // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
     const capped = store.countRuns(repo, subject.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
     store.enqueue({
-      deliveryId: String(d.headers['x-github-delivery'] ?? ''),
+      deliveryId,
       event: event === 'issue_comment' ? RETRY : `${event}.${payload.action}`,
       repo,
       pr: subject.number,
@@ -408,8 +427,36 @@ export function createApp(deps: {
       baseSha,
       title: subject.title ?? '',
       body: subject.body ?? '',
-    }, capped ? 'skipped' : 'queued');
+    }, capped ? 'skipped' : 'queued', digest);
     return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
+  }
+
+  /**
+   * Ask GitHub to redeliver the webhooks the service never answered (it was down: a deploy, a crash) and first sent
+   * within the lookback window, oldest first. GitHub sends them when it gets to them, so order still rests on the
+   * late-delivery handling. A delivery it answered, even with a 4xx (its own rejection, which would only repeat), is
+   * left alone, as is one already tried MAX_ATTEMPTS times.
+   */
+  async function recoverDeliveries() {
+    const since = new Date(deps.clock.now().getTime() - LOOKBACK_MS);
+    // Every attempt of a delivery, oldest last: age and order go by its first one, not a recent redelivery. When the
+    // oldest listed is a redelivery, the first was past where listing stopped, so before the window and left alone; a
+    // first attempt inside it comes with all its later ones, so the count is whole.
+    const byGuid = new Map<string, HookDelivery[]>();
+    for (const a of await github.listDeliveries(since)) byGuid.set(a.guid, [...byGuid.get(a.guid) ?? [], a]);
+    const lost = [...byGuid.values()]
+      .filter((tries) => tries.length < MAX_ATTEMPTS && tries.every((t) => t.statusCode === 0 || t.statusCode >= 500))
+      .map((tries) => tries.at(-1)!).filter((first) => !first.redelivery && first.deliveredAt >= since)
+      .sort((a, b) => a.deliveredAt.getTime() - b.deliveredAt.getTime());
+    for (const a of lost) {
+      const entry = { delivery: a.guid, event: a.event, status: a.statusCode, at: a.deliveredAt.toISOString() };
+      try {
+        await github.redeliver(a.id);
+        log({ level: 'info', msg: 'redelivered', ...entry });
+      } catch (err) {
+        log({ level: 'warn', msg: 'redelivery failed', ...entry, error: errorMessage(err) });
+      }
+    }
   }
 
   /**
@@ -485,11 +532,21 @@ export function createApp(deps: {
     const dependencies = await checkDependencies(files, excluded, source.fileAtSide);
     await lookUpAdvisories(dependencies, (name, version) => github.advisories(token, name, version));
     if (dependencies.advisoryError !== undefined) logFailure(job, 'advisories', dependencies.advisoryError, false);
+    await inspectPackages(dependencies, {
+      fetch: (url, maxBytes, signal) => deps.registry.tarball(url, maxBytes, signal),
+      caps: {
+        packages: config.registryFetchPackages ?? 20, bytes: config.registryFetchBytes ?? 5 * 1024 * 1024,
+        ms: (config.registryFetchSeconds ?? 120) * 1000,
+      },
+      stopped: () => store.superseded(job.id),
+      fetched: (url, result) => progress(job, 'error' in result ? 'package fetch failed' : 'package fetched', { url, ...result }),
+    });
     store.recordDependencies(job.id, dependencies);
     const advisories = dependencies.lockfiles.flatMap((l) => l.changes.flatMap((c) => c.advisories ?? []));
     progress(job, 'dependencies checked', {
       lockfiles: dependencies.lockfiles.length, changes: dependencies.lockfiles.reduce((n, l) => n + l.changes.length, 0),
       unreadable: dependencies.unreadable.length, unchecked: dependencies.unchecked.length,
+      notInspected: dependencies.notInspected?.length ?? 0,
       advisories: outcomes(advisories.map((a) => ({ outcome: a.status }))),
     });
     if (store.superseded(job.id)) return;
@@ -617,7 +674,9 @@ export function createApp(deps: {
     // open, with a reply when the author spoke last. It fully checked a lockfile it compared, with every lookup made,
     // or one the PR no longer changes; one it couldn't read, or now leaves out, fixes nothing.
     // A moved lockfile was checked under its old path too.
-    const compared = new Set(dependencies.lockfiles.map((l) => l.path));
+    // One with a package it couldn't inspect may still have that package's install script.
+    const notInspected = dependencies.notInspected ?? [];
+    const compared = new Set(dependencies.lockfiles.map((l) => l.path).filter((p) => !notInspected.some((n) => n.path === p)));
     for (const f of files) if (f.oldPath && compared.has(f.path)) compared.add(f.oldPath);
     // A thread on a moved lockfile's old path is still found when the moved one has its finding.
     const movedTo = new Map(files.filter((f) => f.oldPath).map((f) => [f.oldPath!, f.path]));
@@ -664,6 +723,7 @@ export function createApp(deps: {
       unreviewed > 0 && `${count(unreviewed, 'file')} went unreviewed (listed below)`,
       dependencies.unreadable.length > 0 && `the dependency check couldn't understand ${pathList(dependencies.unreadable, ', ', 10)}`,
       dependencies.advisoryError !== undefined && "the dependency check couldn't look up advisories",
+      notInspected.length > 0 && `${count(notInspected.length, 'package')} ${notInspected.length === 1 ? "wasn't" : "weren't"} inspected (listed below)`,
       since !== undefined && store.droppedOverCap(job.repo, job.pr)
         && 'an earlier review left issues uncommented over its comment cap',
     ].filter((b): b is string => typeof b === 'string');
@@ -821,11 +881,19 @@ export function createApp(deps: {
     active.clear();
   }
 
-  return { receive, drain, stop, abandon, checkModels, prune, dashboard, runs: store.runs, close: store.close };
+  return { receive, recoverDeliveries, drain, stop, abandon, checkModels, prune, dashboard, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
 const DAY_MS = 24 * 3600_000;
+/**
+ * How far back recoverDeliveries looks, and how many attempts of one delivery it stops at. Bounded so a long outage
+ * doesn't flood the queue (the run cap still applies).
+ */
+// ponytail: an outage longer than 6h loses its older deliveries, and a busy one redelivers all the rest in one pass;
+// raise the window or cap a pass if either bites.
+const LOOKBACK_MS = 6 * 3600_000;
+const MAX_ATTEMPTS = 3;
 /** A comment that waives: `Waive:` first, ignoring case and leading whitespace. */
 const WAIVE = /^\s*waive:\s*/i;
 const isWaive = (body: string) => WAIVE.test(body);
@@ -979,6 +1047,8 @@ function dependencyLines(check: DependencyCheck): string[] {
         advisories(changes, 'fixed', 'Advisories fixed')}${advisories(changes, 'still open', 'Advisories still open')}`;
     }), 20),
     ...(check.advisoryError !== undefined ? ["Advisories couldn't be looked up, so none are listed or commented on."] : []),
+    ...(check.notInspected?.length ? [`Not inspected (its published code couldn't be fetched and read):\n- ${
+      pathList(check.notInspected.map((n) => `${n.name} ${n.version}`), '\n- ', 50)}`] : []),
     ...(check.unreadable.length ? [`Not understood by the dependency check: ${pathList(check.unreadable, ', ', 20)}.`] : []),
     ...(check.unchecked.length ? [`Not checked (lockfile format not supported yet): ${pathList(check.unchecked, ', ', 20)}.`] : []),
   ];
@@ -1029,7 +1099,7 @@ function summary(job: Job, count: number, notes: {
 const CHECK_STILL_FINDS = 'The dependency check still finds this at the current head. Resolving this thread or replying '
   + '`Waive: <reason>` waives it.';
 const CHECK_COULDNT = "The dependency check couldn't fully re-check this lockfile at the current head (its advisories couldn't be "
-  + 'looked up, or the lockfile couldn\'t be read), so this stays open. Resolving this thread or replying `Waive: <reason>` waives it.';
+  + 'looked up, a package in it couldn\'t be inspected, or the lockfile couldn\'t be read), so this stays open. Resolving this thread or replying `Waive: <reason>` waives it.';
 
 /** Ends a reply that verified a thread fixed. Only the app's own comments are trusted to carry it. */
 const VERIFIED = '<!-- ai-review:verified -->';
