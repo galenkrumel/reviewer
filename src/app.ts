@@ -87,6 +87,9 @@ class StepError extends Error {}
 /** The run was superseded: thrown before a model call, so it stops paying for one. */
 class Superseded extends Error {}
 
+/** The service is shutting down: stops the run like a superseded one, but it is re-queued for the next instance. */
+class ShuttingDown extends Superseded {}
+
 export function createApp(deps: {
   config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock;
   /** Backoff waits. Default setTimeout. */
@@ -111,6 +114,10 @@ export function createApp(deps: {
   const label = config.reviewLabel ?? 'ai-review';
   const policy = config.reviewOutsidePrs ?? 'label';
   const runCap = config.runCap ?? 10;
+  // Set by stop(): no new run is claimed and running ones stop at their next model call.
+  let stopping = false;
+  // Each running run's model calls so far, until the worker records them or abandon() does.
+  const active = new Map<number, RecordedInvocation[]>();
 
   const agentConfig = (name: Agent) => {
     const c = config.agents?.[name];
@@ -135,7 +142,7 @@ export function createApp(deps: {
 
   /**
    * A chat for one agent invocation: its model and fallback, usage tallied into `invocations`, tokens budgeted. Once
-   * the run is superseded it throws Superseded instead of calling the model.
+   * the run is superseded it throws Superseded instead of calling the model, and ShuttingDown once the service stops.
    */
   function chatFor(job: Job, name: Agent, invocations: RecordedInvocation[]): Chat {
     const used: RecordedInvocation = { agent: name, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
@@ -143,6 +150,7 @@ export function createApp(deps: {
     const chat = meteredChat(model, agentConfig(name), `${job.repo.replace('/', '--')}--pr-${job.pr}`, used);
     return (messages, tools) => {
       if (store.superseded(job.id)) throw new Superseded('superseded');
+      if (stopping) throw new ShuttingDown('shutting down');
       return chat(messages, tools);
     };
   }
@@ -624,7 +632,7 @@ export function createApp(deps: {
       ...standing(findings, { open, stillOpen, outsideOpen, unchecked: verdicts ? undefined : unverified!.length }),
     ];
     const record = {
-      findings, focuses, invocations, fallbackUsed, orchestratorError, skipped: scope.skipped,
+      findings, focuses, fallbackUsed, orchestratorError, skipped: scope.skipped,
       // Here the inline comments block; once they are threads a waiver can close, the ones over the cap still do.
       blockers: [...unwaivable, ...(overCap > 0 ? [`${count(overCap, 'issue')} left uncommented over the comment cap`] : [])],
     };
@@ -682,7 +690,7 @@ export function createApp(deps: {
       const source = await fetchSource(job, token);
       if (store.superseded(job.id)) return;
       verdicts = await verifyThreads(job, source, spoken, invocations);
-      if (!verdicts) return store.finish(job.id, 'failed', { invocations, error: "verifier: the threads couldn't be re-checked" });
+      if (!verdicts) return store.finish(job.id, 'failed', { error: "verifier: the threads couldn't be re-checked" });
     }
     if (store.superseded(job.id)) return;
     // The run's published findings are threads now, decided by their state. Any other may be a newly waived re-report.
@@ -701,7 +709,7 @@ export function createApp(deps: {
     const approve = config.approveWhenClean === true && blockers.length === 0;
     const approved = reviews.find((r) => r.id === base.reviewId)?.state === 'APPROVED';
     progress(job, 'review decided', { approve, was: approved, blockers: blockers.length, findings: outcomes(findings) });
-    const record = { invocations };
+    const record = {};
     if (approve === approved) return store.finish(job.id, 'nothing_to_publish', record);
     const live = await github.getPullRequest(token, job.repo, job.pr);
     if (!isCurrent(live, job)) return finishStale(job, live, record);
@@ -722,20 +730,24 @@ export function createApp(deps: {
   }
 
   async function worker() {
-    for (let job = store.claimNext(); job; job = store.claimNext()) {
+    for (let job; !stopping && (job = store.claimNext());) {
       const invocations: RecordedInvocation[] = [];
+      active.set(job.id, invocations);
       try {
         await (isRedecision(job.event) ? redecideJob : reviewJob)(job, invocations);
       } catch (err) {
         // Errors come from git, GitHub or the model and carry no credentials. A superseded run keeps that status.
-        if (err instanceof Superseded) { /* nothing to record but its model calls, below */ }
+        // The next instance runs it again; this attempt's model calls are recorded below.
+        if (err instanceof ShuttingDown) store.requeue(job.id);
+        else if (err instanceof Superseded) { /* nothing to record but its model calls, below */ }
         else if (err instanceof StepError) store.finish(job.id, 'failed', { error: err.message });
         else {
           logFailure(job, 'run', err, true);
           store.finish(job.id, 'failed', { error: `run: ${errorMessage(err)}` });
         }
       }
-      // A superseded or failed run stops without finishing on its record, but its model calls were still paid for.
+      // Recorded here however the run ended, once per attempt: a run interrupted by shutdown pays again when re-run.
+      if (!active.delete(job.id)) continue; // abandoned: recorded and re-queued already
       store.recordInvocations(job.id, invocations);
       log({ level: 'info', msg: 'run finished', run: job.id, repo: job.repo, pr: job.pr, ...store.outcome(job.id) });
     }
@@ -755,7 +767,20 @@ export function createApp(deps: {
   }
 
   const dashboard = createDashboard(store, config.adminPassword, () => deps.clock.now());
-  return { receive, drain, checkModels, prune, dashboard, runs: store.runs, close: store.close };
+  /** Shutting down: claim no more runs and stop running ones at their next model call. drain() then settles. */
+  const stop = () => { stopping = true; };
+
+  /** At the shutdown deadline: record each still-running run's model calls so far and re-queue it. */
+  function abandon() {
+    for (const [id, invocations] of active) {
+      store.recordInvocations(id, invocations);
+      store.requeue(id);
+      log({ level: 'info', msg: 'run abandoned', run: id });
+    }
+    active.clear();
+  }
+
+  return { receive, drain, stop, abandon, checkModels, prune, dashboard, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);

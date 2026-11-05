@@ -194,7 +194,8 @@ export function openStore(dataDir: string, clock: Clock) {
     );
   `);
   const now = () => clock.now().toISOString();
-  // Restart safety: whatever was running died with the last process. The marker check prevents double-posting.
+  // Restart safety: whatever was running died with the last process (shutdown re-queues it, a crash can't). The
+  // marker check prevents double-posting.
   db.prepare(`UPDATE runs SET status = 'queued', updated_at = ? WHERE status = 'running'`).run(now());
   const toJob = (r: any): Job => ({
     id: r.id, deliveryId: r.delivery_id, event: r.event, repo: r.repo, pr: r.pr,
@@ -345,6 +346,11 @@ export function openStore(dataDir: string, clock: Clock) {
       return (db.prepare('SELECT status FROM runs WHERE id = ?').get(id) as any)?.status === 'superseded';
     },
 
+    /** Hand a running run back to the queue, for the next instance to run after a shutdown. */
+    requeue(id: number) {
+      db.prepare(`UPDATE runs SET status = 'queued', updated_at = ? WHERE id = ? AND status = 'running'`).run(now(), id);
+    },
+
     claimNext(): Job | undefined {
       const row = db.prepare(`UPDATE runs SET status = 'running', updated_at = ?
         WHERE id = (SELECT id FROM runs WHERE status = 'queued' ORDER BY id LIMIT 1) RETURNING *`).get(now());
@@ -382,7 +388,7 @@ export function openStore(dataDir: string, clock: Clock) {
 
     finish(id: number, status: RunStatus, opts: {
       reviewId?: number; error?: string; findings?: RecordedFinding[]; focuses?: RecordedFocus[];
-      invocations?: RecordedInvocation[]; fallbackUsed?: boolean; orchestratorError?: string; skipped?: string[];
+      fallbackUsed?: boolean; orchestratorError?: string; skipped?: string[];
       /** What stops an approval whatever is waived later. */
       blockers?: string[];
       /** Whether the published review approved. */
@@ -394,8 +400,6 @@ export function openStore(dataDir: string, clock: Clock) {
       for (const f of opts.focuses ?? []) insertFocus.run(id, JSON.stringify(f));
       const insertSkipped = db.prepare('INSERT INTO skipped_files (run_id, path) VALUES (?, ?)');
       for (const path of opts.skipped ?? []) insertSkipped.run(id, path);
-      const insertInvocation = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
-      for (const i of opts.invocations ?? []) insertInvocation.run(id, JSON.stringify(i));
       if (opts.approved !== undefined) db.prepare('INSERT INTO verdicts (run_id, approved) VALUES (?, ?)').run(id, opts.approved ? 1 : 0);
       if (opts.blockers) db.prepare('INSERT INTO decisions (run_id, blockers) VALUES (?, ?)').run(id, JSON.stringify(opts.blockers));
       if (opts.fallbackUsed !== undefined) {
@@ -407,9 +411,8 @@ export function openStore(dataDir: string, clock: Clock) {
         .run(status, opts.reviewId ?? null, opts.error ?? null, now(), id);
     },
 
-    /** Record a run's model calls, unless finishing it already did. */
+    /** Record one attempt's model calls, however it ended. A run re-queued by shutdown adds each attempt's. */
     recordInvocations(id: number, invocations: RecordedInvocation[]) {
-      if (db.prepare('SELECT 1 FROM invocations WHERE run_id = ?').get(id)) return;
       const insert = db.prepare('INSERT INTO invocations (run_id, data) VALUES (?, ?)');
       for (const i of invocations) insert.run(id, JSON.stringify(i));
     },

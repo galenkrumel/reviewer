@@ -121,7 +121,7 @@ The orchestrator selects from a fixed enum of six focuses:
 - Calls go through OpenRouter's chat completions API. Fallback uses OpenRouter's `models: [...]` array.
 - **Startup validation:** the service checks every configured model against OpenRouter's `/models` endpoint. Each one's `supported_parameters` must include `tools`. If any model fails the check, the service refuses to start.
 - Findings come back as a call to the `report_findings` tool, not through `response_format`. Arguments are schema-validated, and invalid output is retried once.
-- Each run records the model ID, token counts, and cost for each agent invocation, so that models can be compared. A run that is superseded or fails keeps the cost it had already spent.
+- Each run records the model ID, token counts, and cost for each agent invocation, so that models can be compared. A run that is superseded, fails or is interrupted by a shutdown keeps the cost it had already spent; a run re-run after a shutdown adds each attempt's.
 
 ## 6. Analysis and execution safety
 
@@ -307,6 +307,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
   - Publish: retry with backoff, guarded by the marker check (§9.5).
   - All failures are written to structured logs and run metadata.
 - **Restart safety:** jobs left `running` at startup are re-queued. The idempotency marker prevents double-posting.
+- **Shutdown:** on `SIGTERM` (a deploy) the service stops accepting webhooks and claiming runs. A running run stops at its next model call, records its model calls and is re-queued for the next instance; a run still going after 25 seconds is recorded and re-queued as it stands, and the process exits, inside Render's 30-second grace period. A run re-queued this way is reviewed again from the start.
 - **Dashboard:** a read-only HTML view of runs at `/admin`, served only when an admin password is set and behind HTTP Basic auth. Its home page lists PRs by their latest run (that run's status, the PR's verdict: whether its latest published review approved or only commented, its run count and cost; filter by repo, PR state or active PRs). A PR's page lists its runs and waivers; a run's page shows its recorded metadata, skipped files, blockers and Dependency check result (each package change with its Advisories, ID, severity and classification, and a failed advisory lookup with its error); a flat run list filters across PRs by status and full run or re-decision. Wherever a PR is named it shows its PR state (open, draft, merged or closed), recorded from every `pull_request` delivery for an allowlisted repo; a delivery about an older revision of the PR never overwrites a newer one, and a PR whose state was never recorded shows none. Runs are labelled by what they did on GitHub (review posted with its verdict, linking to the review; nothing posted; no change, for a re-decision; cancelled) and by what started them in plain words (push, thread resolved…); runs that posted nothing are muted. Everything from the PR or a model is escaped, and no script runs on the page. Its only outside resource is a webfont stylesheet pinned to an exact version with a Subresource Integrity hash; without it the page falls back to system fonts.
 
 ## 13. Acceptance criteria
