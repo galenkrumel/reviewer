@@ -279,7 +279,7 @@ test('fields the check never reads may be block lists or multi-line text', () =>
 
 const REPO = 'acme/widgets';
 
-async function opened(base: Record<string, string>, head: Record<string, string>, config: Partial<AppConfig> = {}) {
+async function opened(base: Parameters<typeof gitFixture>[0], head: Parameters<typeof gitFixture>[1], config: Partial<AppConfig> = {}) {
   const fx = gitFixture(base, head);
   const pr = { number: 85, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
   const github = new FakeGitHub();
@@ -331,6 +331,9 @@ test("an integrity-only package resolves from the registry the repo's .npmrc set
     ?.map(([, r]) => r), npm);
   assert.deepEqual(resolved('registry=https://mirror.example/\n[x]', 'registry=https://registry.npmjs.org/')?.map(([, r]) => r), npm);
   assert.match(resolved('[x\nregistry=https://evil.example/')![1]![1]!, /^https:\/\/evil\.example\//);
+  // Another path on npm's own host is another registry, not a malformed npm tarball.
+  const sub = compareLockfile(undefined, lock, PNPM, { head: ['registry=https://registry.npmjs.org/sub/'] })!;
+  assert.equal(dependencyFindings({ lockfiles: [{ path: PNPM, changes: sub }], unreadable: [], unchecked: [] }).length, 2);
   // A quoted value with a comment after it isn't quoted to npm: the quotes stay, and it isn't a URL.
   assert.match(resolved('registry="https://registry.npmjs.org/" ; c')![1]![1]!, /^unknown registry\//);
   // Credentials in the URL never reach `resolved`, nor does a value that isn't a URL; auth lines aren't read at all.
@@ -361,6 +364,12 @@ test(".npmrc at the root and next to the lockfile decide where a pnpm package re
   assert.match(fx.review.comments[0]!.body, /another registry on `npm\.acme\.dev`/);
   const seen = JSON.stringify([fx.review, fx.model.requests, fx.logs]);
   assert.ok(seen.includes('npm.acme.dev') && !seen.includes('SECRET'));
+});
+
+test(".npmrc isn't read on a side without the lockfile, so an odd one there can't block an added lockfile", async () => {
+  const { review } = await opened({ '.npmrc': { symlink: '/etc/passwd' } }, { '.npmrc': null, [PNPM]: purify('3.4.17') });
+  assert.ok(!review.body.includes('Not understood'), review.body);
+  assert.match(review.body, /dompurify 3\.4\.17 \(added\)/);
 });
 
 test('each side reads its own .npmrc: a PR that switches the registry moves every integrity-only package', () => {

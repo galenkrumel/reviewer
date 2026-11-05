@@ -56,6 +56,9 @@ export interface DependencyCheck {
 const SUPPORTED = new Set(['package-lock.json', 'pnpm-lock.yaml']);
 /** npm's default registry: anything else a package resolves from is off-registry. */
 const REGISTRY = 'https://registry.npmjs.org/';
+/** On npm's default registry: not another path on its host, which `.npmrc` redaction shows as `…` (`npmrcRegistries`). */
+const onRegistry = (resolved: string | undefined): boolean =>
+  resolved !== undefined && resolved.startsWith(REGISTRY) && !resolved.startsWith(`${REGISTRY}…`);
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /**
@@ -137,7 +140,7 @@ function entries(text: string | undefined): Lock | undefined {
     // another package or version is not a lockfile the check understands. The name and version must be plain ones
     // too, or the URL could still say something else once fetched (`a/../evil`, `1.0.0#`).
     const resolved = str(e.resolved);
-    if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
+    if (onRegistry(resolved) && !isTarballOf(resolved!, name, e.version)) return;
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
   // Dependents name what they install (an alias); changes are by the real name, so an alias's dependents count there too.
@@ -278,7 +281,7 @@ function pnpmEntries(text: string | undefined, npmrc: (string | undefined)[] = [
         ? str(r.tarball) ?? (typeof r.integrity === 'string' ? `${registryOf(name)}${name}/-/${name.split('/').pop()}-${v}.tgz` : undefined)
         : r.type === 'git' && typeof r.repo === 'string' && typeof r.commit === 'string' ? `git+${r.repo}#${r.commit}` : undefined;
       // As for npm: a registry tarball must be this package at this version, so what installs is what is looked up.
-      if (resolved === undefined || (resolved.startsWith(REGISTRY) && !isTarballOf(resolved, name, v))) return;
+      if (resolved === undefined || (onRegistry(resolved) && !isTarballOf(resolved, name, v))) return;
       const k = `${i}/${key}`;
       const line = at.get('packages')?.get(key);
       if (line !== undefined) lines.set(k, line);
@@ -368,7 +371,7 @@ export async function checkDependencies(
       };
       if (text <= MAX_RUN_TEXT) {
         changes = compareLockfile(base, head, name, name === 'pnpm-lock.yaml'
-          ? { base: useBase ? await npmrc('base', old) : undefined, head: useHead ? await npmrc('head', f.path) : undefined } : {});
+          ? { base: base === undefined ? [] : await npmrc('base', old), head: head === undefined ? [] : await npmrc('head', f.path) } : {});
       }
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
@@ -487,7 +490,7 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
  * ponytail: the kind is a guess from the URL's shape, for the comment's wording only; every kind is a Finding alike.
  */
 function offRegistry(resolved: string | undefined): string | undefined {
-  if (resolved === undefined || resolved.startsWith(REGISTRY)) return;
+  if (resolved === undefined || onRegistry(resolved)) return;
   let host: string | undefined;
   try {
     host = new URL(resolved.replace(/^git\+/, '')).hostname || undefined;
@@ -574,7 +577,7 @@ export function describeCheck(check: DependencyCheck): string {
       const notes = [
         c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
         c.line !== undefined && `line ${c.line}`,
-        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(redact(c.resolved))}`,
+        c.resolved !== undefined && !onRegistry(c.resolved) && `resolved from ${clip(redact(c.resolved))}`,
         c.pulledBy && `pulled in by ${c.pulledBy.map((d) => clip(d, 100)).join(', ')}`,
         c.pulledByPartial && 'dependents only partly recorded (the lockfile has more dependency entries than the check reads)',
       ].filter(Boolean);
