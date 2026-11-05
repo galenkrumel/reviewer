@@ -25,13 +25,24 @@ const QUOTED = new RegExp(`^(?:${QUOTE})[ \\t]*(?:#.*)?$`);
  */
 function keyValue(body: string): [string, string] | undefined {
   const q = QUOTED_KEY.exec(body);
-  if (q) return [unquote(q[1], q[2]), body.slice(q[0].length).trim()];
+  if (q) {
+    const key = unquote(q[1], q[2]);
+    return key === undefined ? undefined : [key, body.slice(q[0].length).trim()];
+  }
   const end = body.search(/:(?:[ \t]|$)/);
   if (end <= 0 || /^[\s'"#&*!|>%@`{}[\],?:-]/.test(body)) return;
   return [body.slice(0, end).trimEnd(), body.slice(end + 1).trim()];
 }
-const unquote = (single: string | undefined, double: string | undefined) =>
-  single !== undefined ? single.replace(/''/g, "'") : JSON.parse(`"${double}"`) as string;
+
+/** A quoted scalar's text; undefined for a double-quoted escape JSON lacks (YAML's `\x41`): pnpm never writes one. */
+function unquote(single: string | undefined, double: string | undefined): string | undefined {
+  if (single !== undefined) return single.replace(/''/g, "'");
+  try {
+    return JSON.parse(`"${double}"`) as string;
+  } catch {
+    return;
+  }
+}
 const map = (): YamlMap => Object.create(null);
 
 /**
@@ -49,9 +60,12 @@ export function readPnpmLock(text: string): LockDoc[] | undefined {
   /** Lines deeper than this are skipped: a skipped section's body, or a multi-line scalar. */
   let skipBelow = Infinity;
   let section = '';
-  const lines = text.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.replace(/\r$/, '');
+  // Line by line in place rather than split: 32 MiB of newlines would be millions of array slots.
+  for (let i = 0, at = 0; at <= text.length; i++) {
+    let end = text.indexOf('\n', at);
+    if (end < 0) end = text.length;
+    const line = text.slice(at, end).replace(/\r$/, '');
+    at = end + 1;
     if (line === '---') { doc = undefined; continue; }
     if (/^[ \t]*(?:#.*)?$/.test(line)) continue;
     const indent = line.search(/[^ ]/);
@@ -128,9 +142,9 @@ export function flowMap(flow: Flow): Record<string, string> | undefined {
   if (!s.startsWith('{') || /\s#/.test(s)) return;
   FLOW_ITEM.lastIndex = 1;
   for (let m; (m = FLOW_ITEM.exec(s));) {
-    const key = m[3] ?? unquote(m[1], m[2]);
-    if (Object.hasOwn(out, key)) return;
-    out[key] = m[6] ?? unquote(m[4], m[5]);
+    const [key, v] = [m[3] ?? unquote(m[1], m[2]), m[6] ?? unquote(m[4], m[5])];
+    if (key === undefined || v === undefined || Object.hasOwn(out, key)) return;
+    out[key] = v;
     if (m[7] === '}') return FLOW_ITEM.lastIndex === s.length ? out : undefined;
   }
 }
