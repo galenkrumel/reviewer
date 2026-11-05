@@ -228,6 +228,38 @@ test('a failed fetch spends the bytes it received, so oversized tarballs can\'t 
   assert.match(review.body, /2 packages weren't inspected/);
 });
 
+test('tar framing node-tar would read another way (checksum, magic, data after the end) is not inspected', async () => {
+  const names = ['sum', 'magic', 'tail'];
+  const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
+    Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
+  const plain = (n: string) => gunzipSync(packageTarball(n, '1.0.1'));
+  const sum = plain('sum');
+  sum[0] = 'q'.charCodeAt(0);
+  const magic = plain('magic');
+  magic.write('ustar\0' + '01', 257, 'latin1');
+  const tail = Buffer.concat([plain('tail'), gunzipSync(packageTarball('tail', '1.0.1', { postinstall: 'x' }))]);
+  for (const [n, body] of [['sum', sum], ['magic', magic], ['tail', tail]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
+  const review = await s.opened();
+
+  assert.match(review.body, /3 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 3);
+});
+
+test('on a case-insensitive filesystem two paths are one: such a tarball is not inspected, and any-case manifests count', async () => {
+  const s = setup({ 'node_modules/cc': pkg('cc', '1.0.0'), 'node_modules/up': pkg('up', '1.0.0') },
+    { 'node_modules/cc': pkg('cc', '1.0.1'), 'node_modules/up': pkg('up', '1.0.1') });
+  s.registry.tarballs.set(url('cc', '1.0.1'), tarball({
+    'package/package.json': JSON.stringify({ name: 'cc' }), 'package/PACKAGE.JSON': JSON.stringify({ scripts: { postinstall: 'x' } }),
+  }));
+  s.registry.tarballs.set(url('up', '1.0.1'), packageTarball('up', '1.0.1', {}, {
+    'NODE_MODULES/b/Package.json': JSON.stringify({ scripts: { preinstall: 'node b.js' } }),
+  }));
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `cc 1\.0\.1`\n\n/);
+  assert.match(review.comments[0]!.body, /`NODE_MODULES\/b preinstall`: `node b\.js`/);
+});
+
 test('a link in a tarball, which npm would extract over a file, is not inspected', async () => {
   const s = setup({ 'node_modules/ln': pkg('ln', '1.0.0') }, { 'node_modules/ln': pkg('ln', '1.0.1') });
   s.registry.tarballs.set(url('ln', '1.0.1'), tarball({

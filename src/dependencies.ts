@@ -319,8 +319,10 @@ export const onRegistry = (url: string) => url.startsWith(REGISTRY);
  * name), as npm extracts them (node-tar, stripping that folder): a pax `path` or GNU long name replaces the next entry's
  * own name (and a pax `size` its size), a path with a `..` segment or an absolute one is dropped, and a later entry for
  * a path replaces an earlier one. Anything a reader might take another way than node-tar throws instead, so the package
- * is not inspected: truncated input, a malformed pax record or one holding a newline, meta headers chained, any entry
- * type but a file or directory, a path with an empty, `.` or backslashed segment.
+ * is not inspected: truncated input, a header whose checksum is wrong or whose magic is neither POSIX ustar, GNU nor
+ * none, anything but zero blocks after the first zero block, a malformed pax record or one holding a newline, meta
+ * headers chained, any entry type but a file or directory, a path with an empty, `.` or backslashed segment, and two
+ * paths that a case-insensitive filesystem (macOS, Windows) would take for one file.
  */
 export function untar(archive: Buffer): Map<string, Buffer> {
   const files = new Map<string, Buffer>();
@@ -328,9 +330,27 @@ export function untar(archive: Buffer): Map<string, Buffer> {
   const text = (b: Buffer) => b.toString('utf8').replace(/\0.*$/s, '');
   const field = (h: Buffer, at: number, len: number) => text(h.subarray(at, at + len));
   let next: { path?: string; size?: number } | undefined;
+  /** Each path as a case- and normalization-insensitive filesystem sees it, to the path stored. */
+  const folded = new Map<string, string>();
   for (let at = 0; at + 512 <= archive.length;) {
     const h = archive.subarray(at, at + 512);
-    if (h.every((b) => b === 0)) break;
+    if (h.every((b) => b === 0)) {
+      if (archive.subarray(at).some((b) => b !== 0)) throw malformed();
+      break;
+    }
+    // node-tar skips a header whose checksum doesn't match (either sum tar has used): refused rather than read.
+    const stored = parseInt(field(h, 148, 8).trim(), 8);
+    let [unsigned, signed] = [0, 0];
+    for (let i = 0; i < 512; i++) {
+      const b = i >= 148 && i < 156 ? 0x20 : h[i]!;
+      unsigned += b;
+      signed += b > 127 ? b - 256 : b;
+    }
+    if (stored !== unsigned && stored !== signed) throw malformed();
+    // node-tar reads the prefix field only under POSIX ustar's magic; GNU's puts other fields there.
+    const magic = h.subarray(257, 265).toString('latin1');
+    const posixUstar = magic === 'ustar\x0000';
+    if (!posixUstar && magic !== 'ustar  \x00' && !/^\x00*$/.test(magic)) throw malformed();
     const size = next?.size ?? parseInt(field(h, 124, 12).trim() || '0', 8);
     if (!Number.isSafeInteger(size) || size < 0 || at + 512 + size > archive.length) throw malformed();
     const data = archive.subarray(at + 512, at + 512 + size);
@@ -341,7 +361,7 @@ export function untar(archive: Buffer): Map<string, Buffer> {
       next = type === 'L' ? { path: text(data) } : paxRecords(data);
       continue;
     }
-    const prefix = field(h, 257, 6) === 'ustar' ? field(h, 345, 155) : '';
+    const prefix = posixUstar ? field(h, 345, 155) : '';
     const raw = next?.path ?? (prefix ? `${prefix}/` : '') + field(h, 0, 100);
     next = undefined;
     // Directories hold no code; a link can replace a file when extracted, so it and any other type (devices, GNU or
@@ -351,7 +371,12 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const segments = raw.split('/');
     if (raw.startsWith('/') || segments.includes('..')) continue;
     if (raw.includes('\\') || segments.some((x) => x === '' || x === '.')) throw malformed();
-    if (segments.length > 1) files.set(segments.slice(1).join('/'), data);
+    if (segments.length < 2) continue;
+    const path = segments.slice(1).join('/');
+    const fold = path.normalize('NFC').toLowerCase();
+    if ((folded.get(fold) ?? path) !== path) throw malformed();
+    folded.set(fold, path);
+    files.set(path, data);
   }
   return files;
 }
@@ -387,22 +412,26 @@ const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 // ordinary packages hit it.
 const UNPACKED_PER_FETCHED = 8;
 
-/** A package manifest in a tarball: its own, or a bundled package's under `node_modules/`, at any depth. */
-const MANIFEST = /^((?:node_modules\/(?:@[^/]+\/)?[^/]+\/)*)package\.json$/;
+/**
+ * A package manifest in a tarball: its own, or a bundled package's under `node_modules/`, at any depth, in any case
+ * (a case-insensitive filesystem installs `NODE_MODULES/a/Package.json` as the same thing).
+ */
+const MANIFEST = /^((?:node_modules\/(?:@[^/]+\/)?[^/]+\/)*)package\.json$/i;
 
 /**
  * The install scripts in a tarball's files, by name, prefixed by their folder for a bundled package's (npm runs those
  * too): npm also runs `node-gyp rebuild` for a `binding.gyp` with neither `install` nor `preinstall`.
  */
 function installScripts(files: Map<string, Buffer>): Record<string, string> {
-  if (!files.has('package.json')) throw new Error('no package.json');
+  const lower = new Set([...files.keys()].map((k) => k.toLowerCase()));
+  if (!lower.has('package.json')) throw new Error('no package.json');
   const found: Record<string, string> = {};
   for (const [path, manifest] of files) {
     const dir = MANIFEST.exec(path)?.[1];
     if (dir === undefined) continue;
     const scripts = JSON.parse(manifest.toString('utf8'))?.scripts;
     const own: Record<string, string> = Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof scripts?.[k] === 'string').map((k) => [k, scripts[k]]));
-    if (files.has(`${dir}binding.gyp`) && !own.install && !own.preinstall) own.install = 'node-gyp rebuild';
+    if (lower.has(`${dir}binding.gyp`.toLowerCase()) && !own.install && !own.preinstall) own.install = 'node-gyp rebuild';
     for (const [k, v] of Object.entries(own)) found[dir ? `${dir.slice(0, -1)} ${k}` : k] = v;
   }
   return found;
