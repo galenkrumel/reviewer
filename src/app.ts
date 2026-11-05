@@ -1,5 +1,5 @@
 // The service: webhook intake (verify, filter, enqueue) and the worker that reviews and publishes.
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { createDashboard } from './dashboard.ts';
 import {
   checkDependencies, dependencyFindings, describeCheck, describeMove, lookUpAdvisories, type ClassifiedAdvisory, type DependencyCheck, type PackageChange,
@@ -362,9 +362,11 @@ export function createApp(deps: {
       return { status: 400 };
     }
     // A redelivery keeps its GUID: one that already started a run (received, but its answer never reached GitHub)
-    // mustn't start another. A label re-review or a re-decision is never a duplicate by its SHAs.
+    // mustn't start another. A label re-review or a re-decision is never a duplicate by its SHAs. The GUID is
+    // unsigned, so a captured delivery replayed under a fresh one is caught by its body's digest instead.
     const deliveryId = String(d.headers['x-github-delivery'] ?? '');
-    if (deliveryId && store.hasDelivery(deliveryId)) return { status: 202, ignored: 'delivery already received' };
+    const digest = d.headers['x-github-event'] === 'pull_request' ? createHash('sha256').update(d.body).digest('hex') : '';
+    if (store.hasDelivery(deliveryId, digest)) return { status: 202, ignored: 'delivery already received' };
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
@@ -406,7 +408,7 @@ export function createApp(deps: {
       baseSha: pr.base.sha,
       title: pr.title ?? '',
       body: pr.body ?? '',
-    }, capped ? 'skipped' : 'queued');
+    }, capped ? 'skipped' : 'queued', digest);
     return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
   }
 
