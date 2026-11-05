@@ -11,6 +11,7 @@
     "typecheck": "tsc"
   },
   "devDependencies": {
+    "@arizeai/phoenix-client": "^7.18.1",
     "@arizeai/phoenix-otel": "^2.3.0",
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"
