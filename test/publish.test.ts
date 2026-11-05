@@ -179,6 +179,26 @@ test('a run interrupted by shutdown stops at its next model call, stays queued, 
   assert.equal(rerun.invocations.reduce((n, i) => n + i.cost, 0), 0.004);
 });
 
+test('a run abandoned at the shutdown deadline is re-queued with what it spent so far, recorded once', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([async () => {
+    // The deadline passes while this call is in flight.
+    app.stop();
+    app.abandon();
+    return toolCall('read_file', { path: 'src/math.ts' });
+  }, report()]);
+  const { app, logs } = testApp({ model, github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const run = app.runs()[0]!;
+  assert.equal(run.status, 'queued');
+  assert.equal(logs.some((l) => l.level !== 'info'), false);
+  // The orchestrator's call; the one in flight hadn't returned its cost yet.
+  assert.equal(run.invocations.reduce((n, i) => n + i.cost, 0), 0.001);
+});
+
 test('a stopped app claims no queued job', async () => {
   const { pr, github } = setup();
   const model = new ScriptedModel([report()]);

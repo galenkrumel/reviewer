@@ -114,8 +114,10 @@ export function createApp(deps: {
   const label = config.reviewLabel ?? 'ai-review';
   const policy = config.reviewOutsidePrs ?? 'label';
   const runCap = config.runCap ?? 10;
-  /** Set by stop(): no new job is claimed and running ones stop at their next model call. */
+  // Set by stop(): no new run is claimed and running ones stop at their next model call.
   let stopping = false;
+  // Each running run's model calls so far, until the worker records them or abandon() does.
+  const active = new Map<number, RecordedInvocation[]>();
 
   const agentConfig = (name: Agent) => {
     const c = config.agents?.[name];
@@ -728,8 +730,9 @@ export function createApp(deps: {
   }
 
   async function worker() {
-    for (let job = stopping ? undefined : store.claimNext(); job; job = stopping ? undefined : store.claimNext()) {
+    for (let job; !stopping && (job = store.claimNext());) {
       const invocations: RecordedInvocation[] = [];
+      active.set(job.id, invocations);
       try {
         await (isRedecision(job.event) ? redecideJob : reviewJob)(job, invocations);
       } catch (err) {
@@ -744,6 +747,7 @@ export function createApp(deps: {
         }
       }
       // Recorded here however the run ended, once per attempt: a run interrupted by shutdown pays again when re-run.
+      if (!active.delete(job.id)) continue; // abandoned: recorded and re-queued already
       store.recordInvocations(job.id, invocations);
       log({ level: 'info', msg: 'run finished', run: job.id, repo: job.repo, pr: job.pr, ...store.outcome(job.id) });
     }
@@ -763,10 +767,20 @@ export function createApp(deps: {
   }
 
   const dashboard = createDashboard(store, config.adminPassword, () => deps.clock.now());
-  /** Shutting down: claim no more jobs and stop running ones at their next model call. drain() then settles. */
+  /** Shutting down: claim no more runs and stop running ones at their next model call. drain() then settles. */
   const stop = () => { stopping = true; };
 
-  return { receive, drain, stop, checkModels, prune, dashboard, runs: store.runs, close: store.close };
+  /** At the shutdown deadline: record each still-running run's model calls so far and re-queue it. */
+  function abandon() {
+    for (const [id, invocations] of active) {
+      store.recordInvocations(id, invocations);
+      store.requeue(id);
+      log({ level: 'info', msg: 'run abandoned', run: id });
+    }
+    active.clear();
+  }
+
+  return { receive, drain, stop, abandon, checkModels, prune, dashboard, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);

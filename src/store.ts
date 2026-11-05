@@ -346,7 +346,7 @@ export function openStore(dataDir: string, clock: Clock) {
       return (db.prepare('SELECT status FROM runs WHERE id = ?').get(id) as any)?.status === 'superseded';
     },
 
-    /** Hand a running job back to the queue, for the next instance to run after a shutdown. */
+    /** Hand a running run back to the queue, for the next instance to run after a shutdown. */
     requeue(id: number) {
       db.prepare(`UPDATE runs SET status = 'queued', updated_at = ? WHERE id = ? AND status = 'running'`).run(now(), id);
     },

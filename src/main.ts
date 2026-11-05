@@ -144,17 +144,20 @@ const server = createServer((req, res) => {
 
 kick();
 
-// Render sends SIGTERM on deploy and kills the process after 30s. Stop taking webhooks and jobs, let running ones stop
-// at their next model call (re-queued, their spend recorded), then exit before the kill.
+// Render sends SIGTERM on deploy and kills the process after 30s. Stop taking webhooks and runs, let running ones stop
+// at their next model call (re-queued, their spend recorded), and finish deliveries already arriving. A run still
+// going at the deadline is recorded and re-queued as it stands.
 // ponytail: a model call still in flight at the deadline loses its cost; abort it with a signal if that matters.
 const SHUTDOWN_MS = 25_000;
 process.once('SIGTERM', async () => {
   log({ level: 'info', msg: 'shutting down' });
   app.stop();
-  server.close();
+  const closed = new Promise((r) => server.close(r));
   clearInterval(daily);
   const deadline = new Promise<'timeout'>((r) => setTimeout(r, SHUTDOWN_MS, 'timeout').unref());
-  const outcome = await Promise.race([app.drain().then(() => 'drained' as const, () => 'drained' as const), deadline]);
+  const settled = Promise.all([app.drain().catch(() => {}), closed]).then(() => 'drained' as const);
+  const outcome = await Promise.race([settled, deadline]);
+  if (outcome === 'timeout') app.abandon();
   log({ level: outcome === 'timeout' ? 'warn' : 'info', msg: 'shut down', outcome });
   app.close();
   process.exit(0);
