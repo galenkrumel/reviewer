@@ -1,0 +1,30 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "a4dbb7e7edf787db97c60278bf7e94ac683426f4",
+  "headSha": "69f1ee9758b7d72c8459c770795223729df5f0d7",
+  "title": "#85: pnpm lockfiles in the Dependency check",
+  "body": "Closes #85 (part of #79).\n\nThe Dependency check now reads `pnpm-lock.yaml` (lockfile versions 6.0 and 9.0) as it reads `package-lock.json`. A pnpm PR gets the same summary, Advisories, Findings and security focus, and each package change carries its anchor line: the package's key line in `packages`.\n\n- `src/pnpmlock.ts`: a small, strict reader for the YAML pnpm writes. It handles the sections the check reads; anchors, aliases, tags, duplicate keys, tabs and misaligned lines mean \"not understood\". It reads in linear time, and a multi-line scalar in a field the check reads fails closed.\n- `src/dependencies.ts`: `pnpmEntries` builds the same `Lock` the npm reader does.\n  - Peer and patch suffixes are cut, so a package shared by several importers counts once.\n  - Dependents come from `packages`, `snapshots` and `importers`, with aliases counted under the real name.\n  - An integrity-only resolution is the default-registry tarball, held to the same name/version check as npm's.\n  - `tarball` and repository resolutions are off-registry; directory packages and `node@runtime:` entries are skipped.\n- pnpm 10 writes an env lockfile ahead of the main one; both documents are read.\n- Known gap, marked `ponytail:`: pnpm doesn't record a registry set in `.npmrc`, so such packages read as from npm's. Worth keeping in mind for #83's fetches.\n\nChecked against real lockfiles from pnpm/pnpm (v9, two documents) and vitejs/vite (v4.4.0 at v6, main at v9): all three read. REQUIREMENTS §7.3/§8 and new criterion 32, CONTEXT and ADR 0002 updated.\n\nWill conflict lightly with #98 in `compareLockfile`/`Entry`; whichever merges second rebases.",
+  "focus": "correctness",
+  "expected": [
+    {
+      "id": "block-lists-in-package",
+      "path": "src/pnpmlock.ts",
+      "lines": [
+        65,
+        71
+      ],
+      "minSeverity": "low",
+      "defect": "A pnpm lockfile with a package's `transitivePeerDependencies` block list is marked unreadable and blocks approval."
+    },
+    {
+      "id": "yaml-escapes-can-abort",
+      "path": "src/pnpmlock.ts",
+      "lines": [
+        30,
+        36
+      ],
+      "minSeverity": "low",
+      "defect": "A lockfile containing a YAML-valid double-quoted escape such as `\\x41` aborts the dependency check instead of being reported unreadable."
+    }
+  ]
+}

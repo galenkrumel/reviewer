@@ -1,0 +1,20 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "6a61f7f7aa22ac8e1da6b2ced0265a9fd8309804",
+  "headSha": "7751aafcc32e2df1cd8f937939f4b1443c2ebdb6",
+  "title": "#82: Security focus reviews dependency changes; lockfile-only PRs can be approved",
+  "body": "Closes #82. Part of #79.\n\n## What changes\n\n- **Security always runs on a checked lockfile change.** When a supported, non-excluded lockfile changes (one the Dependency check compared or tried to), security joins the always-on minimum. It counts toward `max_reviewers`, even when no code file is reviewed. Neither the orchestrator's output nor per-repo config can stop it. On a lockfile-only PR the orchestrator isn't called.\n- **Security gets the check's output as untrusted data.** A `dependency-check` block lists per lockfile:\n  - each package change with its head line;\n  - the Advisories on it, introduced, still open or fixed;\n  - what pulls it in;\n  - newly added packages, major bumps, and source- or integrity-only changes;\n  - off-registry sources;\n  - lockfiles the check couldn't read, and any lookup failure.\n\n  Every line is flattened and capped, so a package name can't forge entries in the block.\n- **Rules for security on dependencies.** Its rules say to review the block in full, even on an incremental push, and to anchor Findings on the package's lockfile line. They also say never to restate or argue down the check's own Findings. Those never merge with a model's Findings, so they can't be softened.\n- **Anchoring.** Findings can anchor on every compared lockfile's diff.\n- **Approval.** A clean lockfile-only PR can now be approved; the 911day#256 shape is tested. \"No reviewers ran: nothing reviewable changed\" still applies when no supported lockfile was checked.\n- **Incremental pushes.** After an earlier review, security is forced, and gets the block, only when a checked lockfile changed since then or security didn't run on that review. A push that changes reviewed code without a code reviewer running (deletions only) still blocks with the label hint, even when a lockfile change on the same push runs security.\n- **Docs.** REQUIREMENTS §5.2, §7.3, §9.1 and §13 (criteria 29–31) are updated, along with the ADR 0002 status and the CONTEXT.md entry.\n\n## Out of scope (siblings)\n\n- Tarballs, install scripts and packages not inspected: #83.\n- `package_diff`: #84.\n- pnpm: #85.\n\n## Testing\n\n- `test/dependency-review.test.ts` covers each acceptance criterion through the harness. It also covers the deletion-only regression, which fails without the fix.\n- `npm run typecheck` is clean.\n- `npm test` passes 256/256.",
+  "focus": "architecture",
+  "expected": [
+    {
+      "id": "npm-aliases-lose-their",
+      "path": "src/dependencies.ts",
+      "lines": [
+        113,
+        119
+      ],
+      "minSeverity": "low",
+      "defect": "The security focus can see an aliased package as having no dependents, so it may miss that the application installs it directly."
+    }
+  ]
+}

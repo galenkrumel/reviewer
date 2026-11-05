@@ -1,0 +1,20 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "27395cedbeb6d6529cf77de43c4d739b0f389906",
+  "headSha": "063b1c54850b6073443f2857b37f5d35812b655b",
+  "title": "#76: Post findings outside the changed lines as file-level comments",
+  "body": "Closes #76.\n\nA finding too far from any added line (more than the 2-line snap from #75), in a file in the reviewed diff, now posts as a **file-level** review comment instead of an `unanchorable` summary blocker. The comment's badge names the line (`` `high` · documentation · line 64, outside the changed lines ``). The title stays the first line, so the thread matches re-reports and waivers by title: a file-level thread has no line.\n\n- **Same rules as inline comments:** thresholds, merge, cap and `Waive:`/resolve all apply. Cross-push dedup counts a file-level comment while its file is still in the diff. The fix is always prose.\n- **Files outside the diff:** a finding there still can't take a comment, and stays a location-only summary blocker.\n- **Verifier:** it is told a file-level thread covers the whole file and that the comment names the line. Before, a null line read as \"outdated\".\n- **GitHub adapter:** create-review's `comments[]` can't be file-level, so when there are file comments the adapter creates a pending review, adds each file thread with `addPullRequestReviewThread(subjectType: FILE)`, then submits. `listReviews` hides pending reviews, so a half-built review never satisfies the marker check. Every publish first deletes a pending review an earlier attempt left behind, because GitHub allows only one per user.\n- **Summary wording:** \"commented inline\" now reads \"commented on\".\n- REQUIREMENTS §7.2, §9.1, §9.2, §9.3 and §9.4 are updated.\n\n**Not covered by tests:** the real adapter path (pending review, file threads, submit), because the fake GitHub only records reviews. It needs a check on a live PR before relying on it.",
+  "focus": "architecture",
+  "expected": [
+    {
+      "id": "file-level-thread-mutation",
+      "path": "src/github.ts",
+      "lines": [
+        75,
+        81
+      ],
+      "minSeverity": "medium",
+      "defect": "A review with a file-level finding fails to publish, so the new comment never reaches the PR."
+    }
+  ]
+}

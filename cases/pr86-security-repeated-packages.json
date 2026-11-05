@@ -1,0 +1,20 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "56d8efff2479c084cd2a4c5ae6ef1443089bf012",
+  "headSha": "0478f27640912938a9095146d02d27549cd9b1cb",
+  "title": "#80: npm lockfile changes in the Review summary",
+  "body": "Closes #80 (first slice of #79).\n\nA PR that changes a `package-lock.json` (lockfile versions 2 and 3) now gets a dependency section in its Review summary. Each lockfile lists every package added, removed, moved from one version to another, or resolved from a new source or integrity at the same version.\n\n- **New Dependency check step** (`src/dependencies.ts`). It runs after scope selection and compares each changed lockfile at the PR diff's base side (the merge-base) and at head. A package installed in several places counts once per lockfile. Workspace folders and links don't count; bundled packages and `npm:` aliases (under their real name) do.\n- **Unsupported lockfiles** (e.g. `yarn.lock`) are named as not checked.\n- **Excluded lockfiles** (per-repo `exclude` globs or `.gitattributes` marks) are left out and not mentioned.\n- **Unreadable lockfiles** are named and block approval with their own unwaivable line.\n- **Lockfiles stay out of line review** and the token budget. The \"no reviewers ran\" blocker is unchanged.\n- **The summary list** goes through `pathList`: capped at 50 packages per lockfile and 20 lockfiles, and sanitized.\n- **Posting:** a run now posts whenever there is a dependency section, so every push to a PR that changes a lockfile gets a summary.\n- **Run record and Dashboard:** the Run record keeps the result (`dependency_checks` table, pruned with the run), and the Dashboard's run page shows it.\n- **Progress and supersession:** progress is logged as `dependencies checked`, and a superseded run stops right after the step.\n- **Docs:** REQUIREMENTS §8, §9.1, §9.3 and §12 are updated. `CONTEXT.md` and ADR 0002 are landed from `worktree-dependency-check-grilling`.\n\nTests: `test/dependencies.test.ts` has unit cases for the pure comparison plus harness cases, including the 911day#256 shape and main moving the lockfile after branching. A Dashboard case is in `test/dashboard.test.ts`. `npm test` passes: 207 tests.",
+  "focus": "security",
+  "expected": [
+    {
+      "id": "repeated-packages-can-exhaust",
+      "path": "src/dependencies.ts",
+      "lines": [
+        75,
+        81
+      ],
+      "minSeverity": "medium",
+      "defect": "A PR author can make the review worker spend quadratic time and memory, potentially terminating the process."
+    }
+  ]
+}
