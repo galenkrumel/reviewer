@@ -160,6 +160,8 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
     );
+    -- A redelivery keeps its GUID: receive() looks it up.
+    CREATE INDEX IF NOT EXISTS runs_delivery_id ON runs(delivery_id);
     -- The Dashboard sums every listed run's cost.
     CREATE INDEX IF NOT EXISTS invocations_run_id ON invocations(run_id);
     CREATE TABLE IF NOT EXISTS waivers (
@@ -260,11 +262,19 @@ export function openStore(dataDir: string, clock: Clock) {
       return row.n;
     },
 
-    /** Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order. */
-    recordPrState(repo: string, pr: number, state: PrState, at: Date) {
-      db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
+    /**
+     * Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order.
+     * Returns whether it was recorded.
+     */
+    recordPrState(repo: string, pr: number, state: PrState, at: Date): boolean {
+      return db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
         ON CONFLICT (repo, pr) DO UPDATE SET state = excluded.state, at = excluded.at WHERE excluded.at >= pr_states.at`)
-        .run(repo, pr, state, at.toISOString());
+        .run(repo, pr, state, at.toISOString()).changes > 0;
+    },
+
+    /** Whether a run was ever recorded for this `X-GitHub-Delivery`. */
+    hasDelivery(deliveryId: string): boolean {
+      return db.prepare('SELECT 1 FROM runs WHERE delivery_id = ? LIMIT 1').get(deliveryId) !== undefined;
     },
 
     /** Mark every queued or running job for the PR superseded. */

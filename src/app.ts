@@ -16,7 +16,7 @@ import {
   isRedecision, openStore, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
 } from './store.ts';
 import { runVerifier, type Verdict } from './verifier.ts';
-import type { Clock, GitHubPort, ModelPort, NewReview, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
+import type { Clock, GitHubPort, HookDelivery, ModelPort, NewReview, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
 
 export const AGENTS = ['orchestrator', 'verifier', ...FOCUSES] as const;
 export type Agent = (typeof AGENTS)[number];
@@ -361,19 +361,26 @@ export function createApp(deps: {
     } catch {
       return { status: 400 };
     }
+    // A redelivery keeps its GUID: one that already started a run (received, but its answer never reached GitHub)
+    // mustn't start another. A label re-review or a re-decision is never a duplicate by its SHAs.
+    const deliveryId = String(d.headers['x-github-delivery'] ?? '');
+    if (deliveryId && store.hasDelivery(deliveryId)) return { status: 202, ignored: 'delivery already received' };
     const event = d.headers['x-github-event'];
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
     // Every pull_request delivery carries the PR's state, whatever its action and whether it starts a run.
+    // Whether this delivery is the latest word on the PR's state: an older close arriving late (a redelivery) is not.
+    let latest = true;
     if (event === 'pull_request' && repo && allowlist.has(repo.toLowerCase()) && Number.isInteger(pr?.number)) {
       const updated = new Date(pr.updated_at);
-      store.recordPrState(repo, pr.number,
+      latest = store.recordPrState(repo, pr.number,
         pr.merged || pr.merged_at ? 'merged' : pr.state === 'closed' ? 'closed' : pr.draft ? 'draft' : 'open',
         Number.isNaN(updated.getTime()) ? deps.clock.now() : updated);
     }
     if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
       if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
       if (!Number.isInteger(pr?.number)) return { status: 400 };
+      if (!latest) return { status: 202, ignored: `${payload.action}: older than the PR's recorded state` };
       store.supersede(repo, pr.number);
       return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
     }
@@ -387,7 +394,7 @@ export function createApp(deps: {
     // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
     const capped = store.countRuns(repo, pr.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
     store.enqueue({
-      deliveryId: String(d.headers['x-github-delivery'] ?? ''),
+      deliveryId,
       event: `${event}.${payload.action}`,
       repo,
       pr: pr.number,
@@ -404,6 +411,31 @@ export function createApp(deps: {
    * Record the run stale. Deliveries can arrive out of order, so a late one for an old revision may have superseded
    * the job for the PR's current one: revive that job. Only a job that was enqueued is revived, so gating still holds.
    */
+  /**
+   * Ask GitHub to redeliver the webhooks the service never answered (it was down: a deploy, a crash) in the lookback
+   * window, oldest first, so late-delivery handling sees them in order. A delivery it answered, even with a 4xx (its
+   * own rejection, which would only repeat), is left alone, as is one already tried MAX_ATTEMPTS times.
+   */
+  async function recoverDeliveries() {
+    const since = new Date(deps.clock.now().getTime() - LOOKBACK_MS);
+    const attempts = new Map<string, HookDelivery[]>();
+    for (const a of await github.listDeliveries(since)) {
+      if (a.deliveredAt >= since) attempts.set(a.guid, [...attempts.get(a.guid) ?? [], a]);
+    }
+    const lost = [...attempts.values()]
+      .filter((as) => as.length < MAX_ATTEMPTS && as.every((a) => a.statusCode === 0 || a.statusCode >= 500))
+      .map((as) => as.at(-1)!).sort((a, b) => a.deliveredAt.getTime() - b.deliveredAt.getTime());
+    for (const a of lost) {
+      const entry = { delivery: a.guid, event: a.event, status: a.statusCode, at: a.deliveredAt.toISOString() };
+      try {
+        await github.redeliver(a.id);
+        log({ level: 'info', msg: 'redelivered', ...entry });
+      } catch (err) {
+        log({ level: 'warn', msg: 'redelivery failed', ...entry, error: errorMessage(err) });
+      }
+    }
+  }
+
   function finishStale(job: Job, live: PullRequest, record?: Parameters<typeof store.finish>[2]) {
     store.finish(job.id, 'stale', record); // before reviving, which would otherwise mark this run superseded
     if (live.state === 'open' && !live.draft) store.revive(job.repo, job.pr, live.headSha, live.baseSha);
@@ -780,11 +812,17 @@ export function createApp(deps: {
     active.clear();
   }
 
-  return { receive, drain, stop, abandon, checkModels, prune, dashboard, runs: store.runs, close: store.close };
+  return { receive, recoverDeliveries, drain, stop, abandon, checkModels, prune, dashboard, runs: store.runs, close: store.close };
 }
 
 const TRIGGERS = new Set(['opened', 'reopened', 'synchronize', 'ready_for_review', 'edited', 'labeled']);
 const DAY_MS = 24 * 3600_000;
+/**
+ * How far back recoverDeliveries looks, and how many attempts of one delivery it stops at. Bounded so a long outage
+ * doesn't flood the queue (the run cap still applies).
+ */
+const LOOKBACK_MS = 6 * 3600_000;
+const MAX_ATTEMPTS = 3;
 /** A comment that waives: `Waive:` first, ignoring case and leading whitespace. */
 const WAIVE = /^\s*waive:\s*/i;
 const isWaive = (body: string) => WAIVE.test(body);
