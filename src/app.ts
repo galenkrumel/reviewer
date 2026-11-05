@@ -84,6 +84,9 @@ type Step = 'fetch' | 'advisories' | 'dependencies' | 'orchestrator' | 'reviewer
 /** A failure already logged, its message prefixed with the step. */
 class StepError extends Error {}
 
+/** The run was superseded: thrown before a model call, so it stops paying for one. */
+class Superseded extends Error {}
+
 export function createApp(deps: {
   config: AppConfig; github: GitHubPort; model: ModelPort; clock: Clock;
   /** Backoff waits. Default setTimeout. */
@@ -130,11 +133,18 @@ export function createApp(deps: {
     if (problems.length) throw new Error(problems.join('\n'));
   }
 
-  /** A chat for one agent invocation: its model and fallback, usage tallied into `invocations`, tokens budgeted. */
+  /**
+   * A chat for one agent invocation: its model and fallback, usage tallied into `invocations`, tokens budgeted. Once
+   * the run is superseded it throws Superseded instead of calling the model.
+   */
   function chatFor(job: Job, name: Agent, invocations: RecordedInvocation[]): Chat {
     const used: RecordedInvocation = { agent: name, models: [], inputTokens: 0, outputTokens: 0, cost: 0 };
     invocations.push(used);
-    return meteredChat(model, agentConfig(name), `${job.repo.replace('/', '--')}--pr-${job.pr}`, used);
+    const chat = meteredChat(model, agentConfig(name), `${job.repo.replace('/', '--')}--pr-${job.pr}`, used);
+    return (messages, tools) => {
+      if (store.superseded(job.id)) throw new Superseded('superseded');
+      return chat(messages, tools);
+    };
   }
 
   /** One line per step of a run, so the logs alone show what it reviewed, who ran and what they found. */
@@ -238,6 +248,7 @@ export function createApp(deps: {
         return verify();
       });
     } catch (err) {
+      if (err instanceof Superseded) throw err;
       logFailure(job, 'verifier', err, false);
     }
   }
@@ -390,7 +401,7 @@ export function createApp(deps: {
     if (live.state === 'open' && !live.draft) store.revive(job.repo, job.pr, live.headSha, live.baseSha);
   }
 
-  async function reviewJob(job: Job) {
+  async function reviewJob(job: Job, invocations: RecordedInvocation[]) {
     progress(job, 'run started', { event: job.event, head: job.headSha.slice(0, 7) });
     const token = await github.mintToken(job.installationId);
     // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
@@ -424,7 +435,6 @@ export function createApp(deps: {
     const maxLines = settings.maxReviewableLines;
     const reported: { focus: string; finding: Finding }[] = [];
     const focuses: RecordedFocus[] = [];
-    const invocations: RecordedInvocation[] = [];
     let orchestratorError: string | undefined;
     // After a push, reviewers focus on what changed since the last full review, even if the base moved forward
     // (main merged in). A late finding on a line that review saw is still commented on. A label re-review asks for the
@@ -468,6 +478,7 @@ export function createApp(deps: {
           pathHints: settings.pathHints,
         });
       } catch (err) {
+        if (err instanceof Superseded) throw err;
         // The fallback's path match sees every changed file, excluded ones (lockfiles) included.
         picks = fallbackPicks(files.flatMap((f) => (f.oldPath ? [f.oldPath, f.path] : [f.path])));
         orchestratorError = errorMessage(err);
@@ -495,7 +506,7 @@ export function createApp(deps: {
         try {
           // One retry, for bad output (an off-schema report included); a blown budget would only be spent again.
           const found = await review().catch((err) => {
-            if (err instanceof BudgetExceeded) throw err;
+            if (err instanceof BudgetExceeded || err instanceof Superseded) throw err;
             failed(err, false);
             return review();
           });
@@ -507,6 +518,7 @@ export function createApp(deps: {
             cost: used.reduce((n, i) => n + i.cost, 0),
           });
         } catch (err) {
+          if (err instanceof Superseded) throw err;
           failed(err, true);
           focuses.push({ focus, reason, status: 'failed', error: errorMessage(err) });
         }
@@ -643,7 +655,7 @@ export function createApp(deps: {
    * Decide approval again at the PR's head without running reviewers: from the latest full run published there, with
    * waivers applied, and the threads as they are now. Posts only when the verdict changes.
    */
-  async function redecideJob(job: Job) {
+  async function redecideJob(job: Job, invocations: RecordedInvocation[]) {
     progress(job, 'run started', { event: job.event, head: job.headSha.slice(0, 7) });
     const token = await github.mintToken(job.installationId);
     const reviews = await github.listReviews(token, job.repo, job.pr);
@@ -658,7 +670,6 @@ export function createApp(deps: {
       progress(job, 'nothing to re-decide', { approvals: config.approveWhenClean === true });
       return store.finish(job.id, 'skipped');
     }
-    const invocations: RecordedInvocation[] = [];
     const { threads, waivers, open, outsideResolved } = await readThreads(job, token);
     // Unsure where the PR stands: say nothing, rather than flip a verdict or dismiss an approval over a failed read.
     if (!open) return store.finish(job.id, 'failed', { error: "threads: the PR's review threads couldn't be read" });
@@ -712,16 +723,20 @@ export function createApp(deps: {
 
   async function worker() {
     for (let job = store.claimNext(); job; job = store.claimNext()) {
+      const invocations: RecordedInvocation[] = [];
       try {
-        await (isRedecision(job.event) ? redecideJob : reviewJob)(job);
+        await (isRedecision(job.event) ? redecideJob : reviewJob)(job, invocations);
       } catch (err) {
-        // Errors come from git, GitHub or the model and carry no credentials.
-        if (err instanceof StepError) store.finish(job.id, 'failed', { error: err.message });
+        // Errors come from git, GitHub or the model and carry no credentials. A superseded run keeps that status.
+        if (err instanceof Superseded) { /* nothing to record but its model calls, below */ }
+        else if (err instanceof StepError) store.finish(job.id, 'failed', { error: err.message });
         else {
           logFailure(job, 'run', err, true);
           store.finish(job.id, 'failed', { error: `run: ${errorMessage(err)}` });
         }
       }
+      // A superseded or failed run stops without finishing on its record, but its model calls were still paid for.
+      store.recordInvocations(job.id, invocations);
       log({ level: 'info', msg: 'run finished', run: job.id, repo: job.repo, pr: job.pr, ...store.outcome(job.id) });
     }
   }

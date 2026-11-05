@@ -82,7 +82,7 @@ Each PR has a configurable cap on runs per rolling 24 hours (default 10). Events
 - Each run records the repository, PR number, head SHA, base SHA, and triggering event.
 - The analysis uses a pinned head/base SHA pair, never a moving branch ref.
 - Source is read from a bare, blobless clone cached on the volume, with no working tree (§6.2).
-- **Superseding:** when a new job is enqueued for a PR, every queued or running job for that PR with a different head or base is marked `superseded`. The worker checks this flag between reviewer invocations and immediately before publishing.
+- **Superseding:** when a new job is enqueued for a PR, every queued or running job for that PR with a different head or base is marked `superseded`. The worker checks this flag before every model call, between steps and immediately before publishing, so a superseded run stops paying for a reviewer it is partway through.
 - **Pre-publish check:** immediately before publishing, the worker fetches the PR and confirms it is open, not a draft, and still at the reviewed head and base SHAs. If anything has changed, nothing is published.
 - **Accepted race:** a few seconds remain between the check and the post. The review is created with `commit_id` set to the reviewed head, so in the worst case one review appears as "outdated" on GitHub. This is acceptable.
 
@@ -121,7 +121,7 @@ The orchestrator selects from a fixed enum of six focuses:
 - Calls go through OpenRouter's chat completions API. Fallback uses OpenRouter's `models: [...]` array.
 - **Startup validation:** the service checks every configured model against OpenRouter's `/models` endpoint. Each one's `supported_parameters` must include `tools`. If any model fails the check, the service refuses to start.
 - Findings come back as a call to the `report_findings` tool, not through `response_format`. Arguments are schema-validated, and invalid output is retried once.
-- Each run records the model ID, token counts, and cost for each agent invocation, so that models can be compared.
+- Each run records the model ID, token counts, and cost for each agent invocation, so that models can be compared. A run that is superseded or fails keeps the cost it had already spent.
 
 ## 6. Analysis and execution safety
 

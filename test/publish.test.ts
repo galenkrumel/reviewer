@@ -126,6 +126,26 @@ test('a run that fails after being superseded stays superseded', async () => {
   assert.equal(app.runs()[0]!.status, 'superseded');
 });
 
+test('a run superseded mid-reviewer makes no more model calls and records what it spent', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([async () => {
+    await app.receive(delivery('pull_request', prPayload('closed', REPO, pr)));
+    return toolCall('read_file', { path: 'src/math.ts' });
+  }, report()]);
+  const { app, logs } = testApp({ model, github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const run = app.runs()[0]!;
+  assert.equal(run.status, 'superseded');
+  // The orchestrator and the first correctness call, and nothing after the close.
+  assert.deepEqual(model.agents(), ['orchestrator', 'correctness']);
+  assert.equal(model.requestsFor('correctness').length, 1);
+  assert.equal(run.invocations.reduce((n, i) => n + i.cost, 0), 0.002);
+  assert.equal(logs.some((l) => l.level === 'error'), false);
+});
+
 test('enqueuing a job for a new head supersedes the running job for the old one', async () => {
   const { fx, pr, github, live } = setup();
   const pushed = { ...pr, headSha: fx.baseSha };
