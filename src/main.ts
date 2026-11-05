@@ -84,6 +84,7 @@ const app = createApp({
     adminPassword: process.env.ADMIN_PASSWORD || undefined,
     registryFetchPackages: positiveInt('REGISTRY_FETCH_PACKAGES'),
     registryFetchBytes: positiveInt('REGISTRY_FETCH_BYTES'),
+    registryFetchSeconds: positiveInt('REGISTRY_FETCH_SECONDS'),
   },
   // Env vars often carry PEM newlines escaped.
   github: gitHubApp(env('GITHUB_APP_ID'), env('GITHUB_PRIVATE_KEY').replace(/\\n/g, '\n')),

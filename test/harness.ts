@@ -248,12 +248,20 @@ export const integrityOf = (name: string, version: string, body = packageTarball
 export class FakeRegistry implements RegistryPort {
   tarballs = new Map<string, Buffer>();
   missing = new Set<string>();
+  /** URLs that never answer: the fetch waits until its signal aborts. */
+  hanging = new Set<string>();
   /** Every URL fetched, in order. */
   fetched: string[] = [];
 
-  async tarball(url: string, maxBytes: number) {
+  async tarball(url: string, maxBytes: number, signal?: AbortSignal) {
     if (!url.startsWith('https://registry.npmjs.org/')) throw new Error(`refused: ${url} is not on the npm registry`);
     this.fetched.push(url);
+    if (this.hanging.has(url)) {
+      // AbortSignal.timeout doesn't hold the event loop open, as a server's sockets would: this does, until it aborts.
+      const open = setInterval(() => {}, 1000);
+      await new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
+        .finally(() => clearInterval(open));
+    }
     if (this.missing.has(url)) throw new Error('registry: 404');
     const m = /^https:\/\/registry\.npmjs\.org\/(.+)\/-\/[^/]+-(\d[^/]*)\.tgz$/.exec(url);
     const body = this.tarballs.get(url) ?? (m ? packageTarball(m[1]!, m[2]!) : undefined);

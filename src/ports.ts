@@ -117,10 +117,10 @@ export class FetchError extends Error {
 /** The npm registry, which code (never a model) fetches published tarballs from. */
 export interface RegistryPort {
   /**
-   * The tarball at `url`, refused for any host but the registry's, and past `maxBytes` downloaded. Once bytes have
-   * arrived, a failure is a FetchError saying how many.
+   * The tarball at `url`, refused for any host but the registry's, past `maxBytes` downloaded, and once `signal` aborts.
+   * Once bytes have arrived, a failure is a FetchError saying how many.
    */
-  tarball(url: string, maxBytes: number): Promise<Buffer>;
+  tarball(url: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer>;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).

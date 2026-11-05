@@ -574,7 +574,7 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
  * name), as npm extracts them (node-tar, stripping that folder): a pax `path` or GNU long name replaces the next entry's
  * own name (and a pax `size` its size), a path with a `..` segment or an absolute one is dropped, and a later entry for
  * a path replaces an earlier one. Anything a reader might take another way than node-tar throws instead, so the package
- * is not inspected: truncated input, a header whose checksum is wrong or whose magic is neither POSIX ustar, GNU nor
+ * is not inspected: an entry's data running past the end, non-zero bytes after the last whole block, a header whose checksum is wrong or whose magic is neither POSIX ustar, GNU nor
  * none, anything but zero blocks after the first zero block, a malformed pax record or one holding a newline, meta
  * headers chained, any entry type but a file or directory, a path with an empty, `.` or backslashed segment or any
  * character but printable ASCII, and two paths that a case-insensitive filesystem (macOS, Windows) would take for one.
@@ -587,9 +587,14 @@ export function untar(archive: Buffer): Map<string, Buffer> {
   let next: { path?: string; size?: number } | undefined;
   /** Each path as a case-insensitive filesystem sees it, to the path stored. */
   const folded = new Map<string, string>();
-  /** Each directory, as such a filesystem sees it: named by an entry or holding one. */
-  const dirs = new Set<string>();
-  for (let at = 0; at + 512 <= archive.length;) {
+  /**
+   * Each path such a filesystem sees, as a node in a tree of segments (`parent id/segment` to id), and whether it is a
+   * file or a directory (named by an entry or holding one): linear in each path, however deep.
+   */
+  const nodes = new Map<string, number>();
+  const kinds: ('file' | 'dir')[] = ['dir'];
+  let at = 0;
+  for (; at + 512 <= archive.length;) {
     const h = archive.subarray(at, at + 512);
     if (h.every((b) => b === 0)) {
       if (archive.subarray(at).some((b) => b !== 0)) throw malformed();
@@ -635,20 +640,21 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const fold = path.toLowerCase();
     // A file and a directory at one path, in either order (or a file under a file), are extracted as whichever came
     // last: refused rather than read.
-    for (let i = fold.indexOf('/'); i !== -1; i = fold.indexOf('/', i + 1)) {
-      const parent = fold.slice(0, i);
-      if (folded.has(parent)) throw malformed();
-      dirs.add(parent);
+    const parts = fold.split('/');
+    let node = 0;
+    for (const [i, part] of parts.entries()) {
+      const key = `${node}/${part}`;
+      node = nodes.get(key) ?? kinds.length;
+      nodes.set(key, node);
+      const kind = isDir || i < parts.length - 1 ? 'dir' : 'file';
+      if ((kinds[node] ??= kind) !== kind) throw malformed();
     }
-    if (isDir) {
-      if (folded.has(fold)) throw malformed();
-      dirs.add(fold);
-      continue;
-    }
-    if (dirs.has(fold) || (folded.get(fold) ?? path) !== path) throw malformed();
+    if (isDir) continue;
+    if ((folded.get(fold) ?? path) !== path) throw malformed();
     folded.set(fold, path);
     files.set(path, data);
   }
+  if (archive.subarray(Math.min(at, archive.length)).some((b) => b !== 0)) throw malformed();
   return files;
 }
 
@@ -743,7 +749,7 @@ function installScripts(lower: Map<string, Buffer>, folder: string, version?: st
  * Fetch the tarball of every package change the PR moves to or adds, and of the version it moved from, and record each
  * install script the new one adds. Packages go in order of risk (added, then major bumps, then the rest), at most
  * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run (the last chunk a
- * fetch received before it saw the limit can overshoot it); one tarball is fetched
+ * fetch received before it saw the limit can overshoot it), and `caps.ms` spent fetching, all fetches together; one tarball is fetched
  * once. A bundled package is read from its bundler's tarball, at its folder and the version the lockfile records, on
  * each side (a bundled install whose bundler changed is a change, though its version didn't move). An install script is
  * new when its name or its command is.
@@ -753,7 +759,7 @@ function installScripts(lower: Map<string, Buffer>, folder: string, version?: st
  * `fetched` hears each fetch, or why it failed.
  */
 export async function inspectPackages(check: DependencyCheck, opts: {
-  fetch: (url: string, maxBytes: number) => Promise<Buffer>; caps: { packages: number; bytes: number };
+  fetch: (url: string, maxBytes: number, signal: AbortSignal) => Promise<Buffer>; caps: { packages: number; bytes: number; ms: number };
   stopped: () => boolean; fetched: (url: string, result: { bytes: number } | { error: string }) => void;
 }) {
   const { caps } = opts;
@@ -771,6 +777,8 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   // Old versions are fetched too, and a failed fetch spends only the bytes it received: the tarballs a run asks for are
   // capped as well.
   const maxTarballs = caps.packages * 2;
+  // One deadline for every fetch, so a slow registry can't hold the run for each tarball's own timeout in turn.
+  const deadline = AbortSignal.timeout(caps.ms);
   /** A tarball's files, fetched once per run; undefined once the run is superseded. */
   const filesAt = async (url: string | undefined, integrity: string | undefined) => {
     if (url === undefined) throw new Error('no source recorded');
@@ -780,7 +788,8 @@ export async function inspectPackages(check: DependencyCheck, opts: {
       try {
         if (bytes >= caps.bytes) throw new Error(`over the run's cap of ${caps.bytes} bytes fetched`);
         if (++tarballs > maxTarballs) throw new Error(`over the run's cap of ${maxTarballs} tarballs fetched`);
-        const body = await opts.fetch(url, caps.bytes - bytes);
+        if (deadline.aborted) throw new Error(`over the run's cap of ${caps.ms / 1000} s fetching`);
+        const body = await opts.fetch(url, caps.bytes - bytes, deadline);
         bytes += body.length;
         opts.fetched(url, { bytes: body.length });
         let tar: Buffer;

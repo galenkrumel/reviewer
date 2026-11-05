@@ -70,6 +70,8 @@ export interface AppConfig {
   registryFetchPackages?: number;
   /** Tarball bytes the Dependency check downloads per run. Default 5 MiB. */
   registryFetchBytes?: number;
+  /** Seconds the Dependency check spends fetching tarballs per run, all fetches together. Default 120. */
+  registryFetchSeconds?: number;
 }
 
 export type OutsidePolicy = 'label' | 'always' | 'never';
@@ -505,8 +507,11 @@ export function createApp(deps: {
     await lookUpAdvisories(dependencies, (name, version) => github.advisories(token, name, version));
     if (dependencies.advisoryError !== undefined) logFailure(job, 'advisories', dependencies.advisoryError, false);
     await inspectPackages(dependencies, {
-      fetch: (url, maxBytes) => deps.registry.tarball(url, maxBytes),
-      caps: { packages: config.registryFetchPackages ?? 20, bytes: config.registryFetchBytes ?? 5 * 1024 * 1024 },
+      fetch: (url, maxBytes, signal) => deps.registry.tarball(url, maxBytes, signal),
+      caps: {
+        packages: config.registryFetchPackages ?? 20, bytes: config.registryFetchBytes ?? 5 * 1024 * 1024,
+        ms: (config.registryFetchSeconds ?? 120) * 1000,
+      },
       stopped: () => store.superseded(job.id),
       fetched: (url, result) => progress(job, 'error' in result ? 'package fetch failed' : 'package fetched', { url, ...result }),
     });

@@ -4,10 +4,10 @@ import { FetchError, type RegistryPort } from './ports.ts';
 
 export function npmRegistry(): RegistryPort {
   return {
-    async tarball(url, maxBytes) {
+    async tarball(url, maxBytes, signal) {
       // Checked here too, so no caller can point a fetch elsewhere; no redirect may either.
       if (!onRegistry(url) || new URL(url).origin !== 'https://registry.npmjs.org') throw new Error('refused: not on the npm registry');
-      const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(30_000) });
+      const res = await fetch(url, { redirect: 'error', signal: AbortSignal.any([AbortSignal.timeout(30_000), ...(signal ? [signal] : [])]) });
       if (!res.ok || !res.body) throw new Error(`registry: ${res.status}`);
       // Counted as it arrives: a Content-Length can be missing or lie.
       const chunks: Uint8Array[] = [];

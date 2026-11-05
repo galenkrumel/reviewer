@@ -376,8 +376,8 @@ test('a failed fetch spends the bytes it received, so oversized tarballs can\'t 
   assert.match(review.body, /2 packages weren't inspected/);
 });
 
-test('tar framing node-tar would read another way (checksum, magic, data after the end) is not inspected', async () => {
-  const names = ['sum', 'magic', 'tail', 'signed', 'uni'];
+test('tar framing node-tar would read another way (checksum, magic, data after the end, a short tail) is not inspected', async () => {
+  const names = ['sum', 'magic', 'tail', 'signed', 'uni', 'short'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const plain = (n: string) => gunzipSync(packageTarball(n, '1.0.1'));
@@ -392,13 +392,17 @@ test('tar framing node-tar would read another way (checksum, magic, data after t
   signed.write(' '.repeat(8), 148, 'latin1');
   const signedSum = signed.subarray(0, 512).reduce((n, b) => n + (b > 127 ? b - 256 : b), 0);
   signed.write(signedSum.toString(8).padStart(6, '0') + '\0 ', 148, 'latin1');
-  for (const [n, body] of [['sum', sum], ['magic', magic], ['tail', tail], ['signed', signed]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
+  // No end blocks, and fewer than 512 bytes after the last whole block: too short for a header, but not nothing.
+  const full = plain('short');
+  const end = Math.ceil((full.findLastIndex((b) => b !== 0) + 1) / 512) * 512;
+  const short = Buffer.concat([full.subarray(0, end), Buffer.from('x'.repeat(100))]);
+  for (const [n, body] of [['sum', sum], ['magic', magic], ['tail', tail], ['signed', signed], ['short', short]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
   // A filesystem may fold `ſ` (long s) to `s`, or not.
   s.registry.tarballs.set(url('uni', '1.0.1'), tarball({ 'package/package.json': JSON.stringify({ name: 'uni' }), 'package/ſcript.js': '' }));
   const review = await s.opened();
 
-  assert.match(review.body, /5 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 5);
+  assert.match(review.body, /6 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 6);
 });
 
 test('on a case-insensitive filesystem two paths are one: such a tarball is not inspected, and any-case manifests count', async () => {
@@ -556,4 +560,14 @@ test('a tar path longer than any filesystem extracts is not inspected', async ()
   const review = await s.opened();
 
   assert.match(review.body, /Not inspected[^\n]*\n- `deep 1\.0\.1`\n/);
+});
+
+test("one deadline covers all of a run's fetches: a hung registry leaves the rest not inspected, without waiting on each", async () => {
+  const s = setup({ 'node_modules/a': pkg('a', '1.0.0'), 'node_modules/b': pkg('b', '1.0.0') },
+    { 'node_modules/a': pkg('a', '1.0.1'), 'node_modules/b': pkg('b', '1.0.1') }, { registryFetchSeconds: 0.05 });
+  s.registry.hanging.add(url('a', '1.0.1'));
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.1`\n- `b 1\.0\.1`\n/);
+  assert.deepEqual(s.registry.fetched, [url('a', '1.0.1')]);
 });
