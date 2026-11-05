@@ -208,33 +208,6 @@ test('a package.json named by a pax header or a GNU long name is the one read, a
   assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**g adds an install script**', '**p adds an install script**']);
 });
 
-test('a tarball a reader could take another way than npm is not inspected, rather than read one way', async () => {
-  const names = ['nl', 'chain', 'dot', 'glob', 'odd', 'key', 'utf'];
-  const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
-    Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
-  const manifest = JSON.stringify({ name: 'x' });
-  // A path record hidden inside another record's value: read by lengths it's a comment, split on newlines (node-tar) a path.
-  const hidden = pax({ comment: `x\n29 path=package/package.json` });
-  s.registry.tarballs.set(url('nl', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': hidden, 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
-  s.registry.tarballs.set(url('odd', '1.0.1'), tarball({ 'package/package.json': manifest, '././@LongLink': 'x\0', 'package/l': '' }, { '././@LongLink': 'K', 'package/l': '2' }));
-  s.registry.tarballs.set(url('chain', '1.0.1'), tarball({
-    'package/package.json': manifest, '././@LongLink': 'package/a\0', 'PaxHeader/b': pax({ path: 'package/b' }), 'package/c': manifest,
-  }, { '././@LongLink': 'L', 'PaxHeader/b': 'x' }));
-  s.registry.tarballs.set(url('dot', '1.0.1'), tarball({ 'package/package.json': manifest, './x/package.json': manifest }));
-  s.registry.tarballs.set(url('glob', '1.0.1'), tarball({ 'pax_global_header': pax({ path: 'package/package.json' }), 'package/package.json': manifest }, { 'pax_global_header': 'g' }));
-  // The same, hidden in a key.
-  const inKey = pax({ [`x\n29 path=package/package.json\nc`]: 'v' });
-  s.registry.tarballs.set(url('key', '1.0.1'), tarball({ 'package/package.json': manifest, 'PaxHeader/a': inKey, 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
-  // A path record node-tar would measure as longer than it says, once its invalid byte decodes to U+FFFD.
-  const utf = gunzipSync(tarball({ 'package/package.json': manifest, 'PaxHeader/a': '29 path=package/package.json\n', 'package/a': manifest }, { 'PaxHeader/a': 'x' }));
-  utf[utf.indexOf('json\n', 512) + 3] = 0xff;
-  s.registry.tarballs.set(url('utf', '1.0.1'), gzipSync(utf));
-  const review = await s.opened();
-
-  assert.match(review.body, /7 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 7);
-});
-
 test("a bundled package is inspected on its own, from its bundler's tarball on each side, even when only its bundler moved", async () => {
   const inner = (v: string) => ({ version: v, inBundle: true });
   const s = setup(
@@ -376,33 +349,22 @@ test('a failed fetch spends the bytes it received, so oversized tarballs can\'t 
   assert.match(review.body, /2 packages weren't inspected/);
 });
 
-test('tar framing node-tar would read another way (checksum, magic, data after the end, a short tail) is not inspected', async () => {
-  const names = ['sum', 'magic', 'tail', 'signed', 'uni', 'short'];
+test('a tarball node-tar warns on (bad checksum, cut off mid-entry) or with a non-ASCII path is not inspected', async () => {
+  const names = ['sum', 'cut', 'uni'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const plain = (n: string) => gunzipSync(packageTarball(n, '1.0.1'));
   const sum = plain('sum');
   sum[0] = 'q'.charCodeAt(0);
-  const magic = plain('magic');
-  magic.write('ustar\0' + '01', 257, 'latin1');
-  const tail = Buffer.concat([plain('tail'), gunzipSync(packageTarball('tail', '1.0.1', { postinstall: 'x' }))]);
-  // A checksum only the signed sum matches: node-tar takes only the unsigned one.
-  const signed = plain('signed');
-  signed[265] = 0xff;
-  signed.write(' '.repeat(8), 148, 'latin1');
-  const signedSum = signed.subarray(0, 512).reduce((n, b) => n + (b > 127 ? b - 256 : b), 0);
-  signed.write(signedSum.toString(8).padStart(6, '0') + '\0 ', 148, 'latin1');
-  // No end blocks, and fewer than 512 bytes after the last whole block: too short for a header, but not nothing.
-  const full = plain('short');
-  const end = Math.ceil((full.findLastIndex((b) => b !== 0) + 1) / 512) * 512;
-  const short = Buffer.concat([full.subarray(0, end), Buffer.from('x'.repeat(100))]);
-  for (const [n, body] of [['sum', sum], ['magic', magic], ['tail', tail], ['signed', signed], ['short', short]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
+  // Cut inside the first entry's data, after its header.
+  const cut = plain('cut').subarray(0, 520);
+  for (const [n, body] of [['sum', sum], ['cut', cut]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
   // A filesystem may fold `ſ` (long s) to `s`, or not.
   s.registry.tarballs.set(url('uni', '1.0.1'), tarball({ 'package/package.json': JSON.stringify({ name: 'uni' }), 'package/ſcript.js': '' }));
   const review = await s.opened();
 
-  assert.match(review.body, /6 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 6);
+  assert.match(review.body, /3 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 3);
 });
 
 test('on a case-insensitive filesystem two paths are one: such a tarball is not inspected, and any-case manifests count', async () => {

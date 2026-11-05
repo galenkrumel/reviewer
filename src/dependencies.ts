@@ -2,6 +2,7 @@
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { gunzipSync } from 'node:zlib';
+import { Parser } from 'tar';
 import { ToolError, type FileChange, type Source } from './git.ts';
 import { FetchError, type Advisory } from './ports.ts';
 import { Flow, flowMap, readPnpmLock, type YamlMap, type YamlNode } from './pnpmlock.ts';
@@ -571,75 +572,39 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
 
 /**
  * A tar archive's regular files by path below its top folder (`package/` in an npm tarball, though some use another
- * name), as npm extracts them (node-tar, stripping that folder): a pax `path` or GNU long name replaces the next entry's
- * own name (and a pax `size` its size), a path with a `..` segment or an absolute one is dropped, and a later entry for
- * a path replaces an earlier one. Anything a reader might take another way than node-tar throws instead, so the package
- * is not inspected: an entry's data running past the end, non-zero bytes after the last whole block, a header whose checksum is wrong or whose magic is neither POSIX ustar, GNU nor
- * none, anything but zero blocks after the first zero block, a malformed pax record or one holding a newline, meta
- * headers chained, any entry type but a file or directory, a path with an empty, `.` or backslashed segment or any
- * character but printable ASCII, and two paths that a case-insensitive filesystem (macOS, Windows) would take for one.
+ * name), read by node-tar's parser, the one npm extracts with. A path with a `..` segment is dropped, as node-tar's
+ * unpacker drops it, and a later entry for a path replaces an earlier one. Anything that could land on disk other than
+ * as read throws instead, so the package is not inspected: any parser warning (a bad checksum, an unknown format, a
+ * truncated entry), an absolute path, any entry type but a file or directory (a link can replace a file), a path with
+ * an empty, `.` or backslashed segment, a Windows alias or any character but printable ASCII, two paths that a
+ * case-insensitive filesystem (macOS, Windows) would take for one, and a file and a directory at one path.
  */
 export function untar(archive: Buffer): Map<string, Buffer> {
   const files = new Map<string, Buffer>();
-  const malformed = () => new Error('malformed tar archive');
-  const text = (b: Buffer) => b.toString('utf8').replace(/\0.*$/s, '');
-  const field = (h: Buffer, at: number, len: number) => text(h.subarray(at, at + len));
-  let next: { path?: string; size?: number } | undefined;
   /** Each path as a case-insensitive filesystem sees it, to the path stored. */
   const folded = new Map<string, string>();
-  /**
-   * Each path such a filesystem sees, as a node in a tree of segments (`parent id/segment` to id), and whether it is a
-   * file or a directory (named by an entry or holding one): linear in each path, however deep.
-   */
+  /** Each path such a filesystem sees, as a node in a tree of segments (`parent id/segment` to id): file or directory. */
   const nodes = new Map<string, number>();
   const kinds: ('file' | 'dir')[] = ['dir'];
-  let at = 0;
-  for (; at + 512 <= archive.length;) {
-    const h = archive.subarray(at, at + 512);
-    if (h.every((b) => b === 0)) {
-      if (archive.subarray(at).some((b) => b !== 0)) throw malformed();
-      break;
-    }
-    // node-tar skips a header whose checksum isn't the unsigned sum: refused rather than read.
-    const stored = parseInt(field(h, 148, 8).trim(), 8);
-    let sum = 0;
-    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : h[i]!;
-    if (stored !== sum) throw malformed();
-    // node-tar reads the prefix field only under POSIX ustar's magic; GNU's puts other fields there.
-    const magic = h.subarray(257, 265).toString('latin1');
-    const posixUstar = magic === 'ustar\x0000';
-    if (!posixUstar && magic !== 'ustar  \x00' && !/^\x00*$/.test(magic)) throw malformed();
-    const size = next?.size ?? parseInt(field(h, 124, 12).trim() || '0', 8);
-    if (!Number.isSafeInteger(size) || size < 0 || at + 512 + size > archive.length) throw malformed();
-    const data = archive.subarray(at + 512, at + 512 + size);
-    at += 512 + Math.ceil(size / 512) * 512;
-    const type = field(h, 156, 1);
-    if (type === 'x' || type === 'L') {
-      if (next) throw malformed();
-      next = type === 'L' ? { path: text(data) } : paxRecords(data);
-      continue;
-    }
-    const prefix = posixUstar ? field(h, 345, 155) : '';
-    const raw = next?.path ?? (prefix ? `${prefix}/` : '') + field(h, 0, 100);
-    next = undefined;
-    // Past Linux's PATH_MAX no filesystem extracts it, and a pax path near the unpack limit would make the checks below slow.
-    if (raw.length > 4096) throw malformed();
-    // A link can replace a file when extracted, so it and any other type but a file or directory (devices, GNU or
-    // Solaris extensions, unknown) are refused. Directories hold no code, but one can replace a file too.
-    const isDir = type === '5';
-    if (!isDir && !['0', '', '7'].includes(type)) throw malformed();
+  const add = (type: string, raw: string, data: Buffer) => {
+    // Past Linux's PATH_MAX no filesystem extracts it, and a path that long would make the checks below slow.
+    if (raw.length > 4096) throw new Error('path too long');
+    const isDir = type === 'Directory';
+    if (!isDir && !['File', 'OldFile', 'ContiguousFile'].includes(type)) throw new Error(`${type} entry`);
     const trimmed = isDir ? raw.replace(/\/+$/, '') : raw;
     const segments = trimmed.split('/');
-    if (trimmed.startsWith('/') || segments.includes('..')) continue;
+    if (segments.includes('..')) return;
+    if (trimmed.startsWith('/')) throw new Error('absolute path');
     // Windows takes `package.json.`, `package.json ` and `package.json::$DATA` for `package.json`: refused, like `.`.
-    if (trimmed.includes('\\') || trimmed.includes(':') || segments.some((x) => x === '' || x === '.' || /[. ]$/.test(x))) throw malformed();
-    if (segments.length < 2) continue;
+    if (trimmed.includes('\\') || trimmed.includes(':') || segments.some((x) => x === '' || x === '.' || /[. ]$/.test(x))) {
+      throw new Error('ambiguous path');
+    }
+    if (segments.length < 2) return;
     const path = segments.slice(1).join('/');
     // Filesystems fold non-ASCII case and normalization their own ways: such a path is refused, so ASCII case is all.
-    if (/[^\x20-\x7e]/.test(path)) throw malformed();
+    if (/[^\x20-\x7e]/.test(path)) throw new Error('non-ASCII path');
     const fold = path.toLowerCase();
-    // A file and a directory at one path, in either order (or a file under a file), are extracted as whichever came
-    // last: refused rather than read.
+    // A file and a directory at one path, in either order (or a file under a file), extract as whichever came last.
     const parts = fold.split('/');
     let node = 0;
     for (const [i, part] of parts.entries()) {
@@ -647,41 +612,33 @@ export function untar(archive: Buffer): Map<string, Buffer> {
       node = nodes.get(key) ?? kinds.length;
       nodes.set(key, node);
       const kind = isDir || i < parts.length - 1 ? 'dir' : 'file';
-      if ((kinds[node] ??= kind) !== kind) throw malformed();
+      if ((kinds[node] ??= kind) !== kind) throw new Error('file and directory at one path');
     }
-    if (isDir) continue;
-    if ((folded.get(fold) ?? path) !== path) throw malformed();
+    if (isDir) return;
+    if ((folded.get(fold) ?? path) !== path) throw new Error('paths differing only in case');
     folded.set(fold, path);
     files.set(path, data);
-  }
-  if (archive.subarray(Math.min(at, archive.length)).some((b) => b !== 0)) throw malformed();
+  };
+  let failed = false;
+  let open = 0;
+  const parser = new Parser({
+    strict: true,
+    onReadEntry: (entry) => {
+      open++;
+      const chunks: Buffer[] = [];
+      entry.on('data', (c: Buffer) => chunks.push(c));
+      entry.on('end', () => {
+        open--;
+        try { add(entry.type, entry.path, Buffer.concat(chunks)); } catch { failed = true; }
+      });
+    },
+  });
+  parser.on('warn', () => { failed = true; });
+  parser.on('error', () => { failed = true; });
+  parser.end(archive);
+  // An entry cut off by the end of the archive never ends.
+  if (failed || open) throw new Error('malformed tar archive');
   return files;
-}
-
-/** A pax header's `path` and `size`, read record by record by each one's byte length, as node-tar reads them. */
-function paxRecords(data: Buffer): { path?: string; size?: number } {
-  const out: { path?: string; size?: number } = {};
-  for (let at = 0; at < data.length;) {
-    const space = data.indexOf(0x20, at);
-    const len = Number(data.subarray(at, space).toString('latin1'));
-    const record = data.subarray(at, at + len).toString('utf8');
-    const eq = record.indexOf('=');
-    if (space < 0 || !/^[1-9]\d*$/.test(data.subarray(at, space).toString('latin1')) || at + len > data.length
-      || !record.endsWith('\n') || eq < 0) throw new Error('malformed tar archive');
-    const [key, value] = [record.slice(space - at + 1, eq), record.slice(eq + 1, -1)];
-    // node-tar splits records on newlines: one holding another, in its key or value, would be read two ways.
-    // So does invalid UTF-8, which node-tar decodes to replacement characters and then measures again.
-    if (record.slice(0, -1).includes('\n') || !/^[\w.-]+$/.test(key) || Buffer.byteLength(record) !== len) {
-      throw new Error('malformed tar archive');
-    }
-    if (key === 'path') out.path = value;
-    if (key === 'size') {
-      if (!/^\d+$/.test(value)) throw new Error('malformed tar archive');
-      out.size = Number(value);
-    }
-    at += len;
-  }
-  return out;
 }
 
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];

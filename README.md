@@ -119,8 +119,8 @@ Open the service's logs in Render. Every webhook GitHub sends logs a `delivery` 
 
 ## Local development
 
-Requires Node ≥ 22.18 and `git` on your `PATH`. There are no npm runtime dependencies: `npm install` only installs
-TypeScript for type checking.
+Requires Node ≥ 22.18 and `git` on your `PATH`. The one npm runtime dependency is `tar` (node-tar, which npm itself
+extracts packages with); everything else `npm install` adds is for type checking.
 
 ```sh
 npm install
