@@ -13,8 +13,10 @@
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
 // one AGENT span named after the case id (its file name unless "id" is set), with an LLM span per model call. Its
 // metadata: case, focus, headSha, model (REVIEW_MODEL), servedModels (the models that answered) and fellBack (whether
-// any of them doesn't start with REVIEW_MODEL). A scored run also gets an "answer-key" annotation: label pass, fail or
-// error, score 1 or 0 (none for error), and what was missed or unreviewed. Without a Phoenix server the spans are dropped.
+// any of them doesn't start with REVIEW_MODEL), and the run's calls, inputTokens, outputTokens and cost (what OpenRouter
+// billed; Phoenix's own cost column is an estimate from its price list). A scored run also gets an "answer-key"
+// annotation: label pass, fail or error, score 1 or 0 (none for error), what was missed or unreviewed, and model, calls
+// and cost as its metadata. Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -137,12 +139,13 @@ await tracer.startActiveSpan(caseId, async (span) => {
   span.setAttributes({
     [SC.OPENINFERENCE_SPAN_KIND]: 'AGENT', [SC.AGENT_NAME]: testCase.focus, ...json('input', testCase),
   });
-  // model stays one identifier to filter on; servedModels and fellBack say what answered, set once the calls are done.
+  // model stays one identifier to filter on; servedModels, fellBack and the usage totals are set once the calls are done.
   const metadata = (servedModels: string[]) => ({
     [SC.METADATA]: JSON.stringify({
       case: caseId, focus: testCase.focus, headSha: testCase.headSha, model, servedModels,
       // ponytail: prefix match, as OpenRouter may answer with a dated id; misses a fallback named after the primary.
       fellBack: servedModels.some((m) => !m.startsWith(model)),
+      calls, inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, cost: usage.cost,
     }),
   });
   span.setAttributes(metadata([]));
@@ -190,7 +193,9 @@ if (scored) {
     const res = await fetch(`${phoenix}/v1/span_annotations`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(phoenixKey ? { authorization: `Bearer ${phoenixKey}` } : {}) },
-      body: JSON.stringify({ data: [{ span_id: spanId, name: 'answer-key', annotator_kind: 'CODE', result }] }),
+      body: JSON.stringify({ data: [{
+        span_id: spanId, name: 'answer-key', annotator_kind: 'CODE', result, metadata: { model, calls, cost: usage.cost },
+      }] }),
     });
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
   } catch (err) {
