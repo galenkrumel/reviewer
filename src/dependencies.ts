@@ -581,8 +581,9 @@ export async function inspectPackages(check: DependencyCheck, opts: {
         try {
           tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
         } catch (err) {
-          // Past the limit, the rest of the allowance is spent: no later tarball is unpacked that far again.
-          if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') unpacked = caps.bytes * UNPACKED_PER_FETCHED;
+          // A failed unpack may have produced any amount before failing (past the limit, a bad trailer): the rest of the
+          // allowance is spent, so no later tarball can unpack that much again.
+          unpacked = caps.bytes * UNPACKED_PER_FETCHED;
           throw err;
         }
         unpacked += tar.length;

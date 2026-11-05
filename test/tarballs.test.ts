@@ -352,6 +352,18 @@ test('a tarball that would unpack past the limit spends the rest of it, so the n
   assert.match(review.body, /- `bomb 1\.0\.1`\n- `next 1\.0\.1`\n\n/);
 });
 
+test('a gzip that fails any other way spends the rest of the unpacked allowance too', async () => {
+  const s = setup({ 'node_modules/bad': pkg('bad', '1.0.0'), 'node_modules/next': pkg('next', '1.0.0') },
+    { 'node_modules/bad': pkg('bad', '1.0.1'), 'node_modules/next': pkg('next', '1.0.1') });
+  // A bad trailer: everything unpacks, then the checksum fails.
+  const bad = Buffer.from(packageTarball('bad', '1.0.1'));
+  bad[bad.length - 8] ^= 0xff;
+  s.registry.tarballs.set(url('bad', '1.0.1'), bad);
+  const review = await s.opened();
+
+  assert.match(review.body, /- `bad 1\.0\.1`\n- `next 1\.0\.1`\n\n/);
+});
+
 test('a failed fetch spends the bytes it received, so oversized tarballs can\'t each take the whole budget', async () => {
   const big = (n: string) => packageTarball(n, '1.0.1', {}, { 'blob.bin': Array.from({ length: 4000 }, (_, i) => `${n}${i}`).join('') });
   const s = setup({ 'node_modules/x1': pkg('x1', '1.0.0'), 'node_modules/x2': pkg('x2', '1.0.0') },
