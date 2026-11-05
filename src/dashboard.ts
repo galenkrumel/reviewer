@@ -36,7 +36,7 @@ const KIND: Record<string, string> = {
   'pull_request.opened': 'opened', 'pull_request.synchronize': 'push', 'pull_request.reopened': 'reopened',
   'pull_request.ready_for_review': 'ready for review', 'pull_request.edited': 'base changed',
   'pull_request.labeled': 're-review label', 'pull_request_review_thread.resolved': 'thread resolved',
-  'pull_request_review_comment.created': '"Waive:" reply',
+  'pull_request_review_comment.created': '"Waive:" reply', 'pull_request.retry': '"Retry" comment',
 };
 
 /** Markup whose interpolations are already escaped. */
@@ -261,7 +261,7 @@ ${runs.map((r) => html`<tr${quiet(r.status)}>
   <td><a class="ref" href="/admin/runs/${r.id}">${r.id}</a></td>
   ${withPr && html`<td>${prCell(r)}</td>`}
   <td class="nowrap">${kind(r.event)}</td>
-  <td>${r.focuses.length ? r.focuses.map((f, i) => html`${i > 0 && ', '}${f.status === 'failed' ? html`<span class="err">${f.focus} (failed)</span>` : f.focus}`) : '—'}</td>
+  <td>${r.focuses.length ? r.focuses.map((f, i) => html`${i > 0 && ', '}${f.status === 'failed' ? html`<span class="err">${f.focus} (failed)</span>` : f.reusedFrom !== undefined ? `${f.focus} (reused)` : f.focus}`) : '—'}</td>
   <td class="nowrap">${status(r, now)}</td>
   <td><code>${r.headSha.slice(0, 7)}</code></td>
   <td class="nowrap muted">${since(r.createdAt, now)} ago</td>
@@ -361,7 +361,7 @@ ${r.fallbackUsed && html`<tr><th>Orchestrator</th><td class="err">fallback selec
 ${r.blockers && html`<tr><th>Blockers</th><td>${r.blockers.length ? r.blockers.join('; ') : 'none'}</td></tr>`}
 </table></div>
 ${section('Focuses', r.focuses, html`<div class="card"><table class="grid"><tr><th>Focus</th><th>Status</th><th>Reason</th></tr>
-${r.focuses.map((f) => html`<tr><td class="ref">${f.focus}</td><td${f.status === 'failed' ? new Html(' class="err"') : ''}>${f.status}${f.error && html`: ${f.error}`}</td><td>${f.reason}</td></tr>`)}</table></div>`)}
+${r.focuses.map((f) => html`<tr><td class="ref">${f.focus}</td><td${f.status === 'failed' ? new Html(' class="err"') : ''}>${f.status}${f.error && html`: ${f.error}`}${f.reusedFrom !== undefined && html`, reused from run <a class="ref" href="/admin/runs/${f.reusedFrom}">${f.reusedFrom}</a>`}</td><td>${f.reason}</td></tr>`)}</table></div>`)}
 ${section('Findings', r.findings, html`<div class="card"><table class="grid"><tr><th>Outcome</th><th>Severity</th><th>Confidence</th><th>Focus</th><th>Where</th><th>Finding</th></tr>
 ${r.findings.map((f) => html`<tr><td class="nowrap">${f.outcome}</td><td>${f.severity}</td><td>${f.confidence}</td><td>${(f.focuses ?? [f.focus]).join(', ')}</td>
 <td><code>${f.path}:${f.start_line !== undefined ? `${f.start_line}-` : ''}${f.line}</code></td>

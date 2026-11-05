@@ -31,7 +31,7 @@ The MVP is read-only with respect to source code: it must not build, test, impor
 - Multi-tenant hosting, billing, or a registration UI.
 - Horizontal scaling (more than one instance).
 - A judge/verifier agent pass (deferred until real-world noise justifies it).
-- Comment commands such as `@bot review`. The one exception is a maintainer's `Waive: <reason>` reply on the App's thread (§9.2).
+- Comment commands such as `@bot review`. The two exceptions are a maintainer's `Waive: <reason>` reply on the App's thread (§9.2) and a maintainer's `Retry` comment on the PR (§3.5).
 
 ## 3. Triggers and eligibility
 
@@ -76,6 +76,16 @@ The deployer can change this policy (`review_outside_prs: label | always | never
 ### 3.4 Rate limit
 
 Each PR has a configurable cap on runs per rolling 24 hours (default 10). Events past the cap are recorded and skipped.
+
+### 3.5 Retry
+
+The App also subscribes to `issue_comment` (which needs the Issues read permission). A comment `created` on a PR whose whole body is `Retry` (ignoring case and surrounding whitespace), by a maintainer (OWNER, MEMBER or COLLABORATOR), queues a **retry** of the PR's latest run that wasn't skipped, at that run's head and base; anything else on that event is ignored, and so is a `Retry` on a PR with no run. Gating (§3.2) and the rate limit (§3.4) apply as for a review.
+
+- A retry of a published run with failed focuses runs no orchestrator. It runs the same focuses: the failed ones again, under the same incremental or full scope as that run (§7.2), and the succeeded ones not at all, reusing their findings as that run decided them (a published one is already a thread). The Dependency check runs again as on every run. Only the rerun focuses' findings are validated, deduplicated against the findings already posted at this head and earlier ones, and capped at what is left of the comment cap. It then re-checks threads, decides approval and publishes like a full run; its summary names the focuses it retried.
+- A retry of a run that failed outright (its review couldn't be posted, or it failed before its focuses finished) is a full review of that head.
+- With nothing failed (the latest run published with every focus succeeded, posted nothing, or is still queued or running), a retry is recorded `skipped` and nothing is posted.
+- It bypasses the duplicate check for its head and base, but a retry still queued for that head absorbs another. It never supersedes another run; a push supersedes it as usual.
+- It records every focus, each reused one with the run that actually ran it, and all the findings, so a later push, re-decision or retry builds on it as on any full run.
 
 ## 4. Revision handling
 
@@ -167,7 +177,7 @@ Before publishing, comment text is sanitized: `@`-mentions are neutralized, and 
 
 1. Schema-valid.
 2. The anchor falls on a line added or modified in the reviewed diff. An anchor within 2 lines of such a line in the same file is moved to the nearest one, the following line on a tie, before merge and dedup; a start line moves by the same amount (but not below line 1), and the suggested fix is posted as prose rather than a suggestion block. Anything further, in a file in the reviewed diff, is posted as a **file-level** comment that names the line it refers to, under the rules below like an inline one, so it too becomes a thread someone can fix, disprove or waive. In a file outside the reviewed diff, which can't take a comment, it is `unanchorable`.
-   - **Incremental after a push:** when an earlier head was reviewed, against this base or one of its ancestors (main merged in or rebased onto), with at least one focus run, no failed focus and no file skipped for budget, reviewers see the full diff for context plus the changes since that head (and any file the base changed since that review: merging main in can undo one of main's changes on a line the PR didn't touch since), and are told to focus on those. A focus that didn't run on that review never saw its lines, so it gets the full review instead. A **late finding**, on a line an earlier review saw, is still posted inline under the rules below like any other finding, so it blocks approval as a thread someone can fix, disprove or waive rather than by being held back. A push that adds no lines runs no reviewers. A label re-review, a base that isn't a descendant of the earlier one (a retarget), an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
+   - **Incremental after a push:** when an earlier head was reviewed, against this base or one of its ancestors (main merged in or rebased onto), with at least one focus run, no failed focus and no file skipped for budget, reviewers see the full diff for context plus the changes since that head (and any file the base changed since that review: merging main in can undo one of main's changes on a line the PR didn't touch since), and are told to focus on those. A focus that didn't run on that review never saw its lines, so it gets the full review instead. A **late finding**, on a line an earlier review saw, is still posted inline under the rules below like any other finding, so it blocks approval as a thread someone can fix, disprove or waive rather than by being held back. A push that adds no lines runs no reviewers. A label re-review (and a retry of one, §3.5), a base that isn't a descendant of the earlier one (a retarget), an earlier head that can no longer be fetched, or a diff since that head larger than the PR diff gets a full review.
 3. `severity ≥ medium` **and** `confidence ≥ 0.7`. Both thresholds are configurable.
 4. **Cross-reviewer merge:** findings on the same path within ±3 lines are merged into one, except that a documentation finding never merges with another focus's finding, and a file-level finding never merges with an inline one. The higher severity × confidence finding is kept, and all contributing focuses are noted.
 5. **Cross-push dedup:** a finding is dropped if one with the same path and normalized title was already posted on this PR (any earlier head) and its anchor line still exists in the current diff (for a file-level comment, its file is still in the reviewed diff).
@@ -289,7 +299,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 
 - **Topology:** one service. The HTTP handler verifies the webhook, evaluates eligibility, enqueues the job, and returns 202 Accepted. An in-process worker loop processes jobs.
 - **Storage:** SQLite in WAL mode on the persistent volume holds both the job queue and run metadata. The repository clone cache lives on the same volume.
-- **Job dedup:** a second job for the same (repo, PR, head, base) while one is queued, running, or published is a no-op. A forced label re-review bypasses this.
+- **Job dedup:** a second job for the same (repo, PR, head, base) while one is queued, running, or published is a no-op. A forced label re-review and a retry (§3.5) bypass this.
 - **Run metadata:**
   - the GitHub delivery ID and event;
   - author gating outcome;
@@ -308,7 +318,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
   - All failures are written to structured logs and run metadata.
 - **Restart safety:** jobs left `running` at startup are re-queued. The idempotency marker prevents double-posting.
 - **Shutdown:** on `SIGTERM` (a deploy) the service stops accepting webhooks and claiming runs. A running run stops at its next model call, records its model calls and is re-queued for the next instance; a run still going after 25 seconds is recorded and re-queued as it stands, and the process exits, inside Render's 30-second grace period. A run re-queued this way is reviewed again from the start.
-- **Dashboard:** a read-only HTML view of runs at `/admin`, served only when an admin password is set and behind HTTP Basic auth. Its home page lists PRs by their latest run (that run's status, the PR's verdict: whether its latest published review approved or only commented, its run count and cost; filter by repo, PR state or active PRs). A PR's page lists its runs and waivers; a run's page shows its recorded metadata, skipped files, blockers and Dependency check result (each package change with its Advisories, ID, severity and classification, and a failed advisory lookup with its error); a flat run list filters across PRs by status and full run or re-decision. Wherever a PR is named it shows its PR state (open, draft, merged or closed), recorded from every `pull_request` delivery for an allowlisted repo; a delivery about an older revision of the PR never overwrites a newer one, and a PR whose state was never recorded shows none. Runs are labelled by what they did on GitHub (review posted with its verdict, linking to the review; nothing posted; no change, for a re-decision; cancelled) and by what started them in plain words (push, thread resolved…); runs that posted nothing are muted. Everything from the PR or a model is escaped, and no script runs on the page. Its only outside resource is a webfont stylesheet pinned to an exact version with a Subresource Integrity hash; without it the page falls back to system fonts.
+- **Dashboard:** a read-only HTML view of runs at `/admin`, served only when an admin password is set and behind HTTP Basic auth. Its home page lists PRs by their latest run (that run's status, the PR's verdict: whether its latest published review approved or only commented, its run count and cost; filter by repo, PR state or active PRs). A PR's page lists its runs and waivers; a run's page shows its recorded metadata, skipped files, blockers and Dependency check result (each package change with its Advisories, ID, severity and classification, and a failed advisory lookup with its error); a flat run list filters across PRs by status and full run or re-decision. Wherever a PR is named it shows its PR state (open, draft, merged or closed), recorded from every `pull_request` delivery for an allowlisted repo; a delivery about an older revision of the PR never overwrites a newer one, and a PR whose state was never recorded shows none. A retry's run lists each reused focus with the run it was reused from. Runs are labelled by what they did on GitHub (review posted with its verdict, linking to the review; nothing posted; no change, for a re-decision; cancelled) and by what started them in plain words (push, thread resolved, "Retry" comment…); runs that posted nothing are muted. Everything from the PR or a model is escaped, and no script runs on the page. Its only outside resource is a webfont stylesheet pinned to an exact version with a Subresource Integrity hash; without it the page falls back to system fonts.
 
 ## 13. Acceptance criteria
 
@@ -344,6 +354,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 30. A lockfile-only PR that fixes Advisories and introduces none is approved with approvals on when nothing else blocks; a PR changing only excluded files and no supported lockfile still says no reviewers ran.
 31. A security-focus Finding anchored on a package's lockfile line is posted; a model can't remove or soften an introduced Advisory's Finding.
 32. A `pnpm-lock.yaml` change (lockfile version 6 or 9) gets everything a `package-lock.json` change does, its Findings on the package's key line; a package shared by several importers counts once, and an unknown lockfile version is not understood and blocks.
+33. After a run with a failed focus, a maintainer's `Retry` runs only that focus, reuses the other focuses' findings without posting any twice, and the Dashboard shows the run as a retry with the focuses it reused; a `Retry` with nothing failed is recorded `skipped` and posts nothing.
 
 Every criterion must have a deterministic test using a fake GitHub client and a stubbed model.
 

@@ -47,15 +47,16 @@ On the account that owns the repositories, go to **Settings → Developer settin
 
 - **Webhook URL:** enter a placeholder like `https://example.com/` for now. You'll replace it in step 3.
 - **Webhook secret:** a long random string, e.g. from `openssl rand -hex 32`. Save it for step 2.
-- **Repository permissions:** set exactly these three and leave everything else at **No access**:
+- **Repository permissions:** set exactly these four and leave everything else at **No access**:
 
   | Permission | Access | Used for |
   |---|---|---|
   | Contents | Read-only | fetching the PR's commits |
   | Pull requests | Read and write | reading the PR and posting the review |
+  | Issues | Read-only | receiving `Retry` comments on a PR's conversation |
   | Metadata | Read-only | required for every App |
 
-- **Subscribe to events:** **Pull request**, **Pull request review thread** and **Pull request review comment**. The last two let a maintainer waive a finding and have the App's approval follow within seconds, in either of two ways: resolve the App's thread, or reply on it with a comment starting `Waive: <reason>`, which keeps the reason in the PR's record.
+- **Subscribe to events:** **Pull request**, **Pull request review thread**, **Pull request review comment** and **Issue comment**. The two review ones let a maintainer waive a finding and have the App's approval follow within seconds, in either of two ways: resolve the App's thread, or reply on it with a comment starting `Waive: <reason>`, which keeps the reason in the PR's record. Issue comment lets a maintainer comment `Retry` on the PR when a reviewer failed (see [Operating](#operating)).
 - **Where can this GitHub App be installed:** only on this account.
 
 Create the App, then:
@@ -223,7 +224,10 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
 - **Retries:** fetch and publish are tried four times, with 2 s, 8 s and 32 s backoff. Before each publish attempt the
   service looks for its own review marker on the PR, so a post that actually went through is never repeated. A
   reviewer is retried once, and if it still fails, its focus is marked failed and the other reviewers' findings are
-  still posted.
+  still posted. To finish that review (after an OpenRouter outage, or once credits are topped up), a maintainer
+  comments `Retry` on the PR: only the focuses that failed in its latest review run again, the others' findings are
+  reused, and the App decides and posts as usual. A `Retry` when nothing failed does nothing. A run that failed
+  outright (e.g. its review couldn't be posted) is run again in full.
 - **Run records** are in `$DATA_DIR/reviewer.db`, table `runs`. A failed run has status `failed` and an `error`
   prefixed with its step, e.g. `fetch: …`. Per-focus status, per-agent model, tokens and cost, and every finding's
   validation outcome are in the `focuses`, `invocations` and `findings` tables.

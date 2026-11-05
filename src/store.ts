@@ -11,7 +11,7 @@ export type RunStatus =
   | 'superseded'
   /** The start or pre-publish check found the PR closed, a draft, or at other SHAs (a superseded job there is revived). */
   | 'stale'
-  /** Over the per-PR run cap: recorded, never claimed. A re-decision with no published review at its head. */
+  /** Over the per-PR run cap: recorded, never claimed. A re-decision with no published review at its head, or a retry with nothing to retry. */
   | 'skipped';
 export type FindingOutcome =
   | 'published' | 'unanchorable' | 'below_threshold' | 'merged' | 'duplicate' | 'over_cap'
@@ -64,6 +64,8 @@ export interface RecordedFocus {
   reason: string;
   status: 'succeeded' | 'failed';
   error?: string;
+  /** On a retry: the run that actually ran this focus, whose findings it reused. */
+  reusedFrom?: number;
 }
 
 /** One agent invocation (a retry is another), summed over its model calls, failed ones included. */
@@ -78,6 +80,8 @@ export interface RecordedInvocation {
 
 /** A re-decision runs no reviewers: it decides approval again from a published run's findings and the threads now. */
 export const isRedecision = (event: string) => !event.startsWith('pull_request.');
+/** A retry runs only the focuses that failed in the latest run at its head and base, reusing the others' findings. */
+export const RETRY = 'pull_request.retry';
 const FULL_RUN = `event LIKE 'pull_request.%'`;
 /** A run's cost, summed over its invocations, as a column of `runs`. */
 const COST = `(SELECT COALESCE(SUM(json_extract(data, '$.cost')), 0) FROM invocations WHERE run_id = runs.id)`;
@@ -231,12 +235,15 @@ export function openStore(dataDir: string, clock: Clock) {
      * No-op for a duplicate (repo, PR, head, base); otherwise supersedes the PR's in-flight jobs at other SHAs.
      * A label re-review is never a duplicate. A `skipped` job is only recorded.
      * A re-decision is a duplicate only of one still queued at its SHAs, which will read the threads anyway, and
-     * supersedes nothing: a late delivery's old head must not stop the review of the new one.
+     * supersedes nothing: a late delivery's old head must not stop the review of the new one. The same goes for a
+     * retry, which only a retry still queued at its SHAs absorbs.
      */
     enqueue(job: Omit<Job, 'id'>, status: 'queued' | 'skipped' = 'queued') {
-      if (status === 'queued' && isRedecision(job.event)) {
+      const retry = job.event === RETRY;
+      if (status === 'queued' && (retry || isRedecision(job.event))) {
         if (db.prepare(`SELECT 1 FROM runs WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ?
-          AND status = 'queued' AND NOT ${FULL_RUN}`).get(job.repo, job.pr, job.headSha, job.baseSha)) return;
+          AND status = 'queued' AND ${retry ? `event = '${RETRY}'` : `NOT ${FULL_RUN}`}`)
+          .get(job.repo, job.pr, job.headSha, job.baseSha)) return;
       } else if (status === 'queued') {
         const dup = job.event !== 'pull_request.labeled' && db.prepare(`SELECT 1 FROM runs
           WHERE repo = ? AND pr = ? AND head_sha = ? AND base_sha = ? AND ${FULL_RUN}
@@ -309,6 +316,28 @@ export function openStore(dataDir: string, clock: Clock) {
         headSha: row.head_sha, baseSha: row.base_sha,
         focuses: new Set(focuses.all(row.id).map((f: any) => JSON.parse(f.data).focus)),
       };
+    },
+
+    /** The head and base of the PR's latest full run that wasn't skipped: what a retry retries. */
+    latestRun(repo: string, pr: number): { headSha: string; baseSha: string } | undefined {
+      const row = db.prepare(`SELECT head_sha, base_sha FROM runs WHERE repo = ? AND pr = ? AND ${FULL_RUN}
+        AND status != 'skipped' ORDER BY id DESC LIMIT 1`).get(repo, pr) as any;
+      return row && { headSha: row.head_sha, baseSha: row.base_sha };
+    },
+
+    /**
+     * What a retry builds on: the latest full run at these SHAs before it that wasn't skipped, with its focuses,
+     * findings and orchestrator outcome, and whether the latest that wasn't itself a retry was a label re-review (so the
+     * retry reviews the whole PR too).
+     */
+    retryBase(repo: string, pr: number, headSha: string, baseSha: string, before: number) {
+      const at = `repo = ? AND pr = ? AND head_sha = ? AND base_sha = ? AND id < ? AND status != 'skipped' AND ${FULL_RUN}`;
+      const row = db.prepare(`SELECT * FROM runs WHERE ${at} ORDER BY id DESC LIMIT 1`).get(repo, pr, headSha, baseSha, before) as any;
+      if (!row) return;
+      const root = db.prepare(`SELECT event FROM runs WHERE ${at} AND event != ? ORDER BY id DESC LIMIT 1`)
+        .get(repo, pr, headSha, baseSha, before, RETRY) as any;
+      const { id, status, focuses, findings, fallbackUsed, orchestratorError } = toRecord(row);
+      return { id, status, focuses, findings, fallbackUsed, orchestratorError, labeled: root?.event === 'pull_request.labeled' };
     },
 
     /**
