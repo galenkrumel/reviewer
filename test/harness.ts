@@ -1,6 +1,6 @@
 // The single test seam: build an app with fake GitHub, scripted model, real git
 // and real SQLite, send it signed deliveries, drain, and inspect the outputs.
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { gzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -221,6 +221,10 @@ export const packageTarball = (name: string, version: string, scripts: Record<st
     'package/package.json': JSON.stringify({ name, version, scripts }),
     ...Object.fromEntries(Object.entries(files).map(([p, c]) => [`package/${p}`, c])),
   });
+
+/** The lockfile integrity of a tarball, as npm records it; by default the one FakeRegistry serves for a name and version. */
+export const integrityOf = (name: string, version: string, body = packageTarball(name, version)) =>
+  `sha512-${createHash('sha512').update(body).digest('base64')}`;
 
 /**
  * The npm registry, from memory. A registry tarball URL nobody set serves a plain package (no scripts) of the name and

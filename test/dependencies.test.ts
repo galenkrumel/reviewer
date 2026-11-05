@@ -33,7 +33,7 @@ test('a package moved from one version to another, with its head source, integri
 
   assert.deepEqual(changes, [{
     name: 'dompurify', from: '3.4.11', to: '3.4.17', resolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz',
-    integrity: 'sha512-3.4.17', fromResolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.11.tgz', line: lineOf(head, '"node_modules/dompurify"', '"version"'),
+    integrity: 'sha512-3.4.17', fromResolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.11.tgz', fromIntegrity: 'sha512-3.4.11', line: lineOf(head, '"node_modules/dompurify"', '"version"'),
   }]);
 });
 

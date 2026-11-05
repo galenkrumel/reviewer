@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import type { AppConfig } from '../src/app.ts';
 import {
-  delivery, FakeGitHub, FakeRegistry, gitFixture, noFindings, openedPayload, packageTarball, prPayload, ScriptedModel, tarball, testApp,
+  delivery, FakeGitHub, FakeRegistry, gitFixture, integrityOf, noFindings, openedPayload, packageTarball, prPayload, ScriptedModel, tarball, testApp,
 } from './harness.ts';
 
 const REPO = 'acme/widgets';
@@ -14,7 +14,7 @@ const url = (name: string, version: string) => `https://registry.npmjs.org/${nam
 const lock = (packages: Record<string, object>) => JSON.stringify(
   { name: 'app', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'app' }, ...packages } }, null, 2) + '\n';
 const pkg = (name: string, version: string, extra: object = {}) =>
-  ({ version, resolved: url(name, version), integrity: `sha512-${name}${version}`, ...extra });
+  ({ version, resolved: url(name, version), ...extra });
 const deps = (versions: Record<string, string>) =>
   lock(Object.fromEntries(Object.entries(versions).map(([n, v]) => [`node_modules/${n}`, pkg(n, v)])));
 
@@ -301,6 +301,34 @@ test('a bundled copy no change inspects on its own is compared with its bundler:
   // dup@1.0.0 is one change (its first install, under h1); its copy under h2 is h2's.
   assert.ok(!titles.includes('**dup adds an install script**'), titles.join());
   assert.match(review.comments.find((c) => c.body.startsWith('**h2'))!.body, /`node_modules\/dup install`: `node d\.js`/);
+});
+
+test("a tarball that doesn't match the lockfile's integrity is not inspected, so a same-URL swap can't compare a tarball with itself", async () => {
+  const real = packageTarball('ok', '1.0.1', { postinstall: 'node ok.js' });
+  const s = setup(
+    { 'node_modules/ok': pkg('ok', '1.0.0'), 'node_modules/swap': pkg('swap', '1.0.0', { integrity: integrityOf('swap', '1.0.0') }) },
+    {
+      'node_modules/ok': pkg('ok', '1.0.1', { integrity: `sha1-x sha512-${integrityOf('ok', '1.0.1', real).slice(7)}` }),
+      // Same URL, another integrity: the base's bytes can't be fetched again.
+      'node_modules/swap': pkg('swap', '1.0.0', { integrity: 'sha512-AAAA' }),
+    },
+  );
+  s.registry.tarballs.set(url('ok', '1.0.1'), real);
+  const review = await s.opened();
+
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**ok adds an install script**']);
+  assert.match(review.body, /Not inspected[^\n]*\n- `swap 1\.0\.0`\n\n/);
+});
+
+test("a bundled package whose bundler's integrity changed at the same URL is a change, and fails closed", async () => {
+  const s = setup(
+    { 'node_modules/host': pkg('host', '1.0.0', { integrity: 'sha512-AAAA' }), 'node_modules/host/node_modules/a': { version: '1.0.0', inBundle: true } },
+    { 'node_modules/host': pkg('host', '1.0.0', { integrity: integrityOf('host', '1.0.0') }), 'node_modules/host/node_modules/a': { version: '1.0.0', inBundle: true } },
+  );
+  const review = await s.opened();
+
+  assert.match(review.body, /- `a 1\.0\.0 \(source or integrity changed\)`/);
+  assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.0`\n- `host 1\.0\.0`\n\n/);
 });
 
 test('a failed fetch spends the bytes it received, so oversized tarballs can\'t each take the whole budget', async () => {

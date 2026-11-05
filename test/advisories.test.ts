@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AppConfig } from '../src/app.ts';
-import { delivery, FakeGitHub, gitFixture, noFindings, openedPayload, prPayload, ScriptedModel, testApp } from './harness.ts';
+import { delivery, FakeGitHub, gitFixture, noFindings, openedPayload, prPayload, ScriptedModel, testApp, integrityOf } from './harness.ts';
 
 const REPO = 'acme/widgets';
 const LOCK = 'package-lock.json';
@@ -10,7 +10,7 @@ const LOCK = 'package-lock.json';
 const lock = (packages: Record<string, object>) => JSON.stringify(
   { name: 'app', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'app' }, ...packages } }, null, 2) + '\n';
 const pkg = (name: string, version: string, extra: object = {}) =>
-  ({ version, resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, integrity: `sha512-${name}${version}`, ...extra });
+  ({ version, resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, integrity: integrityOf(name, version), ...extra });
 const purify = (v: string, more: Record<string, object> = {}) =>
   lock({ ...more, 'node_modules/dompurify': pkg('dompurify', v), 'node_modules/left-pad': pkg('left-pad', '1.3.0') });
 

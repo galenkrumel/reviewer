@@ -23,6 +23,8 @@ export interface PackageChange {
   integrity?: string;
   /** Where the version it moved from resolved, at base; unset for an added or removed package. */
   fromResolved?: string;
+  /** Its integrity, from the same install as `fromResolved`. */
+  fromIntegrity?: string;
   /**
    * For a bundled package (`inBundle`, no source of its own, nested in a package), at head: where the nearest enclosing
    * package that isn't bundled itself resolves from (unset if it records none) and the bundled one's folder in its
@@ -46,7 +48,7 @@ export interface PackageChange {
 }
 
 /** Where a bundled package is: its bundler's source (unset if that records none) and its folder in that tarball. */
-export interface BundledAt { resolved?: string; folder: string }
+export interface BundledAt { resolved?: string; integrity?: string; folder: string }
 
 /** A package change whose code the check couldn't fetch and read, so nothing vouches for it. */
 export interface NotInspected { path: string; name: string; version: string; reason: string }
@@ -166,8 +168,8 @@ function entries(text: string | undefined): Lock | undefined {
       const up = (k: string) => k.slice(0, k.lastIndexOf('/node_modules/'));
       let root = up(key);
       while (packages[root]?.inBundle === true && root.lastIndexOf('/node_modules/') > 0) root = up(root);
-      const by = str(packages[root]?.resolved);
-      bundledBy = { ...(by !== undefined && { resolved: by }), folder: key.slice(root.length + 1), bundler: root };
+      const [by, sum] = [str(packages[root]?.resolved), str(packages[root]?.integrity)];
+      bundledBy = { ...(by !== undefined && { resolved: by }), ...(sum !== undefined && { integrity: sum }), folder: key.slice(root.length + 1), bundler: root };
     }
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundledBy && { bundledBy }) });
   }
@@ -195,7 +197,7 @@ function byName(list: Entry[]): Map<string, Map<string, Entry[]>> {
   return out;
 }
 
-const source = (e: Entry) => `${e.resolved} ${e.integrity}${e.bundledBy ? ` in ${e.bundledBy.resolved} at ${e.bundledBy.folder}` : ''}`;
+const source = (e: Entry) => `${e.resolved} ${e.integrity}${e.bundledBy ? ` in ${e.bundledBy.resolved} ${e.bundledBy.integrity} at ${e.bundledBy.folder}` : ''}`;
 
 /**
  * The line of each package key's first `"version"`, as npm writes lockfiles: one key per line, version before any
@@ -282,7 +284,9 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   // install of a version already counted, an unchanged one, one the lockfile doesn't list) is compared with it.
   const listed = new Map<string, string[]>();
   const bundlers = new Map<string, PackageChange>();
-  const at = (b: Entry['bundledBy']): BundledAt | undefined => b && { ...(b.resolved !== undefined && { resolved: b.resolved }), folder: b.folder };
+  const at = (b: Entry['bundledBy']): BundledAt | undefined => b && {
+    ...(b.resolved !== undefined && { resolved: b.resolved }), ...(b.integrity !== undefined && { integrity: b.integrity }), folder: b.folder,
+  };
   // At most 20 dependents each: context for the security focus, not an inventory.
   const dependents = (name: string, removed: boolean) => [...((removed ? baseLock : headLock).pulledBy.get(name) ?? [])].sort().slice(0, 20);
   const lines = head === undefined ? new Map<string, number>() : versionLines(head);
@@ -298,6 +302,7 @@ export function compareLockfile(base: string | undefined, head: string | undefin
         name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
         ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
         ...(to !== undefined && baseInstall?.resolved !== undefined && { fromResolved: baseInstall.resolved }),
+        ...(to !== undefined && baseInstall?.integrity !== undefined && { fromIntegrity: baseInstall.integrity }),
         ...(to !== undefined && e.bundledBy && { bundledIn: at(e.bundledBy) }),
         ...(to !== undefined && baseInstall?.bundledBy && { fromBundledIn: at(baseInstall.bundledBy) }),
         ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
@@ -472,6 +477,17 @@ function paxRecords(data: Buffer): { path?: string; size?: number } {
 }
 
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
+
+/**
+ * Whether a tarball matches a lockfile integrity (Subresource Integrity: one or more `algo-base64` hashes), as npm
+ * checks before installing: any one of them, of an algorithm it knows. One with none it knows matches nothing.
+ */
+function matchesIntegrity(body: Buffer, integrity: string): boolean {
+  return integrity.trim().split(/\s+/).some((h) => {
+    const m = /^(sha512|sha384|sha256|sha1)-([A-Za-z0-9+/=]+)$/.exec(h);
+    return !!m && createHash(m[1]!).update(body).digest('base64') === m[2];
+  });
+}
 // ponytail: unpacked bytes per run are capped at this multiple of the fetch byte cap, against a gzip bomb. Raise it if
 // ordinary packages hit it.
 const UNPACKED_PER_FETCHED = 8;
@@ -534,12 +550,12 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined)
     .map((c) => ({ path, c }))).sort((a, b) => risk(a.c) - risk(b.c));
   const allowed = new Set([...new Set(wanted.map(({ c }) => `${c.name}@${c.to}`))].slice(0, caps.packages));
-  /** Each tarball's files by lowercased path, or why it couldn't be read. */
-  const byUrl = new Map<string, Map<string, Buffer> | Error>();
+  /** Each tarball's files by lowercased path and its body (for integrity), or why it couldn't be read. */
+  const byUrl = new Map<string, { files: Map<string, Buffer>; body: Buffer } | Error>();
   const parsed = new Map<string, Record<string, string>>();
   let [bytes, unpacked] = [0, 0];
   /** A tarball's files, fetched once per run; undefined once the run is superseded. */
-  const filesAt = async (url: string | undefined) => {
+  const filesAt = async (url: string | undefined, integrity: string | undefined) => {
     if (url === undefined) throw new Error('no source recorded');
     if (!onRegistry(url)) throw new Error('not on the npm registry');
     if (!byUrl.has(url)) {
@@ -551,7 +567,7 @@ export async function inspectPackages(check: DependencyCheck, opts: {
         opts.fetched(url, { bytes: body.length });
         const tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
         unpacked += tar.length;
-        byUrl.set(url, new Map([...untar(tar)].map(([k, v]) => [k.toLowerCase(), v])));
+        byUrl.set(url, { files: new Map([...untar(tar)].map(([k, v]) => [k.toLowerCase(), v])), body });
       } catch (err) {
         if (err instanceof FetchError) bytes += err.received;
         const error = err instanceof Error ? err : new Error(String(err));
@@ -561,15 +577,20 @@ export async function inspectPackages(check: DependencyCheck, opts: {
     }
     const result = byUrl.get(url)!;
     if (result instanceof Error) throw result;
-    return result;
+    if (integrity !== undefined && !matchesIntegrity(result.body, integrity)) {
+      throw new Error("the registry's tarball doesn't match the lockfile's integrity");
+    }
+    return result.files;
   };
   /**
    * One side's install scripts: its own tarball's, or its bundler's at its folder (and version). A package's own come
    * with those of the bundled packages in its tarball the lockfile doesn't list (at base, all of them).
    */
-  const scripts = async (resolved: string | undefined, bundled: BundledAt | undefined, version: string, listed: readonly string[]) => {
+  const scripts = async (
+    resolved: string | undefined, integrity: string | undefined, bundled: BundledAt | undefined, version: string, listed: readonly string[],
+  ) => {
     const url = bundled ? bundled.resolved : resolved;
-    const files = await filesAt(url);
+    const files = await filesAt(url, bundled ? bundled.integrity : integrity);
     if (!files) return;
     const key = `${url}\0${bundled?.folder ?? ''}\0${bundled ? version : listed.join('\0')}`;
     if (!parsed.has(key)) {
@@ -582,8 +603,8 @@ export async function inspectPackages(check: DependencyCheck, opts: {
     const skip = (reason: string) => notInspected.push({ path, name: c.name, version: c.to!, reason });
     if (!allowed.has(`${c.name}@${c.to}`)) { skip(`over the run's cap of ${caps.packages} packages`); continue; }
     try {
-      const now = await scripts(c.resolved, c.bundledIn, c.to!, c.bundles ?? []);
-      const before = c.from === undefined ? {} : await scripts(c.fromResolved, c.fromBundledIn, c.from, []);
+      const now = await scripts(c.resolved, c.integrity, c.bundledIn, c.to!, c.bundles ?? []);
+      const before = c.from === undefined ? {} : await scripts(c.fromResolved, c.fromIntegrity, c.fromBundledIn, c.from, []);
       if (!now || !before) return;
       const added = Object.entries(now).filter(([k, v]) => before[k] !== v);
       if (added.length) c.installScripts = Object.fromEntries(added);
