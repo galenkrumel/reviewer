@@ -1,8 +1,8 @@
 # Untrusted archives and formats are read with the standard library for them
 
-Status: accepted. The tar reader moved to node-tar (`tar`).
+Status: accepted. The tar reader moved to node-tar (`tar`). The pnpm lockfile reader (`src/pnpmlock.ts`) is still hand-written and is the one exception left to move.
 
-Untrusted input in a standard format is read with the library its ecosystem itself uses, never with a parser written here. For npm tarballs that is node-tar, the parser npm extracts with. Reading exactly as the installer reads is the whole point of inspecting a tarball, and a second parser can only drift from it.
+Untrusted input in a standard format is to be read with the library its ecosystem itself uses, not with a parser written here. For npm tarballs that is node-tar, the parser npm extracts with. Reading exactly as the installer reads is the whole point of inspecting a tarball, and a second parser can only drift from it.
 
 "No runtime dependencies" was never a decision. It was read off `package.json` while #79 was being planned, and it produced an in-house tar reader. PR #98 spent 16 review rounds and 28 commits matching that reader to node-tar's handling of pax records, GNU long names, checksums and block framing, one edge case at a time. With node-tar doing the parsing, that whole class of finding is gone. What remains in our code is the policy on top: which entry types and paths are refused as unreadable, so the package is not inspected.
 
