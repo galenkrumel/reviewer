@@ -364,10 +364,11 @@ export function createApp(deps: {
     // A redelivery keeps its GUID: one that already started a run (received, but its answer never reached GitHub)
     // mustn't start another. A label re-review or a re-decision is never a duplicate by its SHAs. The GUID is
     // unsigned, so a captured delivery replayed under a fresh one is caught by its body's digest instead.
-    const deliveryId = String(d.headers['x-github-delivery'] ?? '');
-    const digest = d.headers['x-github-event'] === 'pull_request' ? createHash('sha256').update(d.body).digest('hex') : '';
-    if (store.hasDelivery(deliveryId, digest)) return { status: 202, ignored: 'delivery already received' };
     const event = d.headers['x-github-event'];
+    const deliveryId = String(d.headers['x-github-delivery'] ?? '');
+    // Re-decisions aren't checked by body: resolving a thread again can repeat one exactly.
+    const digest = event === 'pull_request' ? createHash('sha256').update(d.body).digest('hex') : '';
+    if (store.hasDelivery(deliveryId, digest)) return { status: 202, ignored: 'delivery already received' };
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
     // Every pull_request delivery carries the PR's state, whatever its action and whether it starts a run.
