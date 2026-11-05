@@ -1,0 +1,20 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "17b27df6e536da8dc21dbddf948d8575798c25dc",
+  "headSha": "0e0b4976267bb5007096b142d909beabc5ba5e31",
+  "title": "#110: Redeliver webhooks GitHub failed to deliver while the service was down",
+  "body": "Closes #110.\n\nGitHub doesn't retry a webhook the service failed to answer, so a push or a thread resolve made while it was down (every deploy, a crash) was never acted on. Now the service asks GitHub to send those again. It does this a minute after startup, once Render routes to the new instance, and every 15 minutes after that.\n\n- It lists the App's deliveries (`GET /app/hook/deliveries`, as the App) and groups the attempts by GUID.\n- It redelivers a delivery (`POST …/attempts`), oldest first, when all of these hold:\n  - it was first sent in the last 6 hours;\n  - no attempt was answered (no response or a 5xx);\n  - it was tried fewer than 3 times.\n- A 4xx is the service's own rejection (bad signature, bad payload), so it's left alone. It would only fail again.\n- Each one logs `redelivered`, or `redelivery failed`, with the GUID, event, original status and time.\n\nThe issue's open questions, settled:\n\n- **Duplicates:** the SHA check doesn't cover a label re-review or a re-decision. So `receive` now ignores a delivery whose GUID already started a run (`delivery already received`). That also covers redeliveries made by hand from the App page. `revive()` re-enqueues directly, so it isn't affected.\n- **Order:** testing this found a real gap. A `closed` delivery that arrived after a newer `reopened` cancelled the reopened run, and nothing revived it. `recordPrState` now says whether this delivery is the latest word on the PR's state. An older `closed` or `converted_to_draft` cancels nothing. Late pushes were already covered by stale/revive.\n- **Lookback:** 6 hours, at most 3 attempts per delivery. The run cap still applies. A longer outage loses its older deliveries, and a busy outage redelivers everything in one pass (marked `ponytail:`).\n\nTests: `test/redelivery.test.ts` covers:\n- which deliveries get redelivered, in what order, and the log lines;\n- a delivery older than the window with a recent failed retry;\n- a redelivery that fails;\n- a repeated GUID on a label event;\n- a close and a reopen arriving in reverse order.\n\nThe timer wiring in `main.ts` isn't exercised, as with #109.\n",
+  "focus": "correctness",
+  "expected": [
+    {
+      "id": "equal-timestamps-can-still",
+      "path": "src/app.ts",
+      "lines": [
+        380,
+        386
+      ],
+      "minSeverity": "low",
+      "defect": "A delayed `closed` delivery can still cancel a newer reopen when both PR updates have the same `updated_at` timestamp."
+    }
+  ]
+}

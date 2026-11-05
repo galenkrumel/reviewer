@@ -1,0 +1,20 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "dbdf14eee40c04f322320a1bb46ed7a73810eb8f",
+  "headSha": "e5f45145fd94cfd418e2301d9d28a6b2064ba5d5",
+  "title": "#81: Introduced Advisories and off-registry packages become Findings",
+  "body": "Closes #81 (part of #79).\n\n## Summary\n\n```diff\n reviewJob\n   checkDependencies          # compare lockfiles (#80)\n+  lookUpAdvisories           # GitHubPort.advisories per name@version; introduced / still open / fixed\n   orchestrator + reviewers\n   readThreads\n-  verifier(open threads)\n+  verifier(open threads, except the Dependency check's)\n+  dependencyFindings         # introduced Advisory (its severity), off-registry package (medium), confidence 1.0, focus security\n+  anchor on the compared lockfiles' diff (reviewers still see only the reviewed diff)\n   validate\n+  check's threads decided in code: Fixed once a fully checked head no longer finds them\n   blockers\n+    \"the dependency check couldn't look up advisories\" (unwaivable)\n   summary\n+    Advisories fixed / still open per lockfile; lookup failure named\n```\n\n- Re-decisions never send the check's threads to the verifier.\n- The check's Findings never merge with a reviewer's. They match re-reports, waivers and Threads by path and title, since one package's Advisories share a line and lockfile lines shift. ADR 0002 records this departure from #79.\n- A registry tarball that names another package or version than its entry (or that `..`, `?` or `#` would reroute) makes the lockfile not understood. Otherwise a PR could relabel a package and dodge its Advisories.\n- The Dashboard run page shows each change's Advisories and any lookup error.\n- REQUIREMENTS §6.3, §7.3 (new), §8, §9.1–9.3, §12 and acceptance criteria 25–28 are updated, as are the ADR status and the glossary.\n\n## Evidence\n\n- **Before:** a PR moving `dompurify 3.4.10 → 3.4.16` (GHSA-mrv2-3pqr-j5jr open at 3.4.16) only listed the move in the summary.\n  **After:** `test/advisories.test.ts` (11 harness tests):\n  - the Advisory is posted inline on the `\"version\"` line as `high` · security, with its summary and first patched version;\n  - waiving it re-decides to approval;\n  - a push to 3.4.17 resolves the Thread Fixed with no verifier call;\n  - a push that still has it, with its line shifted, posts no duplicate and keeps the Thread open;\n  - a lookup outage blocks with its own line.\n- Full suite: 237 pass, typecheck clean.\n- Against the real API through the adapter:\n  - `dompurify@3.4.10` returns 8 advisories, one critical and one withdrawn (flagged).\n  - `@babel/traverse@7.22.0` returns GHSA-67hx-6x53-jw92 (critical, first patched 7.23.2).\n  - npm/cli's 1,202-entry lockfile compares to itself as `[]`.\n\n## Merge Danger\n\n**Door:** two-way\n\n**Blast Radius:** approvals\n\n- PRs that change `package-lock.json` can now get inline comments and new blockers: introduced Advisories, off-registry packages, a failed lookup, and tampered tarball entries, which are \"not understood\".\n- Every run that changes a lockfile now makes up to 1,000 advisory API calls on the installation token.\n- Lockfile-only PRs still can't be approved until #82.\n",
+  "focus": "security",
+  "expected": [
+    {
+      "id": "zero-width-names-can",
+      "path": "src/findings.ts",
+      "lines": [
+        24,
+        30
+      ],
+      "minSeverity": "low",
+      "defect": "A maintainer can waive one package finding and unintentionally suppress a different package's finding."
+    }
+  ]
+}
