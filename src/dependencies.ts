@@ -505,12 +505,6 @@ function matchesIntegrity(body: Buffer, integrity: string): boolean {
 // ordinary packages hit it.
 const UNPACKED_PER_FETCHED = 8;
 
-/**
- * The install scripts of the package in `folder` of a tarball (its own when empty), found in any case as a
- * case-insensitive filesystem would (`lower` maps each lowercased path to its file; the tarball has no two such), by
- * name. Its manifest must record `version` when given. npm also runs `node-gyp rebuild` for a `binding.gyp` with neither
- * `install` nor `preinstall`.
- */
 /** A bundled package's manifest in a (lowercased) tarball path, at any depth. */
 const BUNDLED = /^((?:node_modules\/(?:@[^/]+\/)?[^/]+\/)+)package\.json$/;
 
@@ -529,6 +523,12 @@ function unlistedScripts(lower: Map<string, Buffer>, listed: readonly string[]):
   return found;
 }
 
+/**
+ * The install scripts of the package in `folder` of a tarball (its own when empty), found in any case as a
+ * case-insensitive filesystem would (`lower` maps each lowercased path to its file; the tarball has no two such), by
+ * name. Its manifest must record `version` when given. As npm (`@npmcli/run-script`) runs them: an empty one runs nothing,
+ * and with neither `install` nor `preinstall` set, a `binding.gyp` runs `node-gyp rebuild` unless `gypfile` is false.
+ */
 function installScripts(lower: Map<string, Buffer>, folder: string, version?: string): Record<string, string> {
   const dir = folder && `${folder}/`.toLowerCase();
   const manifest = lower.get(`${dir}package.json`);
@@ -536,8 +536,9 @@ function installScripts(lower: Map<string, Buffer>, folder: string, version?: st
   const pkg = JSON.parse(manifest.toString('utf8'));
   if (version !== undefined && pkg?.version !== version) throw new Error(`not in its bundler's tarball at ${folder} ${version}`);
   const scripts = pkg?.scripts;
-  const found: Record<string, string> = Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof scripts?.[k] === 'string').map((k) => [k, scripts[k]]));
-  if (lower.has(`${dir}binding.gyp`) && !found.install && !found.preinstall) found.install = 'node-gyp rebuild';
+  const found: Record<string, string> = Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof scripts?.[k] === 'string' && scripts[k])
+    .map((k) => [k, scripts[k]]));
+  if (lower.has(`${dir}binding.gyp`) && !found.install && !found.preinstall && pkg?.gypfile !== false) found.install = 'node-gyp rebuild';
   return found;
 }
 
@@ -567,7 +568,8 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   const byUrl = new Map<string, { files: Map<string, Buffer>; body: Buffer } | Error>();
   const parsed = new Map<string, Record<string, string>>();
   let [bytes, unpacked, tarballs] = [0, 0, 0];
-  // Old versions are fetched too, and a failed fetch spends no bytes: the tarballs a run asks for are capped as well.
+  // Old versions are fetched too, and a failed fetch spends only the bytes it received: the tarballs a run asks for are
+  // capped as well.
   const maxTarballs = caps.packages * 2;
   /** A tarball's files, fetched once per run; undefined once the run is superseded. */
   const filesAt = async (url: string | undefined, integrity: string | undefined) => {

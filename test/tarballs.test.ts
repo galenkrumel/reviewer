@@ -467,6 +467,20 @@ test('a binding.gyp with no install script runs node-gyp on install, so it count
   assert.match(review.comments[0]!.body, /`install`: `node-gyp rebuild`/);
 });
 
+test('install scripts are as npm runs them: an empty one runs nothing, but leaves the node-gyp default, which gypfile false turns off', async () => {
+  const s = setup({ 'node_modules/e': pkg('e', '1.0.0'), 'node_modules/g': pkg('g', '1.0.0'), 'node_modules/n': pkg('n', '1.0.0') },
+    { 'node_modules/e': pkg('e', '1.1.0'), 'node_modules/g': pkg('g', '1.1.0'), 'node_modules/n': pkg('n', '1.1.0') });
+  const gyp = { 'binding.gyp': '{}' };
+  s.registry.tarballs.set(url('e', '1.1.0'), packageTarball('e', '1.1.0', { postinstall: '' }));
+  s.registry.tarballs.set(url('g', '1.1.0'), packageTarball('g', '1.1.0', { install: '' }, gyp));
+  s.registry.tarballs.set(url('n', '1.1.0'), tarball({ 'package/package.json': JSON.stringify({ name: 'n', gypfile: false }), 'package/binding.gyp': '{}' }));
+  const review = await s.opened();
+
+  // npm (@npmcli/run-script) tests `!scripts.install`: an empty install still gets node-gyp rebuild.
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**g adds an install script**']);
+  assert.match(review.comments[0]!.body, /`install`: `node-gyp rebuild`/);
+});
+
 test('a package with no recorded source, not bundled, is not inspected', async () => {
   const s = setup({ 'node_modules/bare': { version: '1.0.0' } }, { 'node_modules/bare': { version: '1.0.1' } });
   const review = await s.opened();
