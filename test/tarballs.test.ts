@@ -266,6 +266,43 @@ test("a bundled package is inspected on its own, from its bundler's tarball on e
   assert.doesNotMatch(review.body, /Not inspected/);
 });
 
+test('a bundled copy no change inspects on its own is compared with its bundler: unlisted, a second install, or sourced', async () => {
+  const inner = (v: string, extra: object = {}) => ({ version: v, inBundle: true, ...extra });
+  const s = setup(
+    {
+      'node_modules/h1': pkg('h1', '1.0.0'), 'node_modules/h1/node_modules/dup': inner('1.0.0'),
+      'node_modules/h2': pkg('h2', '1.0.0'), 'node_modules/h2/node_modules/dup': inner('1.0.0'),
+      'node_modules/h3': pkg('h3', '1.0.0'), 'node_modules/h3/node_modules/src': inner('1.0.0', { resolved: url('src', '1.0.0') }),
+    },
+    {
+      // h1 also bundles a package the lockfile doesn't list.
+      'node_modules/h1': pkg('h1', '1.1.0'), 'node_modules/h1/node_modules/dup': inner('1.0.0'),
+      'node_modules/h2': pkg('h2', '1.1.0'), 'node_modules/h2/node_modules/dup': inner('1.0.0'),
+      // An inBundle entry with its own source is still installed from its bundler's tarball.
+      'node_modules/h3': pkg('h3', '1.1.0'), 'node_modules/h3/node_modules/src': inner('1.0.1', { resolved: url('src', '1.0.1') }),
+    },
+  );
+  const m = (name: string, version: string, scripts = {}) => JSON.stringify({ name, version, scripts });
+  for (const h of ['h1', 'h2']) s.registry.tarballs.set(url(h, '1.0.0'), packageTarball(h, '1.0.0', {}, { 'node_modules/dup/package.json': m('dup', '1.0.0') }));
+  s.registry.tarballs.set(url('h1', '1.1.0'), packageTarball('h1', '1.1.0', {}, {
+    'node_modules/dup/package.json': m('dup', '1.0.0'), 'node_modules/ghost/package.json': m('ghost', '1.0.0', { postinstall: 'node g.js' }),
+  }));
+  // The second install of dup@1.0.0 gains a script in its new bundler.
+  s.registry.tarballs.set(url('h2', '1.1.0'), packageTarball('h2', '1.1.0', {}, { 'node_modules/dup/package.json': m('dup', '1.0.0', { install: 'node d.js' }) }));
+  s.registry.tarballs.set(url('h3', '1.0.0'), packageTarball('h3', '1.0.0', {}, { 'node_modules/src/package.json': m('src', '1.0.0') }));
+  s.registry.tarballs.set(url('h3', '1.1.0'), packageTarball('h3', '1.1.0', {}, { 'node_modules/src/package.json': m('src', '1.0.1', { preinstall: 'node s.js' }) }));
+  const review = await s.opened();
+
+  const titles = review.comments.map((c) => c.body.split('\n')[0]).sort();
+  assert.ok(titles.includes('**h1 adds an install script**'), titles.join());
+  assert.match(review.comments.find((c) => c.body.startsWith('**h1'))!.body, /`node_modules\/ghost postinstall`: `node g\.js`/);
+  assert.ok(titles.includes('**src adds an install script**'), titles.join());
+  assert.ok(!s.registry.fetched.includes(url('src', '1.0.1')), 'read from h3, not fetched on its own');
+  // dup@1.0.0 is one change (its first install, under h1); its copy under h2 is h2's.
+  assert.ok(!titles.includes('**dup adds an install script**'), titles.join());
+  assert.match(review.comments.find((c) => c.body.startsWith('**h2'))!.body, /`node_modules\/dup install`: `node d\.js`/);
+});
+
 test('a failed fetch spends the bytes it received, so oversized tarballs can\'t each take the whole budget', async () => {
   const big = (n: string) => packageTarball(n, '1.0.1', {}, { 'blob.bin': Array.from({ length: 4000 }, (_, i) => `${n}${i}`).join('') });
   const s = setup({ 'node_modules/x1': pkg('x1', '1.0.0'), 'node_modules/x2': pkg('x2', '1.0.0') },
