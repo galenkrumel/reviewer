@@ -213,7 +213,7 @@ test('a later push that moves past the Advisory has its Thread verified Fixed by
   s.github.advisoryDb.push({ ...XSS, package: 'dompurify', versions: ['3.4.16'] });
   const thread = threadFor(s, (await s.opened()).comments[0]!);
 
-  // With code too: a lockfile-only push runs no reviewers yet, which blocks on its own.
+  // With code too, so the push is a full one for every focus.
   const review = await s.push({ [LOCK]: purify('3.4.17'), 'src/a.ts': 'c\n' });
   assert.equal(review.event, 'APPROVE', review.body);
   assert.equal(s.model.requestsFor('verifier').length, 0);
