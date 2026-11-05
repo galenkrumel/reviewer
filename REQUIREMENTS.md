@@ -339,7 +339,7 @@ Webhook signatures are verified with the App's webhook secret. Unsigned or inval
 26. A package resolved from outside the npm registry is posted as a `medium` Finding on its lockfile line.
 27. A Dependency check Finding is waived like any other; a later push that moves past it has its thread verified Fixed without a model, and one that still has it keeps it on its thread without a duplicate.
 28. A failed advisory lookup blocks approval and is named in the summary.
-29. A PR changing a supported lockfile runs the security focus whatever the orchestrator outputs or per-repo config says, even with no code changed, and it receives the Dependency check's output inside an untrusted-data block.
+29. A PR changing a supported lockfile that per-repo `exclude` globs and `.gitattributes` marks leave in runs the security focus whatever the orchestrator outputs or per-repo config says, even with no code changed, and it receives the Dependency check's output inside an untrusted-data block.
 30. A lockfile-only PR that fixes Advisories and introduces none is approved with approvals on when nothing else blocks; a PR changing only excluded files and no supported lockfile still says no reviewers ran.
 31. A security-focus Finding anchored on a package's lockfile line is posted; a model can't remove or soften an introduced Advisory's Finding.
 

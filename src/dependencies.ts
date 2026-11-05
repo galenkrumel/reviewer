@@ -407,8 +407,9 @@ function redact(resolved: string): string {
 export function describeCheck(check: DependencyCheck): string {
   let room = MAX_DESCRIBED;
   const lines: string[] = [];
-  // Names, paths and sources are the PR's: one line each, so none can forge another (a fake "fixed" Advisory).
-  const line = (l: string) => void lines.push(l.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').slice(0, MAX_LINE));
+  // Names, paths and sources are the PR's: one line each, so none can forge another (a fake "fixed" Advisory), and no
+  // `<`, so none even looks like a tag that closes the block. No package name or version has one.
+  const line = (l: string) => void lines.push(l.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/</g, '\u2039').slice(0, MAX_LINE));
   for (const { path, changes } of check.lockfiles) {
     line(`${clip(path)}:`);
     if (!changes.length) line('- no packages moved');
