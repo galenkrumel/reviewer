@@ -163,21 +163,28 @@ const aliasOf = (ref: string) => /^\/?((?:@[^@/():]+\/)?[^@/():]+)@[^(]/.exec(re
 
 /**
  * The registries `.npmrc` text sets: `registry=` under `''`, `@scope:registry=` under `@scope`, the last setting winning
- * (so text read later, the lockfile's directory after the root, overrides). Only those keys are read: the file can hold
- * auth tokens. A URL keeps no userinfo, query or fragment, and ends in `/`; anything else (`${NPM_REGISTRY}`) is kept as
- * written, which no URL check takes for npm's.
+ * (so text read later, the lockfile's directory after the root, overrides key by key), read as npm's ini does: quoted
+ * keys and values, inline `;`/`#` comments, nothing under a `[section]`. Only those keys are read: the file can hold auth
+ * tokens. So can a registry URL, in its userinfo, query or path (Gemfury's): one that isn't npm's default keeps only its
+ * host, the path shown as `…`. A `${VAR}` is kept by name; any other value that isn't a URL is an unknown registry.
+ * ponytail: a registry set outside the repo (user or global config, `npm_config_registry`) can't be seen; it reads as
+ * npm's default. Note it in the summary if that misleads.
  */
 function npmrcRegistries(text: string | undefined): Map<string, string> {
   const out = new Map<string, string>();
-  for (const m of (text ?? '').matchAll(/^[ \t]*(@[^\s:=/]+:)?registry[ \t]*=[ \t]*(.*?)[ \t]*$/gm)) {
-    const value = m[2]!.replace(/^(["'])(.*)\1$/, '$2');
-    let registry = value;
+  const top = (text ?? '').split(/^[ \t]*\[/m)[0]!;
+  for (const m of top.matchAll(/^[ \t]*(["']?)(@[^\s:=/"']+:)?registry\1[ \t]*=(.*)$/gm)) {
+    const raw = m[3]!.trim();
+    const value = /^(["'])(.*?)\1/.exec(raw)?.[2] ?? raw.split(/[;#]/)[0]!.trim();
+    let registry: string;
     try {
       const url = new URL(value);
-      url.username = url.password = url.search = url.hash = '';
-      registry = url.href;
-    } catch { /* not a URL */ }
-    out.set(m[1]?.slice(0, -1) ?? '', registry.endsWith('/') ? registry : `${registry}/`);
+      const href = `${url.protocol}//${url.host}${url.pathname.replace(/\/?$/, '/')}`;
+      registry = href === REGISTRY ? REGISTRY : `${url.protocol}//${url.host}/${url.pathname.replace(/\/$/, '') ? '…/' : ''}`;
+    } catch {
+      registry = /^\$\{\w+\}$/.test(value) ? `${value}/` : 'unknown registry/';
+    }
+    out.set(m[2]?.slice(0, -1) ?? '', registry);
   }
   return out;
 }
