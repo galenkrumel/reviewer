@@ -80,7 +80,10 @@ export interface RecordedInvocation {
 
 /** A re-decision runs no reviewers: it decides approval again from a published run's findings and the threads now. */
 export const isRedecision = (event: string) => !event.startsWith('pull_request.');
-/** A retry runs only the focuses that failed in the latest run at its head and base, reusing the others' findings. */
+/**
+ * A retry runs only the focuses that failed in the latest run at its head and base, reusing the others' findings; a
+ * run that failed outright is run again in full.
+ */
 export const RETRY = 'pull_request.retry';
 const FULL_RUN = `event LIKE 'pull_request.%'`;
 /** A run's cost, summed over its invocations, as a column of `runs`. */
@@ -318,11 +321,11 @@ export function openStore(dataDir: string, clock: Clock) {
       };
     },
 
-    /** The head and base of the PR's latest full run that wasn't skipped: what a retry retries. */
-    latestRun(repo: string, pr: number): { headSha: string; baseSha: string } | undefined {
-      const row = db.prepare(`SELECT head_sha, base_sha FROM runs WHERE repo = ? AND pr = ? AND ${FULL_RUN}
+    /** The head, base and status of the PR's latest full run that wasn't skipped: what a retry retries. */
+    latestRun(repo: string, pr: number): { headSha: string; baseSha: string; status: RunStatus } | undefined {
+      const row = db.prepare(`SELECT head_sha, base_sha, status FROM runs WHERE repo = ? AND pr = ? AND ${FULL_RUN}
         AND status != 'skipped' ORDER BY id DESC LIMIT 1`).get(repo, pr) as any;
-      return row && { headSha: row.head_sha, baseSha: row.base_sha };
+      return row && { headSha: row.head_sha, baseSha: row.base_sha, status: row.status };
     },
 
     /**

@@ -83,7 +83,8 @@ The App also subscribes to `issue_comment` (which needs the Issues read permissi
 
 - A retry of a published run with failed focuses runs no orchestrator. It runs the same focuses: the failed ones again, under the same incremental or full scope as that run (§7.2), and the succeeded ones not at all, reusing their findings as that run decided them (a published one is already a thread). The Dependency check runs again as on every run. Only the rerun focuses' findings and the Dependency check's are validated, deduplicated against the findings already posted at this head and earlier ones, and capped at what is left of the comment cap. It then re-checks threads, decides approval and publishes like a full run; its summary names the focuses it retried.
 - A retry of a run that failed outright (its review couldn't be posted, or it failed before its focuses finished) is a full review of that head.
-- With nothing failed (the latest run published with every focus succeeded, posted nothing, or is still queued or running), a retry is recorded `skipped` and nothing is posted.
+- A `Retry` while that run is still queued or running is ignored, however the run ends.
+- With nothing failed (the latest run published with every focus succeeded, or posted nothing), a retry is recorded `skipped` and nothing is posted.
 - It bypasses the duplicate check for its head and base, but a retry still queued for that head absorbs another. It never supersedes another run; a push supersedes it as usual.
 - It records every focus, each reused one with the run that actually ran it, and all the findings, so a later push, re-decision or retry builds on it as on any full run.
 

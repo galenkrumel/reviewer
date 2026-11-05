@@ -386,6 +386,8 @@ export function createApp(deps: {
       subject = payload.issue;
       const latest = Number.isInteger(subject?.number) ? store.latestRun(repo, subject.number) : undefined;
       if (!latest) return { status: 202, ignored: 'no review to retry on this PR' };
+      // Retried as it stands when the comment lands: one still going has nothing to retry yet.
+      if (latest.status === 'queued' || latest.status === 'running') return { status: 202, ignored: 'the latest review is still in progress' };
       ({ headSha, baseSha } = latest);
     }
     if (!Number.isInteger(payload.installation?.id) || !headSha || !baseSha) return { status: 400 };

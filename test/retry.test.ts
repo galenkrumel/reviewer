@@ -131,6 +131,14 @@ test('"Retry" from someone who isn\'t a maintainer, any other comment, or on a P
   assert.equal(app.runs().length, runs);
 });
 
+test('"Retry" while the latest run is still queued is ignored, however that run ends', async () => {
+  const { app, pr } = await failedRun();
+  const runs = app.runs().length;
+  await app.receive(delivery('pull_request', prPayload('labeled', REPO, pr, { label: { name: 'ai-review' } })));
+  assert.match((await app.receive(comment('Retry'))).ignored!, /still in progress/);
+  assert.equal(app.runs().length, runs + 1);
+});
+
 test('the Dependency check\'s finding is posted once however many retries follow', async () => {
   const lock = (v: string) => JSON.stringify({ name: 'app', lockfileVersion: 3, requires: true, packages: {
     '': { name: 'app' }, 'node_modules/dompurify': { version: v, resolved: `https://registry.npmjs.org/dompurify/-/dompurify-${v}.tgz`, integrity: `sha512-${v}` },

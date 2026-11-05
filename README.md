@@ -226,7 +226,7 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
   reviewer is retried once, and if it still fails, its focus is marked failed and the other reviewers' findings are
   still posted. To finish that review (after an OpenRouter outage, or once credits are topped up), a maintainer
   comments `Retry` on the PR: only the focuses that failed in its latest review run again, the others' findings are
-  reused, and the App decides and posts as usual. A `Retry` when nothing failed is recorded as a skipped run and posts nothing. A run that failed
+  reused, and the App decides and posts as usual. A `Retry` when nothing failed is recorded as a skipped run and posts nothing, and one while a review is still running is ignored. A run that failed
   outright (e.g. its review couldn't be posted) is run again in full.
 - **Run records** are in `$DATA_DIR/reviewer.db`, table `runs`. A failed run has status `failed` and an `error`
   prefixed with its step, e.g. `fetch: …`. Per-focus status, per-agent model, tokens and cost, and every finding's
