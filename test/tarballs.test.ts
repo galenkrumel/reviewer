@@ -40,7 +40,7 @@ function setup(base: Record<string, object>, head: Record<string, object>, confi
     await t.app.drain();
     return github.reviews.at(-1)!.review;
   };
-  return { ...t, fx, pr, registry, headLock, opened };
+  return { ...t, fx, pr, registry, model, headLock, opened };
 }
 
 test('an install script the new version adds is posted inline as high; one the old version already had is not', async () => {
@@ -60,6 +60,17 @@ test('an install script the new version adds is posted inline as high; one the o
   assert.match(c.body, /`postinstall`: `node steal\.js`/);
   assert.equal(review.event, 'COMMENT');
   assert.deepEqual(s.registry.fetched.sort(), [url('fresh', '1.0.0'), url('fresh', '1.1.0'), url('steady', '1.0.0'), url('steady', '1.1.0')]);
+  // The security focus is told too.
+  const told = JSON.stringify(s.model.requestsFor('security')[0]!.messages);
+  assert.match(told, /fresh 1\.0\.0 → 1\.1\.0[^"]*new install scripts: postinstall: node steal\.js/);
+});
+
+test("the security focus is told which packages weren't inspected", async () => {
+  const s = setup({ 'node_modules/gone': pkg('gone', '1.0.0') }, { 'node_modules/gone': pkg('gone', '1.0.1') });
+  s.registry.missing.add(url('gone', '1.0.1'));
+  await s.opened();
+
+  assert.match(JSON.stringify(s.model.requestsFor('security')[0]!.messages), /not inspected\): gone 1\.0\.1/);
 });
 
 test("an install-script Thread isn't verified Fixed by a push whose tarball couldn't be fetched, and is once one without it is", async () => {

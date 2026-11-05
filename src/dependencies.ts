@@ -35,6 +35,10 @@ export interface PackageChange {
   advisories?: ClassifiedAdvisory[];
   /** Install scripts its fetched tarball has that the version it moved from didn't (any, when added), by name. */
   installScripts?: Record<string, string>;
+  /** What depends on it by name, from the same side as `resolved`: other packages, the root project or workspaces. */
+  pulledBy?: string[];
+  /** Set when that side's lockfile had more dependency edges than the check records, so `pulledBy` may miss some. */
+  pulledByPartial?: true;
 }
 
 /** A package change whose code the check couldn't fetch and read, so nothing vouches for it. */
@@ -96,13 +100,19 @@ interface Entry {
   /** For a bundled package, the key of the nearest enclosing package that isn't bundled, and its folder in there. */
   bundledBy?: { key: string; folder: string };
 }
+/** A lockfile's installed packages, and what depends on each name. */
+interface Lock { list: Entry[]; pulledBy: Map<string, Set<string>>; partial: boolean }
+// Dependency edges recorded per lockfile, about ten times a big monorepo's: past it a crafted lockfile can't grow the map.
+const MAX_EDGES = 500_000;
+const DEPENDENCY_MAPS = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];
 
 /**
  * A package-lock.json's installed packages (lockfile versions 2 and 3), or undefined when it isn't one. Workspace
  * folders and links are the repo's own code; bundled packages count, though they have no source of their own.
  */
-function entries(text: string | undefined): Entry[] | undefined {
-  if (text === undefined) return [];
+function entries(text: string | undefined): Lock | undefined {
+  const pulledBy = new Map<string, Set<string>>();
+  if (text === undefined) return { list: [], pulledBy, partial: false };
   let lock: any;
   try {
     lock = JSON.parse(text);
@@ -115,10 +125,24 @@ function entries(text: string | undefined): Entry[] | undefined {
   let count = 0;
   for (const _ in packages) if (++count > MAX_ENTRIES) return;
   const out: Entry[] = [];
+  let [edges, partial] = [0, false];
   for (const key in packages) {
     const e = packages[key];
     if (typeof e !== 'object' || e === null) return;
     const at = key.lastIndexOf('node_modules/');
+    // ponytail: by name, not by the version node would resolve from where it sits; good enough for the security
+    // focus's context, resolve nested node_modules if it misleads.
+    const by = typeof e.name === 'string' ? e.name : at < 0 ? key || '(root)' : key.slice(at + 'node_modules/'.length);
+    for (const map of DEPENDENCY_MAPS) {
+      const deps = e[map];
+      if (partial || typeof deps !== 'object' || deps === null) continue;
+      for (const d in deps) {
+        if (++edges > MAX_EDGES) { partial = true; break; }
+        const set = pulledBy.get(d) ?? new Set();
+        set.add(by);
+        pulledBy.set(d, set);
+      }
+    }
     if (at < 0 || e.link) continue;
     // An installed package always records its version: one without is not a lockfile the check understands.
     if (typeof e.version !== 'string') return;
@@ -139,7 +163,13 @@ function entries(text: string | undefined): Entry[] | undefined {
     }
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundledBy && { bundledBy }) });
   }
-  return out;
+  // Dependents name what they install (an alias); changes are by the real name, so an alias's dependents count there too.
+  for (const e of out) {
+    const installed = e.key.slice(e.key.lastIndexOf('node_modules/') + 'node_modules/'.length);
+    const via = installed === e.name ? undefined : pulledBy.get(installed);
+    if (via) pulledBy.set(e.name, new Set([...(pulledBy.get(e.name) ?? []), ...via]));
+  }
+  return { list: out, pulledBy, partial };
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
@@ -235,26 +265,34 @@ export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { nu
  * install now resolves from elsewhere, or with another integrity, is a change from that version to itself.
  */
 export function compareLockfile(base: string | undefined, head: string | undefined): PackageChange[] | undefined {
-  const [before, after] = [entries(base), entries(head)];
-  if (!before || !after) return;
+  const [baseLock, headLock] = [entries(base), entries(head)];
+  if (!baseLock || !headLock) return;
+  const [before, after] = [baseLock.list, headLock.list];
   const [old, now] = [byName(before), byName(after)];
   const atKey = new Map(before.map((e) => [e.key, e]));
   const atHead = new Map(after.map((e) => [e.key, e]));
+  // At most 20 dependents each: context for the security focus, not an inventory.
+  const dependents = (name: string, removed: boolean) => [...((removed ? baseLock : headLock).pulledBy.get(name) ?? [])].sort().slice(0, 20);
   const lines = head === undefined ? new Map<string, number>() : versionLines(head);
   const changes: PackageChange[] = [];
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
     const was = old.get(name) ?? new Map<string, Entry[]>();
     const is = now.get(name) ?? new Map<string, Entry[]>();
     // `baseInstall` is the install a move or swap replaced, for where the old version resolved.
-    const push = (e: Entry, from?: string, to?: string, baseInstall?: Entry) => changes.push({
-      name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
-      ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
-      ...(to !== undefined && baseInstall?.resolved !== undefined && { fromResolved: baseInstall.resolved }),
-      ...(to !== undefined && e.bundledBy && {
-        bundledIn: { ...(atHead.get(e.bundledBy.key)?.resolved !== undefined && { resolved: atHead.get(e.bundledBy.key)!.resolved }), folder: e.bundledBy.folder },
-      }),
-      ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
-    });
+    const push = (e: Entry, from?: string, to?: string, baseInstall?: Entry) => {
+      const pulledBy = dependents(name, to === undefined);
+      changes.push({
+        name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
+        ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
+        ...(to !== undefined && baseInstall?.resolved !== undefined && { fromResolved: baseInstall.resolved }),
+        ...(to !== undefined && e.bundledBy && {
+          bundledIn: { ...(atHead.get(e.bundledBy.key)?.resolved !== undefined && { resolved: atHead.get(e.bundledBy.key)!.resolved }), folder: e.bundledBy.folder },
+        }),
+        ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
+        ...(pulledBy.length && { pulledBy }),
+        ...((to === undefined ? baseLock : headLock).partial && { pulledByPartial: true as const }),
+      });
+    };
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
     const added = [...is.keys()].filter((v) => !was.has(v)).sort(byVersion);
     for (let i = 0; i < Math.max(removed.length, added.length); i++) {
@@ -586,4 +624,66 @@ export function dependencyFindings(check: DependencyCheck): Finding[] {
       }] : []),
     ];
   }));
+}
+
+// ponytail: past this many package changes the rest are only counted; page through them with a tool if big bumps need it.
+const MAX_DESCRIBED = 300;
+// Each PR-controlled field is clipped on its own, so the check's notes after it always fit within the line's cap.
+const MAX_FIELD = 200;
+const MAX_LINE = 8000;
+const clip = (s: string, max = MAX_FIELD) => (s.length > max ? `${s.slice(0, max)}…` : s);
+const major = (v: string) => v.split('.')[0];
+
+/**
+ * A source without what could be a credential: URL userinfo (`user:token@`) and the query string. A git URL's `#commit`
+ * stays: it says what installs.
+ */
+function redact(resolved: string): string {
+  try {
+    const url = new URL(resolved);
+    url.username = url.password = url.search = '';
+    return url.href;
+  } catch {
+    return resolved.replace(/^([^/?#]*\/\/)[^/?#@]*@/, '$1').replace(/\?[^#]*/, '');
+  }
+}
+
+/**
+ * The check's output as the security focus reads it, inside an untrusted-data block: package names, versions, sources
+ * and advisory summaries all come from the PR or the advisory database.
+ */
+export function describeCheck(check: DependencyCheck): string {
+  let room = MAX_DESCRIBED;
+  const lines: string[] = [];
+  // Names, paths and sources are the PR's: one line each, so none can forge another (a fake "fixed" Advisory), and no
+  // `<`, so none even looks like a tag that closes the block. No package name or version has one.
+  const line = (l: string) => void lines.push(l.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ').replace(/</g, '\u2039').slice(0, MAX_LINE));
+  for (const { path, changes } of check.lockfiles) {
+    line(`${clip(path)}:`);
+    if (!changes.length) line('- no packages moved');
+    for (const c of changes.slice(0, Math.max(0, room))) {
+      const notes = [
+        c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
+        c.line !== undefined && `line ${c.line}`,
+        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(redact(c.resolved))}`,
+        c.pulledBy && `pulled in by ${c.pulledBy.map((d) => clip(d, 100)).join(', ')}`,
+        c.pulledByPartial && 'dependents only partly recorded (the lockfile has more dependency entries than the check reads)',
+        c.installScripts && `new install scripts: ${Object.entries(c.installScripts).map(([k, v]) => `${clip(k, 100)}: ${clip(v, 200)}`).join(', ')}`,
+      ].filter(Boolean);
+      const move = describeMove({ ...c, from: c.from && clip(c.from), to: c.to && clip(c.to) });
+      line(`- ${clip(c.name)} ${move}${notes.length ? `, ${notes.join('; ')}` : ''}`);
+      for (const a of c.advisories ?? []) {
+        line(`  - ${a.status}: ${a.id} (${a.severity}): ${clip(a.summary, 1000)}${a.firstPatched ? `. First patched in ${a.firstPatched}` : ''}`);
+      }
+    }
+    if (changes.length > room) line(`- …and ${changes.length - Math.max(0, room)} more package changes, not listed`);
+    room -= changes.length;
+  }
+  if (check.advisoryError !== undefined) line("Advisories couldn't be looked up: none are listed.");
+  if (check.unreadable.length) line(`Lockfiles the check couldn't understand: ${check.unreadable.slice(0, 20).map((p) => clip(p)).join(', ')}`);
+  if (check.notInspected?.length) {
+    line(`Packages whose published code the check couldn't fetch and read (not inspected): ${
+      check.notInspected.slice(0, 20).map((n) => `${clip(n.name)} ${clip(n.version)}`).join(', ')}${check.notInspected.length > 20 ? ', …' : ''}`);
+  }
+  return lines.join('\n');
 }

@@ -85,16 +85,19 @@ export function fallbackPicks(paths: string[]): Pick[] {
 }
 
 /**
- * Always-on focuses first when code changed, then picks in order, deduplicated and capped.
- * Disabled focuses leave before the cap, so they take no slot; only documentation, of the always-on ones, can be disabled.
+ * Always-on focuses first when code changed (security alone when only dependencies are to be reviewed), then picks in order,
+ * deduplicated and capped. Disabled focuses leave before the cap, so they take no slot; only documentation, of the
+ * always-on ones, can be disabled.
  */
-export function selectFocuses(picks: Pick[], paths: string[], maxReviewers: number, disabled: ReadonlySet<Focus> = new Set()): Pick[] {
+export function selectFocuses(
+  picks: Pick[], paths: string[], maxReviewers: number, disabled: ReadonlySet<Focus> = new Set(), reviewDependencies = false,
+): Pick[] {
   const out: Pick[] = [];
   const add = (p: Pick) => disabled.has(p.focus) || out.some((o) => o.focus === p.focus) || out.push(p);
-  if (paths.some((p) => !NON_CODE.test(p))) {
-    for (const focus of ['correctness', 'security', 'documentation'] as const) {
-      add(picks.find((p) => p.focus === focus) ?? { focus, reason: 'always runs when code changes' });
-    }
+  const code = paths.some((p) => !NON_CODE.test(p));
+  const always = code ? ['correctness', 'security', 'documentation'] as const : reviewDependencies ? ['security'] as const : [];
+  for (const focus of always) {
+    add(picks.find((p) => p.focus === focus) ?? { focus, reason: code ? 'always runs when code changes' : 'always runs on dependency changes' });
   }
   picks.forEach(add);
   return out.slice(0, maxReviewers);
