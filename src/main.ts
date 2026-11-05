@@ -93,7 +93,7 @@ const app = createApp({
 await app.checkModels();
 
 // Startup pruned already; then daily.
-setInterval(() => {
+const daily = setInterval(() => {
   try {
     app.prune();
   } catch (err) {
@@ -106,7 +106,7 @@ const kick = () => app.drain().catch((err) => log({ level: 'error', msg: 'worker
 // GitHub caps webhook payloads at 25 MB; anything bigger is not GitHub.
 const MAX_BODY = 25 * 1024 * 1024;
 
-createServer((req, res) => {
+const server = createServer((req, res) => {
   try {
     const page = app.dashboard(req);
     if (page) return res.writeHead(page.status, page.headers).end(req.method === 'HEAD' ? undefined : page.body);
@@ -143,3 +143,19 @@ createServer((req, res) => {
 }).listen(port, () => log({ level: 'info', msg: 'listening', port }));
 
 kick();
+
+// Render sends SIGTERM on deploy and kills the process after 30s. Stop taking webhooks and jobs, let running ones stop
+// at their next model call (re-queued, their spend recorded), then exit before the kill.
+// ponytail: a model call still in flight at the deadline loses its cost; abort it with a signal if that matters.
+const SHUTDOWN_MS = 25_000;
+process.once('SIGTERM', async () => {
+  log({ level: 'info', msg: 'shutting down' });
+  app.stop();
+  server.close();
+  clearInterval(daily);
+  const deadline = new Promise<'timeout'>((r) => setTimeout(r, SHUTDOWN_MS, 'timeout').unref());
+  const outcome = await Promise.race([app.drain().then(() => 'drained' as const, () => 'drained' as const), deadline]);
+  log({ level: outcome === 'timeout' ? 'warn' : 'info', msg: 'shut down', outcome });
+  app.close();
+  process.exit(0);
+});
