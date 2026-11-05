@@ -162,12 +162,35 @@ function splitKey(key: string): [string | undefined, string | undefined] {
 const aliasOf = (ref: string) => /^\/?((?:@[^@/():]+\/)?[^@/():]+)@[^(]/.exec(ref)?.[1];
 
 /**
+ * The registries `.npmrc` text sets: `registry=` under `''`, `@scope:registry=` under `@scope`, the last setting winning
+ * (so text read later, the lockfile's directory after the root, overrides). Only those keys are read: the file can hold
+ * auth tokens. A URL keeps no userinfo, query or fragment, and ends in `/`; anything else (`${NPM_REGISTRY}`) is kept as
+ * written, which no URL check takes for npm's.
+ */
+function npmrcRegistries(text: string | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of (text ?? '').matchAll(/^[ \t]*(@[^\s:=/]+:)?registry[ \t]*=[ \t]*(.*?)[ \t]*$/gm)) {
+    const value = m[2]!.replace(/^(["'])(.*)\1$/, '$2');
+    let registry = value;
+    try {
+      const url = new URL(value);
+      url.username = url.password = url.search = url.hash = '';
+      registry = url.href;
+    } catch { /* not a URL */ }
+    out.set(m[1]?.slice(0, -1) ?? '', registry.endsWith('/') ? registry : `${registry}/`);
+  }
+  return out;
+}
+
+/**
  * A pnpm-lock.yaml's installed packages (lockfile versions 6 and 9, from every document: pnpm 10 puts an env lockfile
  * ahead of the main one), or undefined when it isn't one. Peer variants of one version are that one package; directory
- * packages are the repo's own code. A resolution with only an integrity is a tarball on the default registry, as pnpm
- * fetches it. ponytail: pnpm doesn't record a registry set in `.npmrc`, so a package from one reads as from npm's.
+ * packages are the repo's own code. A resolution with only an integrity is a tarball on the registry `.npmrc` sets for
+ * the package's scope, or for every package, else npm's default, as pnpm fetches it.
  */
-function pnpmEntries(text: string | undefined): Lock | undefined {
+function pnpmEntries(text: string | undefined, npmrc?: string): Lock | undefined {
+  const registries = npmrcRegistries(npmrc);
+  const registryOf = (name: string) => (name.startsWith('@') && registries.get(name.split('/')[0]!)) || registries.get('') || REGISTRY;
   const pulledBy = new Map<string, Set<string>>();
   const lines = new Map<string, number>();
   if (text === undefined) return { list: [], pulledBy, partial: false, lines };
@@ -217,7 +240,7 @@ function pnpmEntries(text: string | undefined): Lock | undefined {
       // A key and fields that disagree could install one package and be looked up as another.
       if (!name || !v || (keyName !== undefined && name !== keyName) || (ref !== undefined && SEMVER.test(ref) && v !== ref)) return;
       const resolved = r.type === undefined
-        ? str(r.tarball) ?? (typeof r.integrity === 'string' ? `${REGISTRY}${name}/-/${name.split('/').pop()}-${v}.tgz` : undefined)
+        ? str(r.tarball) ?? (typeof r.integrity === 'string' ? `${registryOf(name)}${name}/-/${name.split('/').pop()}-${v}.tgz` : undefined)
         : r.type === 'git' && typeof r.repo === 'string' && typeof r.commit === 'string' ? `git+${r.repo}#${r.commit}` : undefined;
       // As for npm: a registry tarball must be this package at this version, so what installs is what is looked up.
       if (resolved === undefined || (resolved.startsWith(REGISTRY) && !isTarballOf(resolved, name, v))) return;
@@ -303,7 +326,15 @@ export async function checkDependencies(
       const size = (t: string | undefined) => (t === undefined ? 0 : Buffer.byteLength(t));
       if (useBase) text += size(base = await read('base', old));
       if (useHead && text <= MAX_RUN_TEXT) text += size(head = await read('head', f.path));
-      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head, name);
+      // pnpm doesn't record the registry: each side's `.npmrc`, the lockfile directory's after the root's, says where.
+      const npmrc = async (side: 'base' | 'head', lockfile: string) => {
+        const dir = posix.join(posix.dirname(lockfile), '.npmrc');
+        return [await read(side, '.npmrc'), dir === '.npmrc' ? undefined : await read(side, dir)].join('\n');
+      };
+      if (text <= MAX_RUN_TEXT) {
+        changes = compareLockfile(base, head, name, name === 'pnpm-lock.yaml'
+          ? { base: useBase ? await npmrc('base', old) : undefined, head: useHead ? await npmrc('head', f.path) : undefined } : {});
+      }
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
@@ -324,9 +355,11 @@ export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { nu
  * added versions pair up in version order as moves; the rest are added or removed. A version on both sides that some
  * install now resolves from elsewhere, or with another integrity, is a change from that version to itself.
  */
-export function compareLockfile(base: string | undefined, head: string | undefined, file = 'package-lock.json'): PackageChange[] | undefined {
-  const read = file === 'pnpm-lock.yaml' ? pnpmEntries : entries;
-  const [baseLock, headLock] = [read(base), read(head)];
+export function compareLockfile(
+  base: string | undefined, head: string | undefined, file = 'package-lock.json', npmrc: { base?: string; head?: string } = {},
+): PackageChange[] | undefined {
+  const [baseLock, headLock] = file === 'pnpm-lock.yaml'
+    ? [pnpmEntries(base, npmrc.base), pnpmEntries(head, npmrc.head)] : [entries(base), entries(head)];
   if (!baseLock || !headLock) return;
   const [before, after] = [baseLock.list, headLock.list];
   const [old, now] = [byName(before), byName(after)];

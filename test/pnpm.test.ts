@@ -290,7 +290,7 @@ async function opened(base: Record<string, string>, head: Record<string, string>
   const t = testApp({ model, github, config });
   await t.app.receive(delivery('pull_request', openedPayload(REPO, pr)));
   await t.app.drain();
-  return { review: github.reviews.at(-1)!.review, model, github };
+  return { review: github.reviews.at(-1)!.review, model, github, logs: t.logs };
 }
 
 test('a pnpm-lock.yaml change is listed in the summary, and its introduced Advisory posted on the package key line', async () => {
@@ -311,4 +311,52 @@ test('a pnpm-lock.yaml of an unknown lockfile version is named as not understood
   assert.equal(review.event, 'COMMENT');
   assert.match(review.body, /Not understood by the dependency check: `pnpm-lock\.yaml`/);
   assert.match(review.body, /\*\*Not approved:\*\*[^\n]*the dependency check couldn't understand `pnpm-lock\.yaml`/);
+});
+
+test("an integrity-only package resolves from the registry the repo's .npmrc sets for its scope, or for every package", () => {
+  const lock = v9(entry('@acme/ui', '1.0.0') + entry('dompurify', '3.4.17'), '');
+  const resolved = (npmrc: string) => compareLockfile(undefined, lock, PNPM, { head: npmrc })?.map((c) => [c.name, c.resolved]);
+  assert.deepEqual(resolved('; private scope\n@acme:registry = "https://npm.acme.dev/repo"\n'), [
+    ['@acme/ui', 'https://npm.acme.dev/repo/@acme/ui/-/ui-1.0.0.tgz'],
+    ['dompurify', 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz'],
+  ]);
+  assert.deepEqual(resolved('registry=https://mirror.example/npm/\n'), [
+    ['@acme/ui', 'https://mirror.example/npm/@acme/ui/-/ui-1.0.0.tgz'],
+    ['dompurify', 'https://mirror.example/npm/dompurify/-/dompurify-3.4.17.tgz'],
+  ]);
+  // npm's default however it is written; the last setting wins, as a later .npmrc (the lockfile's directory) overrides.
+  assert.deepEqual(resolved('registry=https://mirror.example/\nregistry=HTTPS://registry.npmjs.org\n')?.map(([, r]) => r),
+    ['https://registry.npmjs.org/@acme/ui/-/ui-1.0.0.tgz', 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz']);
+  // Credentials in the URL never reach `resolved`; auth lines aren't read at all.
+  const secret = resolved('//npm.acme.dev/:_authToken=SECRET\n@acme:registry=https://u:SECRET@npm.acme.dev/?t=SECRET\n');
+  assert.ok(!JSON.stringify(secret).includes('SECRET'), JSON.stringify(secret));
+  assert.equal(secret?.[0]?.[1], 'https://npm.acme.dev/@acme/ui/-/ui-1.0.0.tgz');
+  // A registry from the environment is unknowable: off-registry, from an unrecognised source.
+  const env = compareLockfile(undefined, lock, PNPM, { head: 'registry=${NPM_REGISTRY}' })!;
+  assert.deepEqual(dependencyFindings({ lockfiles: [{ path: PNPM, changes: env }], unreadable: [], unchecked: [] })
+    .map((f) => [f.title, /an unrecognised source/.test(f.evidence)]),
+  [['@acme/ui resolves from outside the npm registry', true], ['dompurify resolves from outside the npm registry', true]]);
+});
+
+test(".npmrc at the root and next to the lockfile decide where a pnpm package resolves, and none of its secrets get out", async () => {
+  const lock = (extra = '') => v9(entry('dompurify', '3.4.10') + extra, '');
+  const npmrc = {
+    '.npmrc': 'registry=https://mirror.example/\n//npm.acme.dev/:_authToken=SECRET\n@acme:registry=https://u:SECRET@npm.acme.dev/\n',
+    // The lockfile's own directory overrides the root's repo-wide registry.
+    'web/.npmrc': 'registry=https://registry.npmjs.org/\n',
+  };
+  const fx = await opened({ ...npmrc, 'web/pnpm-lock.yaml': lock() }, {
+    ...npmrc, 'web/pnpm-lock.yaml': lock(entry('@acme/ui', '1.0.0') + entry('left-pad', '1.3.0')),
+  });
+  // Posting marks the scope's `@` so it mentions no one.
+  assert.deepEqual(fx.review.comments.map((c) => c.body.split('\n')[0]), ['**@​acme/ui resolves from outside the npm registry**']);
+  assert.match(fx.review.comments[0]!.body, /another registry on `npm\.acme\.dev`/);
+  const seen = JSON.stringify([fx.review, fx.model.requests, fx.logs]);
+  assert.ok(seen.includes('npm.acme.dev') && !seen.includes('SECRET'));
+});
+
+test('each side reads its own .npmrc: a PR that switches the registry moves every integrity-only package', () => {
+  const lock = purify('3.4.17');
+  assert.deepEqual(compareLockfile(lock, lock, PNPM, { head: 'registry=https://evil.example/' })?.map(describeMove),
+    ['3.4.17 (source or integrity changed)', '1.3.0 (source or integrity changed)']);
 });
