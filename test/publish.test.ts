@@ -126,6 +126,92 @@ test('a run that fails after being superseded stays superseded', async () => {
   assert.equal(app.runs()[0]!.status, 'superseded');
 });
 
+test('a run superseded mid-reviewer makes no more model calls and records what it spent', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([async () => {
+    await app.receive(delivery('pull_request', prPayload('closed', REPO, pr)));
+    return toolCall('read_file', { path: 'src/math.ts' });
+  }, report()]);
+  const { app, logs } = testApp({ model, github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const run = app.runs()[0]!;
+  assert.equal(run.status, 'superseded');
+  // The orchestrator and the first correctness call, and nothing after the close.
+  assert.deepEqual(model.agents(), ['orchestrator', 'correctness']);
+  assert.equal(model.requestsFor('correctness').length, 1);
+  assert.equal(run.invocations.reduce((n, i) => n + i.cost, 0), 0.002);
+  assert.equal(logs.some((l) => l.level === 'error'), false);
+});
+
+test('a run interrupted by shutdown stops at its next model call, stays queued, and every attempt keeps its cost', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([async () => {
+    app.stop();
+    return toolCall('read_file', { path: 'src/math.ts' });
+  }, report()]);
+  const { app, dataDir, logs } = testApp({ model, github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const run = app.runs()[0]!;
+  assert.equal(run.status, 'queued');
+  // The orchestrator and the first correctness call, and nothing after the stop.
+  assert.deepEqual(model.agents(), ['orchestrator', 'correctness']);
+  assert.equal(model.requestsFor('correctness').length, 1);
+  assert.equal(run.invocations.reduce((n, i) => n + i.cost, 0), 0.002);
+  assert.equal(github.reviews.length, 0);
+  assert.equal(logs.some((l) => l.level === 'error'), false);
+
+  // The new instance re-runs it; superseded partway, it still keeps both attempts' spend.
+  const again = new ScriptedModel([async () => {
+    await next.receive(delivery('pull_request', prPayload('closed', REPO, pr)));
+    return toolCall('read_file', { path: 'src/math.ts' });
+  }, report()]);
+  const { app: next } = testApp({ model: again, github, dataDir });
+  await next.drain();
+
+  const rerun = next.runs()[0]!;
+  assert.equal(rerun.status, 'superseded');
+  assert.equal(rerun.invocations.reduce((n, i) => n + i.cost, 0), 0.004);
+});
+
+test('a run abandoned at the shutdown deadline is re-queued with what it spent so far, recorded once', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([async () => {
+    // The deadline passes while this call is in flight.
+    app.stop();
+    app.abandon();
+    return toolCall('read_file', { path: 'src/math.ts' });
+  }, report()]);
+  const { app, logs } = testApp({ model, github });
+
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  const run = app.runs()[0]!;
+  assert.equal(run.status, 'queued');
+  assert.equal(logs.some((l) => l.level !== 'info'), false);
+  // The orchestrator's call; the one in flight hadn't returned its cost yet.
+  assert.equal(run.invocations.reduce((n, i) => n + i.cost, 0), 0.001);
+});
+
+test('a stopped app claims no queued job', async () => {
+  const { pr, github } = setup();
+  const model = new ScriptedModel([report()]);
+  const { app } = testApp({ model, github });
+
+  app.stop();
+  await app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await app.drain();
+
+  assert.equal(app.runs()[0]!.status, 'queued');
+  assert.equal(model.requests.length, 0);
+});
+
 test('enqueuing a job for a new head supersedes the running job for the old one', async () => {
   const { fx, pr, github, live } = setup();
   const pushed = { ...pr, headSha: fx.baseSha };

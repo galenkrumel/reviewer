@@ -1,0 +1,30 @@
+{
+  "url": "https://github.com/galenkrumel/reviewer",
+  "baseSha": "b6a866ecedf375624752ff0cc3b01d131df2548d",
+  "headSha": "191febdc250a3f38c25683f294a6c19a34752373",
+  "title": "#88: Run a reviewer alone for evals",
+  "body": "Closes #88\n\n## Summary\n\n`runReviewer` can now run outside a Run: the diff it is given and the metered model chat come from shared functions, not from inside `app.ts`.\n\n```diff\n src/\n ├── app.ts            # Run now calls reviewScope and meteredChat\n+├── scope.ts          # reviewScope(source, { exclude, tokenBudget }) → { files, excluded, scope, diff }\n+├── reviewer.ts       # meteredChat(...) moved here; runReviewer takes optional `system`; `prompt` exported\n scripts/\n+└── eval-reviewer.ts  # one focus on one pinned PR → { findings | error, transcript, usage } JSON\n```\n\n```text\neval-reviewer case.json\n  openSource            # repository copy kept in $TMPDIR/reviewer-eval\n  reviewScope           # same exclusions and token budget as a Run\n  runReviewer\n    chat (wrapped)      # keeps the growing message array = full tool transcript\n      meteredChat       # same model, fallback, token budget as a Run\n```\n\nRepo config parsing and the reviews after a push (`diffSince`, `fresh`, `newcomers`) stay in `app.ts`.\n\n## Evidence\n\n- **Before:** no way to get the reviewer's diff without a whole Run.\n  **After:** new test `reviewScope leaves excluded and over-budget files out of the diff and says which they were` (git fixture → `openSource` → `reviewScope`): an `exclude` glob match and an over-budget file are missing from `diff`, and listed in `excluded` and `scope.skipped`. It failed before `reviewScope` existed and passes now.\n- Behavior of a Run is unchanged: the existing suite passes unmodified (191/191), and `npm run typecheck` is clean.\n- Script error path, run offline against a `file://` case with bad SHAs: prints `{ \"error\": \"…not our ref…\", \"transcript\": [], \"usage\": {…} }` and exits 1. It has not been run against a live model.\n\n## Merge Danger\n\n**Door:** two-way\n\nA pure refactor plus a new script; revert restores the old code.\n\n**Blast Radius:** small\n\nEvery Run goes through the moved code, so a mistake there would affect reviews; the unchanged harness tests cover diff building, exclusions and token budgets.",
+  "focus": "architecture",
+  "expected": [
+    {
+      "id": "no-fallback",
+      "path": "scripts/eval-reviewer.ts",
+      "lines": [
+        26,
+        31
+      ],
+      "minSeverity": "low",
+      "defect": "meteredChat is given no fallbackModel, so an eval runs a different model setup from the App"
+    }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "scripts/eval-reviewer.ts",
+      "lines": [
+        36,
+        42
+      ],
+      "title": "Key the eval cache by the full URL"
+    }
+  ]
+}

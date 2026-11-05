@@ -4,6 +4,7 @@ import { posix } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { ToolError, type FileChange, type Source } from './git.ts';
 import { FetchError, type Advisory } from './ports.ts';
+import { Flow, flowMap, readPnpmLock, type YamlMap, type YamlNode } from './pnpmlock.ts';
 import { LOCKFILES } from './scope.ts';
 import type { Finding } from './store.ts';
 
@@ -77,7 +78,7 @@ export interface DependencyCheck {
   notInspected?: NotInspected[];
 }
 
-const SUPPORTED = new Set(['package-lock.json']);
+const SUPPORTED = new Set(['package-lock.json', 'pnpm-lock.yaml']);
 /** npm's default registry: anything else a package resolves from is off-registry. */
 const REGISTRY = 'https://registry.npmjs.org/';
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -110,7 +111,11 @@ interface Entry {
   bundledBy?: BundledAt & { bundler: string };
 }
 /** A lockfile's installed packages, and what depends on each name. */
-interface Lock { list: Entry[]; pulledBy: Map<string, Set<string>>; partial: boolean }
+interface Lock {
+  list: Entry[]; pulledBy: Map<string, Set<string>>; partial: boolean;
+  /** Each entry's anchor line by key, when the reader records them (pnpm's key lines); npm's are found after. */
+  lines?: Map<string, number>;
+}
 // Dependency edges recorded per lockfile, about ten times a big monorepo's: past it a crafted lockfile can't grow the map.
 const MAX_EDGES = 500_000;
 const DEPENDENCY_MAPS = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];
@@ -183,6 +188,89 @@ function entries(text: string | undefined): Lock | undefined {
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
+const isMap = (v: YamlNode | undefined): v is YamlMap => typeof v === 'object' && v !== null && !(v instanceof Flow);
+
+/** `name@ref` without its `(peer@1.0.0)` or `(patch_hash=…)` suffixes: the name ends at the `@` after a scope's. */
+function splitKey(key: string): [string | undefined, string | undefined] {
+  const at = key.indexOf('@', 1);
+  return at < 0 ? [undefined, undefined] : [key.slice(0, at), key.slice(at + 1).split('(')[0]];
+}
+
+/** The real name an aliased dependency installs (`string-width@4.2.3`, `/string-width@4.2.3` in v6), if it is one. */
+const aliasOf = (ref: string) => /^\/?((?:@[^@/():]+\/)?[^@/():]+)@[^(]/.exec(ref)?.[1];
+
+/**
+ * A pnpm-lock.yaml's installed packages (lockfile versions 6 and 9, from every document: pnpm 10 puts an env lockfile
+ * ahead of the main one), or undefined when it isn't one. Peer variants of one version are that one package; directory
+ * packages are the repo's own code. A resolution with only an integrity is a tarball on the default registry, as pnpm
+ * fetches it. ponytail: pnpm doesn't record a registry set in `.npmrc`, so a package from one reads as from npm's.
+ */
+function pnpmEntries(text: string | undefined): Lock | undefined {
+  const pulledBy = new Map<string, Set<string>>();
+  const lines = new Map<string, number>();
+  if (text === undefined) return { list: [], pulledBy, partial: false, lines };
+  const docs = readPnpmLock(text);
+  if (!docs?.length) return;
+  const out: Entry[] = [];
+  let [edges, partial, count] = [0, false, 0];
+  const edge = (by: string, holder: YamlNode | undefined) => {
+    if (!isMap(holder)) return;
+    for (const map of DEPENDENCY_MAPS) {
+      const deps = holder[map];
+      if (partial || !isMap(deps)) continue;
+      for (const d in deps) {
+        const v = deps[d];
+        // Importers record `{specifier, version}`; packages and snapshots the version alone.
+        const ref = typeof v === 'string' ? v : isMap(v) ? str(v.version) : undefined;
+        if (ref?.startsWith('link:')) continue;
+        if (++edges > MAX_EDGES) { partial = true; break; }
+        const name = (ref && aliasOf(ref)) ?? d;
+        pulledBy.set(name, (pulledBy.get(name) ?? new Set()).add(by));
+      }
+    }
+  };
+  for (const [i, { root, lines: at }] of docs.entries()) {
+    const version = str(root.lockfileVersion);
+    if (version !== '6.0' && version !== '9.0') return;
+    const v6 = version.startsWith('6');
+    const sections = [root.packages, root.snapshots, root.importers].map((s) => s ?? {});
+    if (!sections.every(isMap)) return;
+    const [packages, snapshots, importers] = sections as YamlMap[];
+    for (const key in packages) {
+      if (++count > MAX_ENTRIES) return;
+      const e = packages[key];
+      if (!isMap(e)) return;
+      // v6 keys a registry package `/name@version`; its others, keyed by where they come from, record name and version.
+      const [keyName, ref] = v6 && !key.startsWith('/') ? [undefined, undefined] : splitKey(v6 ? key.slice(1) : key);
+      const r = e.resolution instanceof Flow ? flowMap(e.resolution) : isMap(e.resolution) ? e.resolution : undefined;
+      // A field read that isn't one plain string (a multi-line scalar reads as null) could say something else to pnpm.
+      const plain = (m: YamlMap | Record<string, string>, fields: string[]) => fields.every((f) => !Object.hasOwn(m, f) || typeof m[f] === 'string');
+      if (!r || !plain(e, ['name', 'version']) || !plain(r, ['type', 'tarball', 'integrity', 'repo', 'commit', 'directory'])) return;
+      const name = str(e.name) ?? keyName;
+      if (name) edge(name, e);
+      // ponytail: a runtime pnpm downloads (`node@runtime:22.0.0`, its binaries per platform) isn't an npm package and
+      // isn't compared, so a changed download URL goes unflagged; compare its variants if runtimes need checking.
+      if (r.type === 'directory' || (ref?.startsWith('runtime:') && (r.type === 'variations' || r.type === 'binary'))) continue;
+      const v = str(e.version) ?? ref;
+      // A key and fields that disagree could install one package and be looked up as another.
+      if (!name || !v || (keyName !== undefined && name !== keyName) || (ref !== undefined && SEMVER.test(ref) && v !== ref)) return;
+      const resolved = r.type === undefined
+        ? str(r.tarball) ?? (typeof r.integrity === 'string' ? `${REGISTRY}${name}/-/${name.split('/').pop()}-${v}.tgz` : undefined)
+        : r.type === 'git' && typeof r.repo === 'string' && typeof r.commit === 'string' ? `git+${r.repo}#${r.commit}` : undefined;
+      // As for npm: a registry tarball must be this package at this version, so what installs is what is looked up.
+      if (resolved === undefined || (resolved.startsWith(REGISTRY) && !isTarballOf(resolved, name, v))) return;
+      const k = `${i}/${key}`;
+      const line = at.get('packages')?.get(key);
+      if (line !== undefined) lines.set(k, line);
+      out.push({ name, version: v, resolved, integrity: str(r.integrity), key: k });
+    }
+    for (const key in snapshots) edge(splitKey(key)[0] ?? key, snapshots[key]);
+    for (const key in importers) edge(key === '.' ? '(root)' : key, importers[key]);
+    // A v6 lockfile of a single project lists its dependencies at the top.
+    edge('(root)', root);
+  }
+  return { list: out, pulledBy, partial, lines };
+}
 
 /** Each name's versions, with every entry installing each version. */
 function byName(list: Entry[]): Map<string, Map<string, Entry[]>> {
@@ -253,7 +341,7 @@ export async function checkDependencies(
       const size = (t: string | undefined) => (t === undefined ? 0 : Buffer.byteLength(t));
       if (useBase) text += size(base = await read('base', old));
       if (useHead && text <= MAX_RUN_TEXT) text += size(head = await read('head', f.path));
-      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head);
+      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head, name);
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
@@ -274,8 +362,9 @@ export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { nu
  * added versions pair up in version order as moves; the rest are added or removed. A version on both sides that some
  * install now resolves from elsewhere, or with another integrity, is a change from that version to itself.
  */
-export function compareLockfile(base: string | undefined, head: string | undefined): PackageChange[] | undefined {
-  const [baseLock, headLock] = [entries(base), entries(head)];
+export function compareLockfile(base: string | undefined, head: string | undefined, file = 'package-lock.json'): PackageChange[] | undefined {
+  const read = file === 'pnpm-lock.yaml' ? pnpmEntries : entries;
+  const [baseLock, headLock] = [read(base), read(head)];
   if (!baseLock || !headLock) return;
   const [before, after] = [baseLock.list, headLock.list];
   const [old, now] = [byName(before), byName(after)];
@@ -289,7 +378,7 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   };
   // At most 20 dependents each: context for the security focus, not an inventory.
   const dependents = (name: string, removed: boolean) => [...((removed ? baseLock : headLock).pulledBy.get(name) ?? [])].sort().slice(0, 20);
-  const lines = head === undefined ? new Map<string, number>() : versionLines(head);
+  const lines = headLock.lines ?? (head === undefined ? new Map<string, number>() : versionLines(head));
   const changes: PackageChange[] = [];
   for (const name of [...new Set([...old.keys(), ...now.keys()])].sort()) {
     const was = old.get(name) ?? new Map<string, Entry[]>();
