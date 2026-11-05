@@ -56,6 +56,9 @@ export interface DependencyCheck {
 const SUPPORTED = new Set(['package-lock.json', 'pnpm-lock.yaml']);
 /** npm's default registry: anything else a package resolves from is off-registry. */
 const REGISTRY = 'https://registry.npmjs.org/';
+/** On npm's default registry: not another path on its host, which `.npmrc` redaction shows as `…` (`npmrcRegistries`). */
+const onRegistry = (resolved: string | undefined): boolean =>
+  resolved !== undefined && resolved.startsWith(REGISTRY) && !resolved.startsWith(`${REGISTRY}…`);
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /**
@@ -78,6 +81,8 @@ const MAX_ENTRIES = 50_000;
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
 const MAX_RUN_CHANGES = 100_000;
 const MAX_RUN_LOCKFILES = 200;
+// Real `.npmrc` files are a few lines: past this one isn't parsed, once for every lockfile that reads it.
+const MAX_NPMRC = 64 * 1024;
 
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
@@ -137,7 +142,7 @@ function entries(text: string | undefined): Lock | undefined {
     // another package or version is not a lockfile the check understands. The name and version must be plain ones
     // too, or the URL could still say something else once fetched (`a/../evil`, `1.0.0#`).
     const resolved = str(e.resolved);
-    if (resolved?.startsWith(REGISTRY) && !isTarballOf(resolved, name, e.version)) return;
+    if (onRegistry(resolved) && !isTarballOf(resolved!, name, e.version)) return;
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key });
   }
   // Dependents name what they install (an alias); changes are by the real name, so an alias's dependents count there too.
@@ -161,13 +166,71 @@ function splitKey(key: string): [string | undefined, string | undefined] {
 /** The real name an aliased dependency installs (`string-width@4.2.3`, `/string-width@4.2.3` in v6), if it is one. */
 const aliasOf = (ref: string) => /^\/?((?:@[^@/():]+\/)?[^@/():]+)@[^(]/.exec(ref)?.[1];
 
+/** A key or value as npm's ini reads it: quoted (JSON for `"`), else up to an unescaped `;` or `#`, trimmed. */
+function iniValue(raw: string): string {
+  const v = raw.trim();
+  if (v.length > 1 && ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'")))) {
+    try {
+      return v[0] === "'" ? v.slice(1, -1) : JSON.parse(v);
+    } catch {
+      return v;
+    }
+  }
+  let [out, esc] = ['', false];
+  for (const c of v) {
+    if (esc) [out, esc] = [out + (';#\\'.includes(c) ? c : `\\${c}`), false];
+    else if (c === ';' || c === '#') break;
+    else if (c === '\\') esc = true;
+    else out += c;
+  }
+  return (esc ? `${out}\\` : out).trim();
+}
+
+/**
+ * The registries `.npmrc` files set, each read in turn so a later one (the lockfile's directory after the root)
+ * overrides key by key: `registry=` under `''`, `@scope:registry=` under `@scope`, read line by line as npm's ini does,
+ * with nothing under a `[section]` header line. Only those keys are kept: the file can hold auth tokens. So can a
+ * registry URL, in its userinfo, query or path (Gemfury's): one that isn't npm's default keeps only its host and, for a
+ * path, `…` and a hash of the URL, so two registries on one host stay apart. A `${VAR}` is kept by name; any other value
+ * that isn't a URL is an unknown registry.
+ * ponytail: a registry set outside the repo (user or global config, `npm_config_registry`) can't be seen; it reads as
+ * npm's default. Note it in the summary if that misleads.
+ */
+function npmrcRegistries(files: (string | undefined)[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const text of files) {
+    let section = false;
+    for (const line of (text ?? '').split(/[\r\n]+/)) {
+      if (!line || /^\s*[;#]/.test(line)) continue;
+      if (/^\[[^\]]*\]\s*$/.test(line)) { section = true; continue; }
+      const m = /^([^=]+)(?:=(.*))?$/.exec(line);
+      const scope = m && !section ? /^(@[^\s:/]+:)?registry$/.exec(iniValue(m[1]!)) : null;
+      if (!scope) continue;
+      const value = iniValue(m![2] ?? '');
+      let registry: string;
+      try {
+        const url = new URL(value);
+        const href = `${url.protocol}//${url.host}${url.pathname.replace(/\/?$/, '/')}`;
+        registry = href === REGISTRY && !url.search ? REGISTRY : url.pathname === '/' && !url.search ? href
+          : `${url.protocol}//${url.host}/…${createHash('sha256').update(href + url.search).digest('hex').slice(0, 12)}/`;
+      } catch {
+        registry = /^\$\{\w+\}$/.test(value) ? `${value}/` : 'unknown registry/';
+      }
+      out.set(scope[1]?.slice(0, -1) ?? '', registry);
+    }
+  }
+  return out;
+}
+
 /**
  * A pnpm-lock.yaml's installed packages (lockfile versions 6 and 9, from every document: pnpm 10 puts an env lockfile
  * ahead of the main one), or undefined when it isn't one. Peer variants of one version are that one package; directory
- * packages are the repo's own code. A resolution with only an integrity is a tarball on the default registry, as pnpm
- * fetches it. ponytail: pnpm doesn't record a registry set in `.npmrc`, so a package from one reads as from npm's.
+ * packages are the repo's own code. A resolution with only an integrity is a tarball on the registry `.npmrc` sets for
+ * the package's scope, or for every package, else npm's default, as pnpm fetches it.
  */
-function pnpmEntries(text: string | undefined): Lock | undefined {
+function pnpmEntries(text: string | undefined, npmrc: (string | undefined)[] = []): Lock | undefined {
+  const registries = npmrcRegistries(npmrc);
+  const registryOf = (name: string) => (name.startsWith('@') && registries.get(name.split('/')[0]!)) || registries.get('') || REGISTRY;
   const pulledBy = new Map<string, Set<string>>();
   const lines = new Map<string, number>();
   if (text === undefined) return { list: [], pulledBy, partial: false, lines };
@@ -217,10 +280,10 @@ function pnpmEntries(text: string | undefined): Lock | undefined {
       // A key and fields that disagree could install one package and be looked up as another.
       if (!name || !v || (keyName !== undefined && name !== keyName) || (ref !== undefined && SEMVER.test(ref) && v !== ref)) return;
       const resolved = r.type === undefined
-        ? str(r.tarball) ?? (typeof r.integrity === 'string' ? `${REGISTRY}${name}/-/${name.split('/').pop()}-${v}.tgz` : undefined)
+        ? str(r.tarball) ?? (typeof r.integrity === 'string' ? `${registryOf(name)}${name}/-/${name.split('/').pop()}-${v}.tgz` : undefined)
         : r.type === 'git' && typeof r.repo === 'string' && typeof r.commit === 'string' ? `git+${r.repo}#${r.commit}` : undefined;
       // As for npm: a registry tarball must be this package at this version, so what installs is what is looked up.
-      if (resolved === undefined || (resolved.startsWith(REGISTRY) && !isTarballOf(resolved, name, v))) return;
+      if (resolved === undefined || (onRegistry(resolved) && !isTarballOf(resolved, name, v))) return;
       const k = `${i}/${key}`;
       const line = at.get('packages')?.get(key);
       if (line !== undefined) lines.set(k, line);
@@ -282,6 +345,8 @@ export async function checkDependencies(
 ): Promise<DependencyCheck> {
   const check: DependencyCheck = { lockfiles: [], unreadable: [], unchecked: [] };
   let [text, kept] = [0, 0];
+  // Read once a run, however many lockfiles share one; a rejected read rejects every lockfile that needs it.
+  const npmrcs = new Map<string, Promise<string | undefined>>();
   // A rename that changes the file's name (package-lock.json to yarn.lock, or to some other file) is a deletion and an
   // addition, so each side is checked as the kind of file it is. A move that keeps the name compares like an edit.
   const sides = files.flatMap((f): FileChange[] => f.oldPath && posix.basename(f.oldPath) !== posix.basename(f.path)
@@ -303,7 +368,25 @@ export async function checkDependencies(
       const size = (t: string | undefined) => (t === undefined ? 0 : Buffer.byteLength(t));
       if (useBase) text += size(base = await read('base', old));
       if (useHead && text <= MAX_RUN_TEXT) text += size(head = await read('head', f.path));
-      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head, name);
+      // pnpm doesn't record the registry: each side's `.npmrc`, the lockfile directory's after the root's, says where.
+      const npmrc = async (side: 'base' | 'head', lockfile: string) => {
+        const dir = posix.join(posix.dirname(lockfile), '.npmrc');
+        return Promise.all(['.npmrc', ...(dir === '.npmrc' ? [] : [dir])].map((p) => {
+          const key = `${side}:${p}`;
+          if (!npmrcs.has(key)) {
+            // Counted in the run's text once read, so big ones can't be fetched for lockfile after lockfile.
+            npmrcs.set(key, read(side, p).then((t) => {
+              text += size(t);
+              if (size(t) > MAX_NPMRC) throw new ToolError('.npmrc is too big');
+              return t;
+            }));
+          }
+          return npmrcs.get(key)!;
+        }));
+      };
+      const pnpm = name === 'pnpm-lock.yaml' && text <= MAX_RUN_TEXT
+        ? { base: base === undefined ? [] : await npmrc('base', old), head: head === undefined ? [] : await npmrc('head', f.path) } : {};
+      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head, name, pnpm);
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;
@@ -324,9 +407,11 @@ export const byVersion = (a: string, b: string) => a.localeCompare(b, 'en', { nu
  * added versions pair up in version order as moves; the rest are added or removed. A version on both sides that some
  * install now resolves from elsewhere, or with another integrity, is a change from that version to itself.
  */
-export function compareLockfile(base: string | undefined, head: string | undefined, file = 'package-lock.json'): PackageChange[] | undefined {
-  const read = file === 'pnpm-lock.yaml' ? pnpmEntries : entries;
-  const [baseLock, headLock] = [read(base), read(head)];
+export function compareLockfile(
+  base: string | undefined, head: string | undefined, file = 'package-lock.json', npmrc: { base?: (string | undefined)[]; head?: (string | undefined)[] } = {},
+): PackageChange[] | undefined {
+  const [baseLock, headLock] = file === 'pnpm-lock.yaml'
+    ? [pnpmEntries(base, npmrc.base), pnpmEntries(head, npmrc.head)] : [entries(base), entries(head)];
   if (!baseLock || !headLock) return;
   const [before, after] = [baseLock.list, headLock.list];
   const [old, now] = [byName(before), byName(after)];
@@ -419,7 +504,7 @@ export async function lookUpAdvisories(check: DependencyCheck, lookup: (name: st
  * ponytail: the kind is a guess from the URL's shape, for the comment's wording only; every kind is a Finding alike.
  */
 function offRegistry(resolved: string | undefined): string | undefined {
-  if (resolved === undefined || resolved.startsWith(REGISTRY)) return;
+  if (resolved === undefined || onRegistry(resolved)) return;
   let host: string | undefined;
   try {
     host = new URL(resolved.replace(/^git\+/, '')).hostname || undefined;
@@ -506,7 +591,7 @@ export function describeCheck(check: DependencyCheck): string {
       const notes = [
         c.from !== undefined && c.to !== undefined && c.from !== c.to && major(c.from) !== major(c.to) && 'major version bump',
         c.line !== undefined && `line ${c.line}`,
-        c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(redact(c.resolved))}`,
+        c.resolved !== undefined && !onRegistry(c.resolved) && `resolved from ${clip(redact(c.resolved))}`,
         c.pulledBy && `pulled in by ${c.pulledBy.map((d) => clip(d, 100)).join(', ')}`,
         c.pulledByPartial && 'dependents only partly recorded (the lockfile has more dependency entries than the check reads)',
       ].filter(Boolean);
