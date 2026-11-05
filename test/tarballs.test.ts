@@ -191,42 +191,51 @@ test('a tarball a reader could take another way than npm is not inspected, rathe
   assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 7);
 });
 
-test("a bundled package is read from its bundler's tarball, at the folder and version the lockfile records", async () => {
-  const inner = (v: string, extra: object = {}) => ({ version: v, inBundle: true, ...extra });
+test("a bundled package's install scripts are its bundler's: compared with them, never fetched on their own", async () => {
+  const inner = (v: string) => ({ version: v, inBundle: true });
   const s = setup(
+    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0') },
+    // a keeps its version while its bundler moves: its code is whatever the new bundler ships.
     {
-      'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'),
-      'node_modules/host/node_modules/gone': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0'),
-    },
-    {
-      'node_modules/host': pkg('host', '1.1.0'), 'node_modules/host/node_modules/a': inner('1.0.1'),
-      'node_modules/host/node_modules/gone': inner('1.0.1'), 'node_modules/b': pkg('b', '1.0.1', { inBundle: true }),
+      'node_modules/host': pkg('host', '1.1.0'), 'node_modules/host/node_modules/a': inner('1.0.0'),
+      'node_modules/b': pkg('b', '1.0.1', { inBundle: true }),
     },
   );
-  const bundled = (v: string, scripts = {}) => JSON.stringify({ name: 'a', version: v, scripts });
-  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, {
-    'node_modules/a/package.json': bundled('1.0.0'), 'node_modules/gone/package.json': JSON.stringify({ version: '1.0.0' }),
-  }));
-  // `gone` isn't in there at the version the lockfile says.
+  const bundled = (scripts = {}) => JSON.stringify({ name: 'a', version: '1.0.0', scripts });
+  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, { 'node_modules/a/package.json': bundled() }));
   s.registry.tarballs.set(url('host', '1.1.0'), packageTarball('host', '1.1.0', {}, {
-    'node_modules/a/package.json': bundled('1.0.1', { postinstall: 'node a.js' }), 'node_modules/gone/package.json': JSON.stringify({ version: '9.9.9' }),
+    'node_modules/a/package.json': bundled({ postinstall: 'node a.js' }), 'node_modules/@s/c/node_modules/d/binding.gyp': '{}',
+    'node_modules/@s/c/node_modules/d/package.json': JSON.stringify({ name: 'd' }),
   }));
   const review = await s.opened();
 
   assert.ok(s.registry.fetched.includes(url('b', '1.0.1')), 'an inBundle entry with a source of its own is fetched');
-  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**a adds an install script**']);
-  assert.match(review.body, /1 package wasn't inspected/);
-  assert.match(review.body, /Not inspected[^\n]*\n- `gone 1\.0\.1`\n\n/);
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**host adds an install script**']);
+  assert.match(review.comments[0]!.body, /`node_modules\/a postinstall`: `node a\.js`/);
+  assert.match(review.comments[0]!.body, /`node_modules\/@​?s\/c\/node_modules\/d install`: `node-gyp rebuild`/);
+  assert.doesNotMatch(review.body, /Not inspected/);
 });
 
-test("a bundled package moved under a bundler that didn't move isn't in that bundler's tarball, so it is not inspected", async () => {
-  const inner = (v: string) => ({ version: v, inBundle: true });
-  const s = setup({ 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0') },
-    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.1') });
-  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, { 'node_modules/a/package.json': JSON.stringify({ version: '1.0.0' }) }));
+test('a failed fetch spends the bytes it received, so oversized tarballs can\'t each take the whole budget', async () => {
+  const big = (n: string) => packageTarball(n, '1.0.1', {}, { 'blob.bin': Array.from({ length: 4000 }, (_, i) => `${n}${i}`).join('') });
+  const s = setup({ 'node_modules/x1': pkg('x1', '1.0.0'), 'node_modules/x2': pkg('x2', '1.0.0') },
+    { 'node_modules/x1': pkg('x1', '1.0.1'), 'node_modules/x2': pkg('x2', '1.0.1') }, { registryFetchBytes: 1000 });
+  s.registry.tarballs.set(url('x1', '1.0.1'), big('x1'));
+  s.registry.tarballs.set(url('x2', '1.0.1'), big('x2'));
   const review = await s.opened();
 
-  assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.1`\n\n/);
+  assert.deepEqual(s.registry.fetched, [url('x1', '1.0.1')]);
+  assert.match(review.body, /2 packages weren't inspected/);
+});
+
+test('a link in a tarball, which npm would extract over a file, is not inspected', async () => {
+  const s = setup({ 'node_modules/ln': pkg('ln', '1.0.0') }, { 'node_modules/ln': pkg('ln', '1.0.1') });
+  s.registry.tarballs.set(url('ln', '1.0.1'), tarball({
+    'package/package.json': JSON.stringify({ name: 'ln' }), 'package/other.json': '{}', 'package/link': '',
+  }, { 'package/link': '2' }));
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `ln 1\.0\.1`\n\n/);
 });
 
 test('a binding.gyp with no install script runs node-gyp on install, so it counts as one', async () => {

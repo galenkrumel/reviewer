@@ -1,6 +1,6 @@
 // The npm registry adapter: tarballs fetched by code, from registry.npmjs.org only, with no credentials.
 import { onRegistry } from './dependencies.ts';
-import type { RegistryPort } from './ports.ts';
+import { FetchError, type RegistryPort } from './ports.ts';
 
 export function npmRegistry(): RegistryPort {
   return {
@@ -12,10 +12,14 @@ export function npmRegistry(): RegistryPort {
       // Counted as it arrives: a Content-Length can be missing or lie.
       const chunks: Uint8Array[] = [];
       let size = 0;
-      for await (const chunk of res.body) {
-        size += chunk.length;
-        if (size > maxBytes) throw new Error(`over the run's remaining ${maxBytes} bytes`);
-        chunks.push(chunk);
+      try {
+        for await (const chunk of res.body) {
+          size += chunk.length;
+          if (size > maxBytes) throw new Error(`over the run's remaining ${maxBytes} bytes`);
+          chunks.push(chunk);
+        }
+      } catch (err) {
+        throw new FetchError(err instanceof Error ? err.message : String(err), size);
       }
       return Buffer.concat(chunks);
     },

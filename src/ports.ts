@@ -85,9 +85,21 @@ export interface Advisory {
   withdrawn: boolean;
 }
 
+/** A tarball fetch that failed after `received` bytes arrived, which still count against the run's budget. */
+export class FetchError extends Error {
+  readonly received: number;
+  constructor(message: string, received: number) {
+    super(message);
+    this.received = received;
+  }
+}
+
 /** The npm registry, which code (never a model) fetches published tarballs from. */
 export interface RegistryPort {
-  /** The tarball at `url`, refused for any host but the registry's, and past `maxBytes` downloaded. */
+  /**
+   * The tarball at `url`, refused for any host but the registry's, and past `maxBytes` downloaded. Once bytes have
+   * arrived, a failure is a FetchError saying how many.
+   */
   tarball(url: string, maxBytes: number): Promise<Buffer>;
 }
 

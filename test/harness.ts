@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after } from 'node:test';
 import { createApp, type AppConfig } from '../src/app.ts';
+import { FetchError } from '../src/ports.ts';
 import type {
   Advisory, AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest, RegistryPort, ReviewThread,
 } from '../src/ports.ts';
@@ -238,7 +239,8 @@ export class FakeRegistry implements RegistryPort {
     const m = /^https:\/\/registry\.npmjs\.org\/(.+)\/-\/[^/]+-(\d[^/]*)\.tgz$/.exec(url);
     const body = this.tarballs.get(url) ?? (m ? packageTarball(m[1]!, m[2]!) : undefined);
     if (!body) throw new Error('registry: 404');
-    if (body.length > maxBytes) throw new Error(`registry: over ${maxBytes} bytes`);
+    // As the real adapter: it streams up to the limit, then gives up, having received them.
+    if (body.length > maxBytes) throw new FetchError(`registry: over ${maxBytes} bytes`, maxBytes + 1);
     return body;
   }
 }
