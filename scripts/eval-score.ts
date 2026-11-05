@@ -5,7 +5,10 @@ import { SEVERITIES } from '../src/findings.ts';
 import type { Finding } from '../src/store.ts';
 
 type Severity = Finding['severity'];
-/** Where a finding must land: a path and an inclusive line window in the head revision. */
+/**
+ * Where a finding must land: a path and an inclusive line window at the case's headSha, which is where the reviewer's
+ * line numbers point. Not the current tree: the same code may sit on other lines there.
+ */
 export interface Anchor { path: string; lines: [number, number] }
 /** A defect the reviewer must report; `defect` is what an LLM matcher would compare a finding against. */
 export interface Expected extends Anchor { id: string; minSeverity: Severity; defect: string }
