@@ -14,10 +14,22 @@ export interface LockDoc { root: YamlMap; lines: Map<string, Map<string, number>
 
 /** The top-level sections the check reads; any other section's body is skipped unread. */
 const READ = new Set(['importers', 'packages', 'snapshots', 'dependencies', 'devDependencies', 'optionalDependencies']);
+// Every pattern here matches in linear time: the text is the PR's, up to 32 MiB.
 const QUOTE = `'((?:[^']|'')*)'|"((?:[^"\\\\]|\\\\.)*)"`;
-// A plain key can't start with a YAML indicator (a list item, anchor, alias, tag, complex key, flow, comment...).
-const KEY = new RegExp(`^(?:${QUOTE}|([^\\s'"#&*!|>%@\`{}[\\],?:-][^]*?))[ \\t]*:(?:[ \\t]+(.*))?$`);
+const QUOTED_KEY = new RegExp(`^(?:${QUOTE})[ \\t]*:(?:[ \\t]+|$)`);
 const QUOTED = new RegExp(`^(?:${QUOTE})[ \\t]*(?:#.*)?$`);
+
+/**
+ * `key: rest` with an optionally quoted key; rest is '' when the value is below. A plain key can't start with a YAML
+ * indicator (a list item, anchor, alias, tag, complex key, flow, comment...) and ends at the first `: `.
+ */
+function keyValue(body: string): [string, string] | undefined {
+  const q = QUOTED_KEY.exec(body);
+  if (q) return [unquote(q[1], q[2]), body.slice(q[0].length).trim()];
+  const end = body.search(/:(?:[ \t]|$)/);
+  if (end <= 0 || /^[\s'"#&*!|>%@`{}[\],?:-]/.test(body)) return;
+  return [body.slice(0, end).trimEnd(), body.slice(end + 1).trim()];
+}
 const unquote = (single: string | undefined, double: string | undefined) =>
   single !== undefined ? single.replace(/''/g, "'") : JSON.parse(`"${double}"`) as string;
 const map = (): YamlMap => Object.create(null);
@@ -62,10 +74,9 @@ export function readPnpmLock(text: string): LockDoc[] | undefined {
     }
     while (frames.at(-1)!.indent > indent) frames.pop();
     const frame = frames.at(-1)!;
-    const m = KEY.exec(line.slice(indent));
-    if (frame.indent !== indent || !m) return;
-    const key = m[3] ?? unquote(m[1], m[2]);
-    const rest = (m[4] ?? '').trim();
+    const kv = keyValue(line.slice(indent));
+    if (frame.indent !== indent || !kv) return;
+    const [key, rest] = kv;
     if (key === '<<' || Object.hasOwn(frame.map, key)) return;
     if (frames.length === 1) {
       section = key;
@@ -105,7 +116,8 @@ function value(s: string): YamlNode | undefined {
   return v;
 }
 
-const FLOW_SCALAR = `${QUOTE}|([^\\s'"{}[\\],][^{}[\\],]*?)`;
+// A plain flow scalar never ends in whitespace or holds `: `, so it and the separators around it can't overlap.
+const FLOW_SCALAR = `${QUOTE}|([^\\s'"{}[\\],:](?:[^\\s{}[\\],:]|:(?!\\s)|\\s+(?=[^\\s{}[\\],:]))*)`;
 const FLOW_ITEM = new RegExp(`\\s*(?:${FLOW_SCALAR})\\s*:\\s+(?:${FLOW_SCALAR})\\s*(,|\\})`, 'y');
 
 /** A one-level flow map of scalars (`{integrity: sha512-…, tarball: https://…}`), or undefined for anything else. */

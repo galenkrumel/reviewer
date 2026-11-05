@@ -193,7 +193,7 @@ function pnpmEntries(text: string | undefined): Lock | undefined {
   };
   for (const [i, { root, lines: at }] of docs.entries()) {
     const version = str(root.lockfileVersion);
-    if (!version || !/^[69]\.\d+$/.test(version)) return;
+    if (version !== '6.0' && version !== '9.0') return;
     const v6 = version.startsWith('6');
     const sections = [root.packages, root.snapshots, root.importers].map((s) => s ?? {});
     if (!sections.every(isMap)) return;
@@ -204,13 +204,15 @@ function pnpmEntries(text: string | undefined): Lock | undefined {
       if (!isMap(e)) return;
       // v6 keys a registry package `/name@version`; its others, keyed by where they come from, record name and version.
       const [keyName, ref] = v6 && !key.startsWith('/') ? [undefined, undefined] : splitKey(v6 ? key.slice(1) : key);
+      const r = e.resolution instanceof Flow ? flowMap(e.resolution) : isMap(e.resolution) ? e.resolution : undefined;
+      // A field read that isn't one plain string (a multi-line scalar reads as null) could say something else to pnpm.
+      const plain = (m: YamlMap | Record<string, string>, fields: string[]) => fields.every((f) => !Object.hasOwn(m, f) || typeof m[f] === 'string');
+      if (!r || !plain(e, ['name', 'version']) || !plain(r, ['type', 'tarball', 'integrity', 'repo', 'commit', 'directory'])) return;
       const name = str(e.name) ?? keyName;
       if (name) edge(name, e);
-      const r = e.resolution instanceof Flow ? flowMap(e.resolution) : isMap(e.resolution) ? e.resolution : undefined;
-      if (!r) return;
       // ponytail: a runtime pnpm downloads (`node@runtime:22.0.0`, its binaries per platform) isn't an npm package and
       // isn't compared, so a changed download URL goes unflagged; compare its variants if runtimes need checking.
-      if (r.type === 'directory' || r.type === 'variations' || r.type === 'binary') continue;
+      if (r.type === 'directory' || (ref?.startsWith('runtime:') && (r.type === 'variations' || r.type === 'binary'))) continue;
       const v = str(e.version) ?? ref;
       // A key and fields that disagree could install one package and be looked up as another.
       if (!name || !v || (keyName !== undefined && name !== keyName) || (ref !== undefined && SEMVER.test(ref) && v !== ref)) return;

@@ -1,6 +1,7 @@
 // pnpm-lock.yaml in the Dependency check: the comparison itself, and through the harness what a Maintainer sees.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import type { AppConfig } from '../src/app.ts';
 import { compareLockfile, dependencyFindings, describeMove } from '../src/dependencies.ts';
 import { delivery, FakeGitHub, gitFixture, noFindings, openedPayload, ScriptedModel, testApp } from './harness.ts';
 
@@ -236,6 +237,10 @@ test('unparseable text, another lockfile version, or YAML pnpm never writes is n
     ok.replace(/resolution: \{integrity: [^}]*\}/, "resolution: '{integrity: x}'"),
     ok.replace(/resolution: \{integrity: [^}]*\}/, 'resolution: {integrity: x'),
     ok.replace(/resolution: \{integrity: [^}]*\}/, 'resolution: {type: mystery}'),
+    ok.replace(/resolution: \{integrity: [^}]*\}/, 'resolution: {type: binary, url: https://evil.example/a.tgz}'),
+    ok.replace(/resolution: \{integrity: ([^}]*)\}/, 'resolution:\n      integrity: $1\n      tarball: >-\n        https://evil.example/a.tgz'),
+    ok.replace('  dompurify@3.4.17:\n', '  dompurify@3.4.17:\n    version: |\n      9.9.9\n'),
+    ok.replace("lockfileVersion: '9.0'", "lockfileVersion: '9.1'"),
     ok.replace(/    resolution: \{integrity: [^}]*\}\n/, ''),
     ok.replace('  dompurify@3.4.17:', '  dompurify@3.4.17:\n   misaligned: true'),
     ok.replace('  dompurify@3.4.17:', '  <<: {}\n  dompurify@3.4.17:'),
@@ -244,6 +249,15 @@ test('unparseable text, another lockfile version, or YAML pnpm never writes is n
     assert.equal(compare(bad, ok), undefined, bad);
     assert.equal(compare(ok, bad), undefined, bad);
   }
+});
+
+test('a pathological line is read in linear time', () => {
+  const spaces = ' '.repeat(200_000);
+  const started = Date.now();
+  for (const bad of [`  a${spaces}x:${spaces}x`, `    resolution: {a${spaces}b${spaces}`, `    resolution: {a: b${spaces}c${spaces}`]) {
+    assert.equal(compare(undefined, purify('3.4.17').replace('  left-pad@1.3.0:', `${bad}\n  left-pad@1.3.0:`)), undefined);
+  }
+  assert.ok(Date.now() - started < 1000, `${Date.now() - started} ms`);
 });
 
 test('fields the check never reads may be block lists or multi-line text', () => {
@@ -261,7 +275,7 @@ test('fields the check never reads may be block lists or multi-line text', () =>
 
 const REPO = 'acme/widgets';
 
-async function opened(base: Record<string, string>, head: Record<string, string>) {
+async function opened(base: Record<string, string>, head: Record<string, string>, config: Partial<AppConfig> = {}) {
   const fx = gitFixture(base, head);
   const pr = { number: 85, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
   const github = new FakeGitHub();
@@ -269,7 +283,7 @@ async function opened(base: Record<string, string>, head: Record<string, string>
   github.advisoryDb.push({ id: 'GHSA-mrv2-3pqr-j5jr', severity: 'high', summary: 'DOMPurify allows XSS', firstPatched: '3.4.17',
     withdrawn: false, package: 'dompurify', versions: ['3.4.16'] });
   const model = new ScriptedModel(Array.from({ length: 5 }, noFindings));
-  const t = testApp({ model, github });
+  const t = testApp({ model, github, config });
   await t.app.receive(delivery('pull_request', openedPayload(REPO, pr)));
   await t.app.drain();
   return { review: github.reviews.at(-1)!.review, model, github };
@@ -287,7 +301,10 @@ test('a pnpm-lock.yaml change is listed in the summary, and its introduced Advis
   assert.deepEqual(github.lookups.sort(), ['dompurify@3.4.10', 'dompurify@3.4.16']);
 });
 
-test('an unparseable pnpm-lock.yaml is named as not understood', async () => {
-  const { review } = await opened({ [PNPM]: purify('3.4.10') }, { [PNPM]: "lockfileVersion: '5.4'\n" });
+test('a pnpm-lock.yaml of an unknown lockfile version is named as not understood and blocks approval', async () => {
+  const { review } = await opened({ [PNPM]: purify('3.4.10') }, { [PNPM]: purify('3.4.17').replace("'9.0'", "'10.0'") },
+    { approveWhenClean: true });
+  assert.equal(review.event, 'COMMENT');
   assert.match(review.body, /Not understood by the dependency check: `pnpm-lock\.yaml`/);
+  assert.match(review.body, /\*\*Not approved:\*\*[^\n]*the dependency check couldn't understand `pnpm-lock\.yaml`/);
 });
