@@ -18,7 +18,7 @@ import { readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Finding } from '../src/store.ts';
-import { checkPhoenixEndpoint, explain, fellBack, loadCase, reviewModel, runCase, type EvalCase } from './eval-run.ts';
+import { checkPhoenixEndpoint, explain, fellBack, loadCase, reviewModel, runCase } from './eval-run.ts';
 import { score, type AnswerKey } from './eval-score.ts';
 
 const DATASET = 'reviewer-cases';
@@ -30,6 +30,7 @@ const experimentName = process.argv[2] ?? model;
 checkPhoenixEndpoint(getMergedOptions().baseUrl!);
 
 const cases = readdirSync(CASES).filter((f) => f.endsWith('.json')).sort().map((f) => loadCase(join(CASES, f)));
+const byId = new Map(cases.map((c) => [c.caseId, c]));
 const { datasetId } = await createDataset({
   name: DATASET,
   description: 'Pinned PRs with answer keys for the reviewer, from cases/ in galenkrumel/reviewer',
@@ -59,9 +60,11 @@ await runExperiment({
   experimentMetadata: { model, fallbackModel: process.env.REVIEW_FALLBACK_MODEL || null },
   concurrency: 5,
   task: async (example) => {
-    const { case: caseId, ...testCase } = example.input as EvalCase & { case: string };
+    // The local case, not the example's input as Phoenix sent it back: its id becomes a directory, so only checked ids.
+    const local = byId.get((example.input as { case: string }).case);
+    if (!local) throw new Error(`no case in cases/ for example ${JSON.stringify(example.input.case)}`);
     // A directory per case: runs go five at a time, and concurrent fetches into one repository copy would collide.
-    const run = await runCase(testCase, join(tmpdir(), 'reviewer-eval', caseId));
+    const run = await runCase(local.testCase, join(tmpdir(), 'reviewer-eval', local.caseId));
     // Thrown, so Phoenix shows the run as failed; what it cost so far is only in the error and the trace.
     if (!run.findings) throw new Error(`${run.error} (after ${run.calls} calls, $${run.usage.cost.toFixed(4)})`);
     const servedModels = run.usage.models;

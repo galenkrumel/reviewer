@@ -30,9 +30,12 @@ const env = () => {
 /** The model runs are asked for, which is what experiments and spans are filtered by. */
 export const reviewModel = () => env().model;
 
-/** Reads and checks a case file. Its id names its runs: the file name unless "id" is set. */
+/** Reads and checks a case file. Its id names its runs and directories: the file name unless "id" is set. */
 export function loadCase(path: string) {
+  env();
   const testCase = JSON.parse(readFileSync(path, 'utf8')) as EvalCase;
+  const caseId = testCase.id ?? basename(path, '.json');
+  if (!/^[\w.-]+$/.test(caseId) || /^\.+$/.test(caseId)) throw new Error(`${path}: id must be a file name, not ${caseId}`);
   if (!FOCUSES.includes(testCase.focus)) throw new Error(`${path}: focus must be one of ${FOCUSES.join(', ')}`);
   const local = testCase.url.startsWith('file://');
   if (!local && !testCase.url.startsWith('https://github.com/')) throw new Error(`${path}: url must be file:// or https://github.com/…`);
@@ -40,7 +43,7 @@ export function loadCase(path: string) {
   const key: AnswerKey | undefined = testCase.expected && {
     expected: testCase.expected, acceptableExtras: testCase.acceptableExtras, forbidden: testCase.forbidden,
   };
-  return { caseId: testCase.id ?? basename(path, '.json'), testCase, key };
+  return { caseId, testCase, key };
 }
 
 export interface RunResult {
