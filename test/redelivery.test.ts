@@ -30,6 +30,19 @@ test('recovery redelivers what the service never answered, oldest first, and log
   ]);
 });
 
+test("a delivery older than the window stays out of it, though a recent redelivery of it failed too", async () => {
+  const github = new FakeGitHub();
+  github.deliveries = [
+    { id: 2, guid: 'old', deliveredAt: ago(30), statusCode: 502, event: 'pull_request' },
+    { id: 1, guid: 'old', deliveredAt: ago(7 * 60), statusCode: 0, event: 'pull_request' },
+  ];
+  const { app } = testApp({ model: new ScriptedModel([]), github, time: NOW });
+
+  await app.recoverDeliveries();
+
+  assert.deepEqual(github.redelivered, []);
+});
+
 test('a redelivery that fails is logged and the rest still go', async () => {
   const github = new FakeGitHub();
   github.deliveries = [

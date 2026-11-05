@@ -408,23 +408,20 @@ export function createApp(deps: {
   }
 
   /**
-   * Record the run stale. Deliveries can arrive out of order, so a late one for an old revision may have superseded
-   * the job for the PR's current one: revive that job. Only a job that was enqueued is revived, so gating still holds.
-   */
-  /**
-   * Ask GitHub to redeliver the webhooks the service never answered (it was down: a deploy, a crash) in the lookback
-   * window, oldest first, so late-delivery handling sees them in order. A delivery it answered, even with a 4xx (its
-   * own rejection, which would only repeat), is left alone, as is one already tried MAX_ATTEMPTS times.
+   * Ask GitHub to redeliver the webhooks the service never answered (it was down: a deploy, a crash) and first sent
+   * within the lookback window, oldest first. GitHub sends them when it gets to them, so order still rests on the
+   * late-delivery handling. A delivery it answered, even with a 4xx (its own rejection, which would only repeat), is
+   * left alone, as is one already tried MAX_ATTEMPTS times.
    */
   async function recoverDeliveries() {
     const since = new Date(deps.clock.now().getTime() - LOOKBACK_MS);
-    const attempts = new Map<string, HookDelivery[]>();
-    for (const a of await github.listDeliveries(since)) {
-      if (a.deliveredAt >= since) attempts.set(a.guid, [...attempts.get(a.guid) ?? [], a]);
-    }
-    const lost = [...attempts.values()]
-      .filter((as) => as.length < MAX_ATTEMPTS && as.every((a) => a.statusCode === 0 || a.statusCode >= 500))
-      .map((as) => as.at(-1)!).sort((a, b) => a.deliveredAt.getTime() - b.deliveredAt.getTime());
+    // Every attempt of a delivery, oldest last: age and order go by its first one, not a recent redelivery.
+    const byGuid = new Map<string, HookDelivery[]>();
+    for (const a of await github.listDeliveries(since)) byGuid.set(a.guid, [...byGuid.get(a.guid) ?? [], a]);
+    const lost = [...byGuid.values()]
+      .filter((tries) => tries.length < MAX_ATTEMPTS && tries.every((t) => t.statusCode === 0 || t.statusCode >= 500))
+      .map((tries) => tries.at(-1)!).filter((first) => first.deliveredAt >= since)
+      .sort((a, b) => a.deliveredAt.getTime() - b.deliveredAt.getTime());
     for (const a of lost) {
       const entry = { delivery: a.guid, event: a.event, status: a.statusCode, at: a.deliveredAt.toISOString() };
       try {
@@ -436,6 +433,10 @@ export function createApp(deps: {
     }
   }
 
+  /**
+   * Record the run stale. Deliveries can arrive out of order, so a late one for an old revision may have superseded
+   * the job for the PR's current one: revive that job. Only a job that was enqueued is revived, so gating still holds.
+   */
   function finishStale(job: Job, live: PullRequest, record?: Parameters<typeof store.finish>[2]) {
     store.finish(job.id, 'stale', record); // before reviving, which would otherwise mark this run superseded
     if (live.state === 'open' && !live.draft) store.revive(job.repo, job.pr, live.headSha, live.baseSha);
@@ -821,6 +822,8 @@ const DAY_MS = 24 * 3600_000;
  * How far back recoverDeliveries looks, and how many attempts of one delivery it stops at. Bounded so a long outage
  * doesn't flood the queue (the run cap still applies).
  */
+// ponytail: an outage longer than 6h loses its older deliveries, and a busy one redelivers all the rest in one pass;
+// raise the window or cap a pass if either bites.
 const LOOKBACK_MS = 6 * 3600_000;
 const MAX_ATTEMPTS = 3;
 /** A comment that waives: `Waive:` first, ignoring case and leading whitespace. */
