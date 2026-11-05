@@ -12,7 +12,7 @@ _Avoid_: Job (in prose), review (for the job itself)
 A Run that runs no reviewers and decides approval again from an earlier published Run's findings and the threads as they are now.
 
 **Retry**:
-A Run that a Maintainer's `Retry` comment on the PR starts. It runs again only the Focuses that failed in the PR's latest Run, at that Run's head and base, reuses the other Focuses' Findings as that Run decided them, then decides and publishes like a full Run. With nothing failed it does nothing.
+A Run that a Maintainer's `Retry` comment on the PR starts. It runs again only the Focuses that failed in the PR's latest Run, at that Run's head and base, reuses the other Focuses' Findings as that Run decided them, then decides and publishes like a full Run. With nothing failed it is recorded skipped and posts nothing.
 _Avoid_: Re-run, re-review (that's the label)
 
 **Review**:
