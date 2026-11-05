@@ -28,7 +28,9 @@ export interface PackageChange {
    * package that isn't bundled itself resolves from (unset if it records none) and the bundled one's folder in its
    * tarball. Its install scripts are compared with that package's.
    */
-  bundledIn?: { resolved?: string; folder: string };
+  bundledIn?: BundledAt;
+  /** The same for the install it moved from, at base, when that was bundled. */
+  fromBundledIn?: BundledAt;
   /** Its `"version"` line at head; unset for a removed package. */
   line?: number;
   /** The Advisories open against either side, once looked up; unset when none are. */
@@ -40,6 +42,9 @@ export interface PackageChange {
   /** Set when that side's lockfile had more dependency edges than the check records, so `pulledBy` may miss some. */
   pulledByPartial?: true;
 }
+
+/** Where a bundled package is: its bundler's source (unset if that records none) and its folder in that tarball. */
+export interface BundledAt { resolved?: string; folder: string }
 
 /** A package change whose code the check couldn't fetch and read, so nothing vouches for it. */
 export interface NotInspected { path: string; name: string; version: string; reason: string }
@@ -97,8 +102,8 @@ const MAX_RUN_LOCKFILES = 200;
 /** One installed package as a lockfile records it. */
 interface Entry {
   name: string; version: string; resolved?: string; integrity?: string; key: string;
-  /** For a bundled package, the key of the nearest enclosing package that isn't bundled, and its folder in there. */
-  bundledBy?: { key: string; folder: string };
+  /** For a bundled package, where it is: in the tarball of the nearest enclosing package that isn't bundled. */
+  bundledBy?: BundledAt;
 }
 /** A lockfile's installed packages, and what depends on each name. */
 interface Lock { list: Entry[]; pulledBy: Map<string, Set<string>>; partial: boolean }
@@ -159,7 +164,8 @@ function entries(text: string | undefined): Lock | undefined {
       const up = (k: string) => k.slice(0, k.lastIndexOf('/node_modules/'));
       let root = up(key);
       while (packages[root]?.inBundle === true && root.lastIndexOf('/node_modules/') > 0) root = up(root);
-      bundledBy = { key: root, folder: key.slice(root.length + 1) };
+      const by = str(packages[root]?.resolved);
+      bundledBy = { ...(by !== undefined && { resolved: by }), folder: key.slice(root.length + 1) };
     }
     out.push({ name, version: e.version, resolved, integrity: str(e.integrity), key, ...(bundledBy && { bundledBy }) });
   }
@@ -187,7 +193,7 @@ function byName(list: Entry[]): Map<string, Map<string, Entry[]>> {
   return out;
 }
 
-const source = (e: Entry) => `${e.resolved} ${e.integrity}`;
+const source = (e: Entry) => `${e.resolved} ${e.integrity}${e.bundledBy ? ` in ${e.bundledBy.resolved} at ${e.bundledBy.folder}` : ''}`;
 
 /**
  * The line of each package key's first `"version"`, as npm writes lockfiles: one key per line, version before any
@@ -270,7 +276,6 @@ export function compareLockfile(base: string | undefined, head: string | undefin
   const [before, after] = [baseLock.list, headLock.list];
   const [old, now] = [byName(before), byName(after)];
   const atKey = new Map(before.map((e) => [e.key, e]));
-  const atHead = new Map(after.map((e) => [e.key, e]));
   // At most 20 dependents each: context for the security focus, not an inventory.
   const dependents = (name: string, removed: boolean) => [...((removed ? baseLock : headLock).pulledBy.get(name) ?? [])].sort().slice(0, 20);
   const lines = head === undefined ? new Map<string, number>() : versionLines(head);
@@ -285,9 +290,8 @@ export function compareLockfile(base: string | undefined, head: string | undefin
         name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
         ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
         ...(to !== undefined && baseInstall?.resolved !== undefined && { fromResolved: baseInstall.resolved }),
-        ...(to !== undefined && e.bundledBy && {
-          bundledIn: { ...(atHead.get(e.bundledBy.key)?.resolved !== undefined && { resolved: atHead.get(e.bundledBy.key)!.resolved }), folder: e.bundledBy.folder },
-        }),
+        ...(to !== undefined && e.bundledBy && { bundledIn: e.bundledBy }),
+        ...(to !== undefined && baseInstall?.bundledBy && { fromBundledIn: baseInstall.bundledBy }),
         ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
         ...(pulledBy.length && { pulledBy }),
         ...((to === undefined ? baseLock : headLock).partial && { pulledByPartial: true as const }),
@@ -463,27 +467,20 @@ const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 const UNPACKED_PER_FETCHED = 8;
 
 /**
- * A package manifest in a tarball: its own, or a bundled package's under `node_modules/`, at any depth, in any case
- * (a case-insensitive filesystem installs `NODE_MODULES/a/Package.json` as the same thing).
+ * The install scripts of the package in `folder` of a tarball (its own when empty), found in any case as a
+ * case-insensitive filesystem would (`lower` maps each lowercased path to its file; the tarball has no two such), by
+ * name. Its manifest must record `version` when given. npm also runs `node-gyp rebuild` for a `binding.gyp` with neither
+ * `install` nor `preinstall`.
  */
-const MANIFEST = /^((?:node_modules\/(?:@[^/]+\/)?[^/]+\/)*)package\.json$/i;
-
-/**
- * The install scripts in a tarball's files, by name, prefixed by their folder for a bundled package's (npm runs those
- * too): npm also runs `node-gyp rebuild` for a `binding.gyp` with neither `install` nor `preinstall`.
- */
-function installScripts(files: Map<string, Buffer>): Record<string, string> {
-  const lower = new Set([...files.keys()].map((k) => k.toLowerCase()));
-  if (!lower.has('package.json')) throw new Error('no package.json');
-  const found: Record<string, string> = {};
-  for (const [path, manifest] of files) {
-    const dir = MANIFEST.exec(path)?.[1];
-    if (dir === undefined) continue;
-    const scripts = JSON.parse(manifest.toString('utf8'))?.scripts;
-    const own: Record<string, string> = Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof scripts?.[k] === 'string').map((k) => [k, scripts[k]]));
-    if (lower.has(`${dir}binding.gyp`.toLowerCase()) && !own.install && !own.preinstall) own.install = 'node-gyp rebuild';
-    for (const [k, v] of Object.entries(own)) found[dir ? `${dir.slice(0, -1)} ${k}` : k] = v;
-  }
+function installScripts(lower: Map<string, Buffer>, folder: string, version?: string): Record<string, string> {
+  const dir = folder && `${folder}/`.toLowerCase();
+  const manifest = lower.get(`${dir}package.json`);
+  if (manifest === undefined) throw new Error(folder ? `not in its bundler's tarball at ${folder}` : 'no package.json');
+  const pkg = JSON.parse(manifest.toString('utf8'));
+  if (version !== undefined && pkg?.version !== version) throw new Error(`not in its bundler's tarball at ${folder} ${version}`);
+  const scripts = pkg?.scripts;
+  const found: Record<string, string> = Object.fromEntries(INSTALL_SCRIPTS.filter((k) => typeof scripts?.[k] === 'string').map((k) => [k, scripts[k]]));
+  if (lower.has(`${dir}binding.gyp`) && !found.install && !found.preinstall) found.install = 'node-gyp rebuild';
   return found;
 }
 
@@ -491,10 +488,9 @@ function installScripts(files: Map<string, Buffer>): Record<string, string> {
  * Fetch the tarball of every package change the PR moves to or adds, and of the version it moved from, and record each
  * install script the new one adds. Packages go in order of risk (added, then major bumps, then the rest), at most
  * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run; one tarball is fetched
- * once. A bundled package isn't fetched: its code is in its bundler's tarball, whose bundled install scripts are compared
- * with the bundler's (so a bundler that moves can't change one unseen, and one that doesn't installs the same code). It
- * must be in that tarball, at its folder and the version the lockfile records, or it is not inspected. An install
- * script is new when its name or its command is.
+ * once. A bundled package is read from its bundler's tarball, at its folder and the version the lockfile records, on
+ * each side (a bundled install whose bundler changed is a change, though its version didn't move). An install script is
+ * new when its name or its command is.
  * A package past either cap, or whose code (old or new) couldn't be fetched and read, isn't on the registry or isn't
  * recorded, is not inspected. A failed fetch still spends the bytes it received.
  * Between fetches, once `stopped` says so, it returns at once, leaving the check incomplete: the run is superseded.
@@ -510,7 +506,9 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   const wanted = check.lockfiles.flatMap(({ path, changes }) => changes.filter((c) => c.to !== undefined)
     .map((c) => ({ path, c }))).sort((a, b) => risk(a.c) - risk(b.c));
   const allowed = new Set([...new Set(wanted.map(({ c }) => `${c.name}@${c.to}`))].slice(0, caps.packages));
+  /** Each tarball's files by lowercased path, or why it couldn't be read. */
   const byUrl = new Map<string, Map<string, Buffer> | Error>();
+  const parsed = new Map<string, Record<string, string>>();
   let [bytes, unpacked] = [0, 0];
   /** A tarball's files, fetched once per run; undefined once the run is superseded. */
   const filesAt = async (url: string | undefined) => {
@@ -525,7 +523,7 @@ export async function inspectPackages(check: DependencyCheck, opts: {
         opts.fetched(url, { bytes: body.length });
         const tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
         unpacked += tar.length;
-        byUrl.set(url, untar(tar));
+        byUrl.set(url, new Map([...untar(tar)].map(([k, v]) => [k.toLowerCase(), v])));
       } catch (err) {
         if (err instanceof FetchError) bytes += err.received;
         const error = err instanceof Error ? err : new Error(String(err));
@@ -537,27 +535,22 @@ export async function inspectPackages(check: DependencyCheck, opts: {
     if (result instanceof Error) throw result;
     return result;
   };
-  const scripts = async (url: string | undefined) => {
+  /** One side's install scripts: its own tarball's, or its bundler's at its folder (and version). */
+  const scripts = async (resolved: string | undefined, bundled: BundledAt | undefined, version: string) => {
+    const url = bundled ? bundled.resolved : resolved;
     const files = await filesAt(url);
-    return files && installScripts(files);
+    if (!files) return;
+    const key = `${url}\0${bundled?.folder ?? ''}\0${bundled ? version : ''}`;
+    if (!parsed.has(key)) parsed.set(key, installScripts(files, bundled?.folder ?? '', bundled && version));
+    return parsed.get(key)!;
   };
   const notInspected: NotInspected[] = [];
   for (const { path, c } of wanted) {
     const skip = (reason: string) => notInspected.push({ path, name: c.name, version: c.to!, reason });
     if (!allowed.has(`${c.name}@${c.to}`)) { skip(`over the run's cap of ${caps.packages} packages`); continue; }
     try {
-      if (c.bundledIn) {
-        const files = await filesAt(c.bundledIn.resolved);
-        if (!files) return;
-        const want = `${c.bundledIn.folder}/package.json`.toLowerCase();
-        const manifest = [...files].find(([k]) => k.toLowerCase() === want)?.[1];
-        if (!manifest || JSON.parse(manifest.toString('utf8'))?.version !== c.to) {
-          throw new Error(`not in its bundler's tarball at ${c.bundledIn.folder} ${c.to}`);
-        }
-        continue;
-      }
-      const now = await scripts(c.resolved);
-      const before = c.from === undefined ? {} : await scripts(c.fromResolved);
+      const now = await scripts(c.resolved, c.bundledIn, c.to!);
+      const before = c.from === undefined ? {} : await scripts(c.fromResolved, c.fromBundledIn, c.from);
       if (!now || !before) return;
       const added = Object.entries(now).filter(([k, v]) => before[k] !== v);
       if (added.length) c.installScripts = Object.fromEntries(added);

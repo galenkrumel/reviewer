@@ -234,28 +234,35 @@ test('a tarball a reader could take another way than npm is not inspected, rathe
   assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 7);
 });
 
-test("a bundled package's install scripts are its bundler's: compared with them, never fetched on their own", async () => {
+test("a bundled package is inspected on its own, from its bundler's tarball on each side, even when only its bundler moved", async () => {
   const inner = (v: string) => ({ version: v, inBundle: true });
   const s = setup(
-    { 'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0') },
-    // a keeps its version while its bundler moves: its code is whatever the new bundler ships.
     {
+      'node_modules/host': pkg('host', '1.0.0'), 'node_modules/host/node_modules/a': inner('1.0.0'),
+      'node_modules/host/node_modules/m': inner('1.0.0'), 'node_modules/b': pkg('b', '1.0.0'), 'node_modules/top': pkg('top', '1.0.0'),
+    },
+    {
+      // a keeps its version while its bundler moves: its code is whatever the new bundler ships.
       'node_modules/host': pkg('host', '1.1.0'), 'node_modules/host/node_modules/a': inner('1.0.0'),
+      // m moves folder with the same script: not new. top is now a bundled copy with a script it didn't have.
+      'node_modules/host/node_modules/x': inner('1.0.0'), 'node_modules/host/node_modules/x/node_modules/m': inner('1.0.0'),
+      'node_modules/host/node_modules/top': inner('1.0.1'),
       'node_modules/b': pkg('b', '1.0.1', { inBundle: true }),
     },
   );
-  const bundled = (scripts = {}) => JSON.stringify({ name: 'a', version: '1.0.0', scripts });
-  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, { 'node_modules/a/package.json': bundled() }));
+  const manifest = (name: string, version: string, scripts = {}) => JSON.stringify({ name, version, scripts });
+  s.registry.tarballs.set(url('host', '1.0.0'), packageTarball('host', '1.0.0', {}, {
+    'node_modules/a/package.json': manifest('a', '1.0.0'), 'node_modules/m/package.json': manifest('m', '1.0.0', { install: 'node m.js' }),
+  }));
   s.registry.tarballs.set(url('host', '1.1.0'), packageTarball('host', '1.1.0', {}, {
-    'node_modules/a/package.json': bundled({ postinstall: 'node a.js' }), 'node_modules/@s/c/node_modules/d/binding.gyp': '{}',
-    'node_modules/@s/c/node_modules/d/package.json': JSON.stringify({ name: 'd' }),
+    'node_modules/a/package.json': manifest('a', '1.0.0', { postinstall: 'node a.js' }),
+    'node_modules/x/package.json': manifest('x', '1.0.0'), 'node_modules/x/node_modules/m/package.json': manifest('m', '1.0.0', { install: 'node m.js' }),
+    'node_modules/top/package.json': manifest('top', '1.0.1', { preinstall: 'node t.js' }),
   }));
   const review = await s.opened();
 
   assert.ok(s.registry.fetched.includes(url('b', '1.0.1')), 'an inBundle entry with a source of its own is fetched');
-  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**host adds an install script**']);
-  assert.match(review.comments[0]!.body, /`node_modules\/a postinstall`: `node a\.js`/);
-  assert.match(review.comments[0]!.body, /`node_modules\/@​?s\/c\/node_modules\/d install`: `node-gyp rebuild`/);
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]).sort(), ['**a adds an install script**', '**top adds an install script**']);
   assert.doesNotMatch(review.body, /Not inspected/);
 });
 
@@ -298,17 +305,17 @@ test('tar framing node-tar would read another way (checksum, magic, data after t
 
 test('on a case-insensitive filesystem two paths are one: such a tarball is not inspected, and any-case manifests count', async () => {
   const s = setup({ 'node_modules/cc': pkg('cc', '1.0.0'), 'node_modules/up': pkg('up', '1.0.0') },
-    { 'node_modules/cc': pkg('cc', '1.0.1'), 'node_modules/up': pkg('up', '1.0.1') });
+    { 'node_modules/cc': pkg('cc', '1.0.1'), 'node_modules/up': pkg('up', '1.0.1'), 'node_modules/up/node_modules/b': { version: '1.0.0', inBundle: true } });
   s.registry.tarballs.set(url('cc', '1.0.1'), tarball({
     'package/package.json': JSON.stringify({ name: 'cc' }), 'package/PACKAGE.JSON': JSON.stringify({ scripts: { postinstall: 'x' } }),
   }));
   s.registry.tarballs.set(url('up', '1.0.1'), packageTarball('up', '1.0.1', {}, {
-    'NODE_MODULES/b/Package.json': JSON.stringify({ scripts: { preinstall: 'node b.js' } }),
+    'NODE_MODULES/b/Package.json': JSON.stringify({ version: '1.0.0', scripts: { preinstall: 'node b.js' } }),
   }));
   const review = await s.opened();
 
   assert.match(review.body, /Not inspected[^\n]*\n- `cc 1\.0\.1`\n\n/);
-  assert.match(review.comments[0]!.body, /`NODE_MODULES\/b preinstall`: `node b\.js`/);
+  assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**b adds an install script**']);
 });
 
 test('a link in a tarball, which npm would extract over a file, is not inspected', async () => {
