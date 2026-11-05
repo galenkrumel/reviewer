@@ -448,6 +448,19 @@ test('the tarballs a run fetches are capped, old versions and failed fetches inc
   assert.match(github.reviews.at(-1)!.review.body, /Not inspected[^\n]*\n- `x 2\.0\.0`\n- `x 2\.0\.0`\n- `x 2\.0\.0`\n\n/);
 });
 
+test('a file and a directory at one path, in either order, are not inspected: extracting keeps whichever came last', async () => {
+  const names = ['later', 'earlier', 'under'];
+  const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
+    Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
+  const manifest = JSON.stringify({ name: 'x' });
+  s.registry.tarballs.set(url('later', '1.0.1'), tarball({ 'package/package.json': manifest, 'package/PACKAGE.JSON/': '' }, { 'package/PACKAGE.JSON/': '5' }));
+  s.registry.tarballs.set(url('earlier', '1.0.1'), tarball({ 'package/lib/': '', 'package/package.json': manifest, 'package/lib': '' }, { 'package/lib/': '5' }));
+  s.registry.tarballs.set(url('under', '1.0.1'), tarball({ 'package/package.json': manifest, 'package/package.json/x': '' }));
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `earlier 1\.0\.1`\n- `later 1\.0\.1`\n- `under 1\.0\.1`\n\n/);
+});
+
 test('a link in a tarball, which npm would extract over a file, is not inspected', async () => {
   const s = setup({ 'node_modules/ln': pkg('ln', '1.0.0') }, { 'node_modules/ln': pkg('ln', '1.0.1') });
   s.registry.tarballs.set(url('ln', '1.0.1'), tarball({

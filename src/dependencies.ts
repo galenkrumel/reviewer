@@ -496,6 +496,8 @@ export function untar(archive: Buffer): Map<string, Buffer> {
   let next: { path?: string; size?: number } | undefined;
   /** Each path as a case-insensitive filesystem sees it, to the path stored. */
   const folded = new Map<string, string>();
+  /** Each directory, as such a filesystem sees it: named by an entry or holding one. */
+  const dirs = new Set<string>();
   for (let at = 0; at + 512 <= archive.length;) {
     const h = archive.subarray(at, at + 512);
     if (h.every((b) => b === 0)) {
@@ -524,20 +526,34 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const prefix = posixUstar ? field(h, 345, 155) : '';
     const raw = next?.path ?? (prefix ? `${prefix}/` : '') + field(h, 0, 100);
     next = undefined;
-    // Directories hold no code; a link can replace a file when extracted, so it and any other type (devices, GNU or
-    // Solaris extensions, unknown) are refused.
-    if (type === '5') continue;
-    if (!['0', '', '7'].includes(type)) throw malformed();
-    const segments = raw.split('/');
-    if (raw.startsWith('/') || segments.includes('..')) continue;
+    // A link can replace a file when extracted, so it and any other type but a file or directory (devices, GNU or
+    // Solaris extensions, unknown) are refused. Directories hold no code, but one can replace a file too.
+    const isDir = type === '5';
+    if (!isDir && !['0', '', '7'].includes(type)) throw malformed();
+    const trimmed = isDir ? raw.replace(/\/+$/, '') : raw;
+    const segments = trimmed.split('/');
+    if (trimmed.startsWith('/') || segments.includes('..')) continue;
     // Windows takes `package.json.`, `package.json ` and `package.json::$DATA` for `package.json`: refused, like `.`.
-    if (raw.includes('\\') || raw.includes(':') || segments.some((x) => x === '' || x === '.' || /[. ]$/.test(x))) throw malformed();
+    if (trimmed.includes('\\') || trimmed.includes(':') || segments.some((x) => x === '' || x === '.' || /[. ]$/.test(x))) throw malformed();
     if (segments.length < 2) continue;
     const path = segments.slice(1).join('/');
     // Filesystems fold non-ASCII case and normalization their own ways: such a path is refused, so ASCII case is all.
     if (/[^\x20-\x7e]/.test(path)) throw malformed();
     const fold = path.toLowerCase();
-    if ((folded.get(fold) ?? path) !== path) throw malformed();
+    // A file and a directory at one path, in either order (or a file under a file), are extracted as whichever came
+    // last: refused rather than read.
+    const parts = fold.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      const parent = parts.slice(0, i).join('/');
+      if (folded.has(parent)) throw malformed();
+      dirs.add(parent);
+    }
+    if (isDir) {
+      if (folded.has(fold)) throw malformed();
+      dirs.add(fold);
+      continue;
+    }
+    if (dirs.has(fold) || (folded.get(fold) ?? path) !== path) throw malformed();
     folded.set(fold, path);
     files.set(path, data);
   }
@@ -656,6 +672,8 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   /** Each tarball's files by lowercased path and its body (for integrity), or why it couldn't be read. */
   const byUrl = new Map<string, { files: Map<string, Buffer>; body: Buffer } | Error>();
   const parsed = new Map<string, Record<string, string>>();
+  /** Whether each tarball matched each integrity, so a tarball isn't hashed again for every lockfile that has it. */
+  const verified = new Map<string, boolean>();
   let [bytes, unpacked, tarballs] = [0, 0, 0];
   // Old versions are fetched too, and a failed fetch spends only the bytes it received: the tarballs a run asks for are
   // capped as well.
@@ -692,8 +710,10 @@ export async function inspectPackages(check: DependencyCheck, opts: {
     }
     const result = byUrl.get(url)!;
     if (result instanceof Error) throw result;
-    if (integrity !== undefined && !matchesIntegrity(result.body, integrity)) {
-      throw new Error("the registry's tarball doesn't match the lockfile's integrity");
+    if (integrity !== undefined) {
+      const key = `${url}\0${integrity}`;
+      if (!verified.has(key)) verified.set(key, matchesIntegrity(result.body, integrity));
+      if (!verified.get(key)) throw new Error("the registry's tarball doesn't match the lockfile's integrity");
     }
     return result.files;
   };
