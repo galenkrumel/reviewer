@@ -600,11 +600,11 @@ export function createApp(deps: {
       }
     }
     // A retry keeps the reused focuses' findings as their run decided them: the published ones are threads now. Only
-    // this run's are validated, against everything already posted on the PR, this head included, and within what is
-    // left of the run's comment cap. The Dependency check's are made again every run, so never reused.
+    // this run's are validated, within what is left of the run's comment cap. Any retry's are checked against
+    // everything already posted on the PR, this head included. The Dependency check's are made again every run, so never reused.
     const reusedFocuses = new Set(focuses.filter((f) => f.reusedFrom !== undefined).map((f) => f.focus));
     const reused = reuse?.findings.filter((f) => !f.check && reusedFocuses.has(f.focus)) ?? [];
-    const posted = store.postedFindings(job.repo, job.pr, reuse ? '' : job.headSha);
+    const posted = store.postedFindings(job.repo, job.pr, job.event === RETRY ? '' : job.headSha);
     // First, so a tie in the cap's ranking goes to the check.
     const validated = validate([...checkFound.map((finding) => ({ focus: 'security', finding })), ...reported], changed, posted, {
       minSeverity: settings.minSeverity, minConfidence: settings.minConfidence,

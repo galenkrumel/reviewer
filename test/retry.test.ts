@@ -162,6 +162,33 @@ test('the Dependency check\'s finding is posted once however many retries follow
   assert.deepEqual(github.reviews.slice(1).map((r) => r.review.comments), [[], []]);
 });
 
+test('a retry of a label re-review that failed outright posts nothing an earlier run at that head already did', async () => {
+  const fx = gitFixture({ [PATH]: 'keep\n' }, { [PATH]: 'keep\n' + lines(60) });
+  const pr = { number: 7, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const github = new FakeGitHub();
+  github.addPullRequest(REPO, fx.url, pr);
+  const model = new ScriptedModel({
+    orchestrator: [select('correctness'), select('correctness'), select('correctness')],
+    correctness: [report(f(5)), report(f(5)), report(f(5))], security: [noFindings(), noFindings(), noFindings()],
+  });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  const createReview = github.createReview.bind(github);
+  github.createReview = async () => { throw new Error('GitHub POST reviews: 502'); };
+  await app.receive(delivery('pull_request', prPayload('labeled', REPO, pr, { label: { name: 'ai-review' } })));
+  await app.drain();
+  assert.equal(app.runs().at(-1)!.status, 'failed');
+
+  github.createReview = createReview;
+  await app.receive(comment('Retry'));
+  await app.drain();
+  const run = app.runs().at(-1)!;
+  assert.equal(run.event, 'pull_request.retry');
+  assert.deepEqual(run.findings.map((x) => [x.line, x.outcome]), [[5, 'duplicate']]);
+  assert.deepEqual(github.reviews.map((r) => r.review.comments.map((c) => c.line)), [[5]]);
+});
+
 test('a retry of a run that failed outright runs every focus again, since its findings may never have been posted', async () => {
   const fx = gitFixture({ [PATH]: 'keep\n' }, { [PATH]: 'keep\n' + lines(60) });
   const pr = { number: 7, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
