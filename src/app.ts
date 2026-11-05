@@ -13,7 +13,7 @@ import { parseRepoConfig, REPO_CONFIG_PATH } from './repoconfig.ts';
 import { BudgetExceeded, FOCUSES, InvalidReport, meteredChat, runReviewer, type Chat, type Focus } from './reviewer.ts';
 import { reviewScope, type Scope } from './scope.ts';
 import {
-  isRedecision, openStore, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
+  isRedecision, openStore, RETRY, type Finding, type Job, type RecordedFinding, type RecordedFocus, type RecordedInvocation, type Waiver,
 } from './store.ts';
 import { runVerifier, type Verdict } from './verifier.ts';
 import type { Clock, GitHubPort, HookDelivery, ModelPort, NewReview, RegistryPort, PullRequest, ReviewComment, ReviewThread } from './ports.ts';
@@ -399,22 +399,34 @@ export function createApp(deps: {
     const ignored = ignoreReason(event, payload, label);
     if (ignored) return { status: 202, ignored };
     if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
-    if (!Number.isInteger(payload.installation?.id) || !pr?.head?.sha || !pr.base?.sha) return { status: 400 };
-    const gated = authorReason(pr, policy, label);
+    // A retry's PR is the issue commented on, and it retries the PR's latest run, at that run's SHAs.
+    let subject = pr, headSha: string | undefined = pr?.head?.sha, baseSha: string | undefined = pr?.base?.sha;
+    if (event === 'issue_comment') {
+      subject = payload.issue;
+      const run = Number.isInteger(subject?.number) ? store.latestRun(repo, subject.number) : undefined;
+      if (!run) return { status: 202, ignored: 'no review to retry on this PR' };
+      // The comment's issue doesn't say whether the PR is a draft; its last pull_request delivery does.
+      if (store.prState(repo, subject.number) === 'draft') return { status: 202, ignored: 'pull request is a draft' };
+      // Retried as it stands when the comment lands: one still going has nothing to retry yet.
+      if (run.status === 'queued' || run.status === 'running') return { status: 202, ignored: 'the latest review is still in progress' };
+      ({ headSha, baseSha } = run);
+    }
+    if (!Number.isInteger(payload.installation?.id) || !headSha || !baseSha) return { status: 400 };
+    const gated = authorReason(subject, policy, label);
     if (gated) return { status: 202, ignored: gated };
 
     // Count and insert with no await between them, so concurrent deliveries can't both slip under the cap.
-    const capped = store.countRuns(repo, pr.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
+    const capped = store.countRuns(repo, subject.number, new Date(deps.clock.now().getTime() - DAY_MS)) >= runCap;
     store.enqueue({
       deliveryId,
-      event: `${event}.${payload.action}`,
+      event: event === 'issue_comment' ? RETRY : `${event}.${payload.action}`,
       repo,
-      pr: pr.number,
+      pr: subject.number,
       installationId: payload.installation.id,
-      headSha: pr.head.sha,
-      baseSha: pr.base.sha,
-      title: pr.title ?? '',
-      body: pr.body ?? '',
+      headSha,
+      baseSha,
+      title: subject.title ?? '',
+      body: subject.body ?? '',
     }, capped ? 'skipped' : 'queued', digest);
     return capped ? { status: 202, ignored: `run cap of ${runCap} per 24h reached` } : { status: 202 };
   }
@@ -458,6 +470,16 @@ export function createApp(deps: {
 
   async function reviewJob(job: Job, invocations: RecordedInvocation[]) {
     progress(job, 'run started', { event: job.event, head: job.headSha.slice(0, 7) });
+    // A retry builds on the latest run at its SHAs. A published one with failed focuses runs only those again, reusing
+    // the rest; one that failed outright runs every focus again, since its findings may never have been posted.
+    // ponytail: a run that crashed or threw after its reviewers recorded no focuses, so its retry pays for all of them
+    // again; record each focus as it finishes if that cost shows up.
+    const retried = job.event === RETRY ? store.retryBase(job.repo, job.pr, job.headSha, job.baseSha, job.id) : undefined;
+    const reuse = retried?.status === 'published' && retried.focuses.some((f) => f.status === 'failed') ? retried : undefined;
+    if (job.event === RETRY && !reuse && retried?.status !== 'failed') {
+      progress(job, 'nothing to retry', { status: retried?.status });
+      return store.finish(job.id, 'skipped');
+    }
     const token = await github.mintToken(job.installationId);
     // Idempotency first: if this run's review already exists (e.g. posted before a restart), that is the outcome.
     const existing = (await github.listReviews(token, job.repo, job.pr)).find((r) => r.body.includes(marker(job)));
@@ -494,7 +516,8 @@ export function createApp(deps: {
     // After a push, reviewers focus on what changed since the last full review, even if the base moved forward
     // (main merged in). A late finding on a line that review saw is still commented on. A label re-review asks for the
     // whole PR again.
-    const last = job.event === 'pull_request.labeled' ? undefined : store.lastReviewed(job.repo, job.pr, job.headSha);
+    // A retry of a label re-review reviews the whole PR, as that run did.
+    const last = job.event === 'pull_request.labeled' || retried?.labeled ? undefined : store.lastReviewed(job.repo, job.pr, job.headSha);
     let newDiff = last === undefined ? undefined : await source.diffSince(last.headSha, last.baseSha, scope.reviewed);
     // The token budget only covered the PR diff. A bigger diff since then (a large revert) gets a full review instead.
     if (newDiff !== undefined && newDiff.length > diff.length) newDiff = undefined;
@@ -535,9 +558,10 @@ export function createApp(deps: {
     const checked = new Set([...dependencies.lockfiles.map((l) => l.path), ...dependencies.unreadable]);
     const dependencyReview = checked.size > 0 && (since === undefined || !last!.focuses.has('security')
       || await source.diffSince(last!.headSha, last!.baseSha, files.filter((f) => checked.has(f.path) || checked.has(f.oldPath!))) !== '');
-    if (codeReview || dependencyReview) {
+    if (reuse || codeReview || dependencyReview) {
       let picks: Pick[] = [];
-      if (codeReview) try {
+      if (reuse) orchestratorError = reuse.orchestratorError ?? undefined;
+      else if (codeReview) try {
         picks = await runOrchestrator({
           chat: chatFor(job, 'orchestrator', invocations), files: scope.reviewed, title: job.title, body: job.body,
           pathHints: settings.pathHints,
@@ -551,15 +575,25 @@ export function createApp(deps: {
       }
 
       // Sequential: one reviewer's failure never stops the others.
-      const selected = selectFocuses(picks, codeReview ? scope.reviewed.map((f) => f.path) : [], settings.maxReviewers,
-        settings.disabledFocuses, dependencyReview);
+      // A retry runs the same focuses: the failed ones again, the others from the run it retries.
+      const selected = reuse ? reuse.focuses.map((f) => ({ focus: f.focus as Focus, reason: f.reason }))
+        : selectFocuses(picks, codeReview ? scope.reviewed.map((f) => f.path) : [], settings.maxReviewers,
+          settings.disabledFocuses, dependencyReview);
       const dependencyBlock = dependencyReview ? describeCheck(dependencies) : undefined;
-      progress(job, 'reviewers picked', { focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined });
+      progress(job, 'reviewers picked', {
+        focuses: selected.map((s) => s.focus), fallback: orchestratorError !== undefined,
+        ...(reuse && { reused: reuse.focuses.filter((f) => f.status === 'succeeded').map((f) => f.focus) }),
+      });
       // A focus that didn't run on the last review never saw its lines, so it reviews the whole PR.
       // ponytail: compares with the last reviewed run only; a focus that ran two runs ago redoes the whole PR too. Track a
       // last-reviewed head per focus if that cost shows up.
       if (since !== undefined) newcomers.push(...selected.map((s) => s.focus).filter((f) => !last!.focuses.has(f)));
       for (const { focus, reason } of selected) {
+        const done = reuse?.focuses.find((f) => f.focus === focus && f.status === 'succeeded');
+        if (done) {
+          focuses.push({ ...done, reusedFrom: done.reusedFrom ?? reuse!.id });
+          continue;
+        }
         if (store.superseded(job.id)) return;
         const review = () => runReviewer({
           focus, chat: chatFor(job, focus, invocations), maxTurns: agentConfig(focus).maxTurns,
@@ -624,11 +658,18 @@ export function createApp(deps: {
         logFailure(job, 'dependencies', err, false);
       }
     }
+    // A retry keeps the reused focuses' findings as their run decided them: the published ones are threads now. Only
+    // this run's are validated, within what is left of the run's comment cap. Any retry's are checked against
+    // everything already posted on the PR, this head included. The Dependency check's are made again every run, so never reused.
+    const reusedFocuses = new Set(focuses.filter((f) => f.reusedFrom !== undefined).map((f) => f.focus));
+    const reused = reuse?.findings.filter((f) => !f.check && reusedFocuses.has(f.focus)) ?? [];
+    const posted = store.postedFindings(job.repo, job.pr, job.event === RETRY ? '' : job.headSha);
     // First, so a tie in the cap's ranking goes to the check.
-    const findings = validate([...checkFound.map((finding) => ({ focus: 'security', finding })), ...reported], changed,
-      store.postedFindings(job.repo, job.pr, job.headSha), {
-        minSeverity: settings.minSeverity, minConfidence: settings.minConfidence, maxComments: settings.maxComments,
-      }, threads, waivers);
+    const validated = validate([...checkFound.map((finding) => ({ focus: 'security', finding })), ...reported], changed, posted, {
+      minSeverity: settings.minSeverity, minConfidence: settings.minConfidence,
+      maxComments: Math.max(0, settings.maxComments - (reuse?.findings.filter((f) => f.outcome === 'published').length ?? 0)),
+    }, threads, waivers);
+    const findings = [...validated, ...reused];
     // The check decides its own threads: Fixed once it no longer finds their problem at a head it fully checked, else
     // open, with a reply when the author spoke last. It fully checked a lockfile it compared, with every lookup made,
     // or one the PR no longer changes; one it couldn't read, or now leaves out, fixes nothing.
@@ -648,7 +689,7 @@ export function createApp(deps: {
         reply: still ? CHECK_STILL_FINDS : checked ? 'The dependency check no longer finds this at the current head.' : CHECK_COULDNT,
       };
     });
-    const comments: ReviewComment[] = findings
+    const comments: ReviewComment[] = validated
       .filter((f) => f.outcome === 'published')
       .map((f) => toComment(f, changed, job.repo));
 
@@ -711,7 +752,7 @@ export function createApp(deps: {
       commit_id: job.headSha,
       event: approve ? 'APPROVE' : 'COMMENT',
       body: summary(job, comments.length, {
-        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, newcomers, approve,
+        scope, splitAbove: oversized ? maxLines : undefined, focuses, fallbackUsed, since, newcomers, approve, retry: reuse !== undefined,
         blockers: config.approveWhenClean ? blockers : [], undismissed,
         waivers: approve ? accepted(waivers, threads, findings) : [], dependencyNotes,
       }),
@@ -856,6 +897,8 @@ const MAX_ATTEMPTS = 3;
 /** A comment that waives: `Waive:` first, ignoring case and leading whitespace. */
 const WAIVE = /^\s*waive:\s*/i;
 const isWaive = (body: string) => WAIVE.test(body);
+/** A comment that retries: `Retry` alone, ignoring case and surrounding whitespace. */
+const RETRY_COMMAND = /^\s*retry\s*$/i;
 /** Fetch and publish: four attempts, 2s, 8s and 32s apart. */
 const RETRY_ATTEMPTS = 4;
 const BACKOFF_MS = 2000;
@@ -879,6 +922,16 @@ function ignoreReason(event: unknown, payload: any, label: string): string | und
     if (payload.action !== 'created') return `action ${payload.action} is not a re-decision trigger`;
     if (!isWaive(c?.body ?? '') || !TRUSTED_AUTHORS.has(c?.author_association)) return "comment is not a maintainer's Waive:";
     return prReason(payload);
+  }
+  if (event === 'issue_comment') {
+    // The other comment command: a maintainer's `Retry` on the PR reruns the failed focuses of its latest run.
+    const c = payload.comment;
+    if (payload.action !== 'created') return `action ${payload.action} is not a retry trigger`;
+    if (!payload.issue?.pull_request) return 'comment is not on a pull request';
+    if (!RETRY_COMMAND.test(c?.body ?? '')) return 'comment is not "Retry"';
+    if (!TRUSTED_AUTHORS.has(c?.author_association)) return 'comment is not by a maintainer';
+    if (payload.issue.draft) return 'pull request is a draft';
+    return;
   }
   if (event !== 'pull_request') return `event ${String(event)} is not pull_request`;
   if (!TRIGGERS.has(payload.action)) return `action ${payload.action} is not a review trigger`;
@@ -1005,6 +1058,8 @@ function summary(job: Job, count: number, notes: {
   scope: Scope; splitAbove?: number; focuses: RecordedFocus[]; fallbackUsed: boolean; since?: string; approve?: boolean;
   /** Focuses that reviewed the whole PR though `since` is set: they didn't run on that review. */
   newcomers?: Focus[];
+  /** A retry, whose reused focuses didn't run again. */
+  retry?: boolean;
   /** Why this run didn't approve, when approvals are on. */
   blockers: string[];
   /** Why an earlier approval by this app may still be in force, when it may. */
@@ -1026,6 +1081,7 @@ function summary(job: Job, count: number, notes: {
     // Names only: the reasons are PR-influenced, so they stay in the run record.
     focuses.length > 0 && `Reviewed for ${listed(focuses.map((f) => f.focus))}${
       notes.fallbackUsed ? ' (fallback selection: the orchestrator failed)' : ''}.`,
+    notes.retry && `Retried ${listed(focuses.filter((f) => f.reusedFrom === undefined).map((f) => f.focus))}; the findings of the other focuses are from the earlier review of this head.`,
     notes.since && `Focused on changes since \`head@${notes.since.slice(0, 7)}\`, which was already reviewed${
       notes.newcomers?.length ? `, except ${listed(notes.newcomers)}, which did not run on that review and covered the whole PR` : ''}.`,
     // Focus names only; error detail stays in the run record.
@@ -1058,6 +1114,6 @@ function isVerified(t: ReviewThread): boolean {
   return t.comments.length > 1 && !!last?.byApp && last.body.endsWith(`\n\n${VERIFIED}`);
 }
 
-// A label re-review and a re-decision repeat a head/base pair on purpose, so their markers also name the run.
+// A label re-review, a retry and a re-decision repeat a head/base pair on purpose, so their markers also name the run.
 const marker = (job: Job) => `<!-- ai-review:${job.repo}#${job.pr}:${job.headSha}:${job.baseSha}${
-  job.event === 'pull_request.labeled' || isRedecision(job.event) ? `:run-${job.id}` : ''} -->`;
+  job.event === 'pull_request.labeled' || job.event === RETRY || isRedecision(job.event) ? `:run-${job.id}` : ''} -->`;

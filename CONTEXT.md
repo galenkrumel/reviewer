@@ -11,6 +11,10 @@ _Avoid_: Job (in prose), review (for the job itself)
 **Re-decision**:
 A Run that runs no reviewers and decides approval again from an earlier published Run's findings and the threads as they are now.
 
+**Retry**:
+A Run that a Maintainer's `Retry` comment on the PR starts, at the head and base of the PR's latest full Run (never a Re-decision). When that Run published with failed Focuses, the Retry runs again only those, reuses the other Focuses' Findings as that Run decided them, then decides and publishes like a full Run. When that Run failed outright, the Retry is a fresh Run that selects its Focuses as any Run does. With nothing failed it is recorded skipped and posts nothing; while that Run is still going, the comment is ignored.
+_Avoid_: Re-run, re-review (that's the label)
+
 **Review**:
 The GitHub pull request review a Run publishes. Not every Run has one.
 _Avoid_: Run, review run
