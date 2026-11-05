@@ -326,7 +326,8 @@ ${waivers.length > 0 && html`<h2>Waived on this PR</h2>
 /** Each compared lockfile's package changes (one row saying none moved, for a reformat), then the lockfiles left out. */
 function dependencySection(d: DependencyCheck) {
   const rows = d.lockfiles.flatMap(({ path, changes }) => (changes.length ? changes : [undefined]).map((c) => ({ path, c })));
-  if (!rows.length && !d.unreadable.length && !d.unchecked.length) return;
+  const notInspected = d.notInspected ?? [];
+  if (!rows.length && !d.unreadable.length && !d.unchecked.length && !notInspected.length) return;
   const paths = (title: string, list: string[], tone = '') => list.length > 0
     && html`<p class="${tone}">${title}: ${list.map((p, i) => html`${i > 0 && ', '}<code>${p}</code>`)}</p>`;
   return html`<h2>Dependency check</h2>
@@ -336,6 +337,9 @@ ${rows.map(({ path, c }) => html`<tr><td><code>${path}${c?.line !== undefined ? 
   c ? html`<td>${c.name}</td><td>${describeMove(c)}</td><td>${(c.advisories ?? []).map((a, i) => html`${i > 0 && html`<br>`}<code>${a.id}</code> ${
     a.severity}, <span${a.status === 'introduced' ? new Html(' class="err"') : ''}>${a.status}</span>`)}</td>`
     : html`<td class="muted" colspan="3">no packages moved</td>`}</tr>`)}</table></div>`}
+${notInspected.length > 0 && html`<p class="err">Not inspected, blocking approval:</p>
+<div class="card"><table class="grid"><tr><th>Lockfile</th><th>Package</th><th>Version</th><th>Why</th></tr>
+${notInspected.map((n) => html`<tr><td><code>${n.path}</code></td><td>${n.name}</td><td>${n.version}</td><td>${n.reason}</td></tr>`)}</table></div>`}
 ${paths('Not understood, blocking approval', d.unreadable, 'err')}
 ${paths('Not checked (format not supported yet)', d.unchecked)}`;
 }

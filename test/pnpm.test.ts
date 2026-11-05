@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { AppConfig } from '../src/app.ts';
 import { compareLockfile, dependencyFindings, describeMove } from '../src/dependencies.ts';
-import { delivery, FakeGitHub, gitFixture, noFindings, openedPayload, ScriptedModel, testApp } from './harness.ts';
+import {
+  delivery, FakeGitHub, FakeRegistry, gitFixture, integrityOf, noFindings, openedPayload, packageTarball, ScriptedModel, testApp,
+} from './harness.ts';
 
 const PNPM = 'pnpm-lock.yaml';
 const compare = (base: string | undefined, head: string | undefined) => compareLockfile(base, head, PNPM);
@@ -48,6 +50,7 @@ test('a v9 package moved from one version to another, with its registry tarball,
   assert.deepEqual(compare(purify('3.4.11'), head), [{
     name: 'dompurify', from: '3.4.11', to: '3.4.17',
     resolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz', integrity: integrity('dompurify@3.4.17'),
+    fromResolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.11.tgz', fromIntegrity: integrity('dompurify@3.4.11'),
     line: lineOf(head, '  dompurify@3.4.17:'), pulledBy: ['(root)'],
   }]);
 });
@@ -104,7 +107,8 @@ packages:
   const head = six('18.3.0');
   assert.deepEqual(compare(six('18.2.0'), head), [{
     name: 'react-dom', from: '18.2.0', to: '18.3.0', resolved: 'https://registry.npmjs.org/react-dom/-/react-dom-18.3.0.tgz',
-    integrity: integrity('18.3.0'), line: lineOf(head, '  /react-dom@18.3.0(react@18.2.0):'), pulledBy: ['(root)'],
+    integrity: integrity('18.3.0'), fromResolved: 'https://registry.npmjs.org/react-dom/-/react-dom-18.2.0.tgz', fromIntegrity: integrity('18.2.0'),
+    line: lineOf(head, '  /react-dom@18.3.0(react@18.2.0):'), pulledBy: ['(root)'],
   }]);
 });
 
@@ -279,7 +283,9 @@ test('fields the check never reads may be block lists or multi-line text', () =>
 
 const REPO = 'acme/widgets';
 
-async function opened(base: Parameters<typeof gitFixture>[0], head: Parameters<typeof gitFixture>[1], config: Partial<AppConfig> = {}) {
+async function opened(
+  base: Parameters<typeof gitFixture>[0], head: Parameters<typeof gitFixture>[1], config: Partial<AppConfig> = {}, registry = new FakeRegistry(),
+) {
   const fx = gitFixture(base, head);
   const pr = { number: 85, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
   const github = new FakeGitHub();
@@ -287,7 +293,7 @@ async function opened(base: Parameters<typeof gitFixture>[0], head: Parameters<t
   github.advisoryDb.push({ id: 'GHSA-mrv2-3pqr-j5jr', severity: 'high', summary: 'DOMPurify allows XSS', firstPatched: '3.4.17',
     withdrawn: false, package: 'dompurify', versions: ['3.4.16'] });
   const model = new ScriptedModel(Array.from({ length: 5 }, noFindings));
-  const t = testApp({ model, github, config });
+  const t = testApp({ model, github, registry, config });
   await t.app.receive(delivery('pull_request', openedPayload(REPO, pr)));
   await t.app.drain();
   return { review: github.reviews.at(-1)!.review, model, github, logs: t.logs };
@@ -303,6 +309,18 @@ test('a pnpm-lock.yaml change is listed in the summary, and its introduced Advis
   assert.deepEqual(review.comments.map((c) => [c.path, c.line, c.body.split('\n')[0]]),
     [['web/pnpm-lock.yaml', lineOf(head, '  dompurify@3.4.16:'), '**Advisory GHSA-mrv2-3pqr-j5jr in dompurify**']]);
   assert.deepEqual(github.lookups.sort(), ['dompurify@3.4.10', 'dompurify@3.4.16']);
+});
+
+test("a pnpm package's tarball is fetched and checked against its integrity, and a new install script posted on its key line", async () => {
+  const scripted = packageTarball('dompurify', '3.4.17', { postinstall: 'node x.js' });
+  const real = (text: string, v: string, body?: Buffer) => text.replace(integrity(`dompurify@${v}`), integrityOf('dompurify', v, body));
+  const head = real(purify('3.4.17'), '3.4.17', scripted);
+  const registry = new FakeRegistry();
+  registry.tarballs.set('https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz', scripted);
+  const { review } = await opened({ [PNPM]: real(purify('3.4.11'), '3.4.11') }, { [PNPM]: head }, {}, registry);
+
+  assert.deepEqual(review.comments.map((c) => [c.line, c.body.split('\n')[0]]), [[lineOf(head, '  dompurify@3.4.17:'), '**dompurify adds an install script**']]);
+  assert.ok(!review.body.includes('Not inspected'), review.body);
 });
 
 test('a pnpm-lock.yaml of an unknown lockfile version is named as not understood and blocks approval', async () => {

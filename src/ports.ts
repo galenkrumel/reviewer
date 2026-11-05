@@ -1,5 +1,5 @@
 // The edges of the service. Everything here has a real adapter (src/github.ts,
-// src/openrouter.ts) and a test fake (test/harness.ts).
+// src/openrouter.ts, src/registry.ts) and a test fake (test/harness.ts).
 
 export interface PullRequest {
   number: number;
@@ -103,6 +103,24 @@ export interface Advisory {
   /** The first version that fixes it for this package, when one is published. */
   firstPatched?: string;
   withdrawn: boolean;
+}
+
+/** A tarball fetch that failed after `received` bytes arrived, which still count against the run's budget. */
+export class FetchError extends Error {
+  readonly received: number;
+  constructor(message: string, received: number) {
+    super(message);
+    this.received = received;
+  }
+}
+
+/** The npm registry, which code (never a model) fetches published tarballs from. */
+export interface RegistryPort {
+  /**
+   * The tarball at `url`, refused for any host but the registry's, past `maxBytes` downloaded, and once `signal` aborts.
+   * Once bytes have arrived, a failure is a FetchError saying how many.
+   */
+  tarball(url: string, maxBytes: number, signal?: AbortSignal): Promise<Buffer>;
 }
 
 // OpenAI-compatible chat-with-tools shapes (what OpenRouter speaks).

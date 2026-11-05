@@ -27,13 +27,13 @@ const lineOf = (text: string, after: string, find: string) => {
   return ls.findIndex((l, i) => i > from && l.includes(find)) + 1;
 };
 
-test('a package moved from one version to another, with its head source, integrity and version line', () => {
+test('a package moved from one version to another, with its head source, integrity and version line, and its base source', () => {
   const head = lock({ 'node_modules/left-pad': pkg('1.3.0'), 'node_modules/dompurify': pkg('3.4.17') });
   const changes = compareLockfile(lock({ 'node_modules/left-pad': pkg('1.3.0'), 'node_modules/dompurify': pkg('3.4.11') }), head);
 
   assert.deepEqual(changes, [{
     name: 'dompurify', from: '3.4.11', to: '3.4.17', resolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz',
-    integrity: 'sha512-3.4.17', line: lineOf(head, '"node_modules/dompurify"', '"version"'),
+    integrity: 'sha512-3.4.17', fromResolved: 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.11.tgz', fromIntegrity: 'sha512-3.4.11', line: lineOf(head, '"node_modules/dompurify"', '"version"'),
   }]);
 });
 
@@ -140,7 +140,10 @@ test('two installs of one version swapping sources is reported, though the set o
   const evil = { resolved: 'https://evil.example/a.tgz', integrity: 'sha512-evil' };
   const base = lock({ 'node_modules/a': pkg('1.0.0'), 'node_modules/b/node_modules/a': pkg('1.0.0', evil) });
   const head = lock({ 'node_modules/a': pkg('1.0.0', evil), 'node_modules/b/node_modules/a': pkg('1.0.0') });
-  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.from, c.to, c.resolved]), [['1.0.0', '1.0.0', evil.resolved]]);
+  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.from, c.to, c.resolved, c.fromResolved]), [
+    ['1.0.0', '1.0.0', evil.resolved, 'https://registry.npmjs.org/a/-/a-1.0.0.tgz'],
+    ['1.0.0', '1.0.0', 'https://registry.npmjs.org/a/-/a-1.0.0.tgz', evil.resolved],
+  ]);
 });
 
 test('an install is only held to the base install at its place when that was the same package', () => {

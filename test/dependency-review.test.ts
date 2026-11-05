@@ -6,7 +6,7 @@ import type { AppConfig } from '../src/app.ts';
 import type { ChatRequest } from '../src/ports.ts';
 import {
   delivery, FakeGitHub, gitFixture, noFindings, openedPayload, prPayload, ScriptedModel, select, testApp, toolCall, type Turn,
-} from './harness.ts';
+ integrityOf } from './harness.ts';
 
 const REPO = 'acme/widgets';
 const LOCK = 'package-lock.json';
@@ -14,7 +14,7 @@ const LOCK = 'package-lock.json';
 const lock = (packages: Record<string, object>, root: object = { dependencies: { dompurify: '^3.4.0' } }) => JSON.stringify(
   { name: 'app', version: '1.0.0', lockfileVersion: 3, requires: true, packages: { '': { name: 'app', ...root }, ...packages } }, null, 2) + '\n';
 const pkg = (name: string, version: string, extra: object = {}) =>
-  ({ version, resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, integrity: `sha512-${name}${version}`, ...extra });
+  ({ version, resolved: `https://registry.npmjs.org/${name}/-/${name}-${version}.tgz`, integrity: integrityOf(name, version), ...extra });
 const purify = (v: string, more: Record<string, object> = {}) => lock({
   ...more, 'node_modules/dompurify': pkg('dompurify', v), 'node_modules/jsdom': pkg('jsdom', '20.0.0', { dependencies: { dompurify: '*' } }),
 });

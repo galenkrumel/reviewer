@@ -94,6 +94,25 @@ test("a run's page shows what the Dependency check found, escaped", async () => 
   assert.match(body, /Not checked[^]*<code>yarn.lock<\/code>/);
 });
 
+test("a run's page lists the packages not inspected, with why", async () => {
+  const entry = (v: string) => ({ version: v, resolved: `https://registry.npmjs.org/a/-/a-${v}.tgz` });
+  const lock = (v: string) => JSON.stringify({ lockfileVersion: 3, packages: {
+    'node_modules/a': entry(v), [`node_modules/${XSS}`]: { version: v, resolved: 'git+https://example.com/x.git' },
+  } });
+  const fx = gitFixture({ 'package-lock.json': lock('1.0.0') }, { 'package-lock.json': lock('1.1.0') });
+  const pr = { number: 8, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const { app, github, registry } = testApp({ model: new ScriptedModel([]), config: { adminPassword: PASSWORD } });
+  github.addPullRequest(REPO, fx.url, pr);
+  registry.missing.add('https://registry.npmjs.org/a/-/a-1.1.0.tgz');
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+
+  const body = get(app, `/admin/runs/${app.runs()[0]!.id}`)!.body;
+  assert.match(body, /Not inspected, blocking approval[^]*<td>a<\/td><td>1\.1\.0<\/td><td>registry: 404<\/td>/);
+  assert.ok(body.includes('<td>&#60;img src=x onerror=alert(1)&#62;</td><td>1.1.0</td><td>not on the npm registry</td>'), body);
+  assert.ok(!body.includes(XSS));
+});
+
 test("a run's page names a failed advisory lookup", async () => {
   const lock = (v: string) => JSON.stringify({ lockfileVersion: 3, packages: { 'node_modules/a': { version: v } } });
   const fx = gitFixture({ 'package-lock.json': lock('1.0.0') }, { 'package-lock.json': lock('1.1.0') });

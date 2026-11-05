@@ -1,14 +1,16 @@
 // The single test seam: build an app with fake GitHub, scripted model, real git
 // and real SQLite, send it signed deliveries, drain, and inspect the outputs.
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
+import { gzipSync } from 'node:zlib';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after } from 'node:test';
 import { createApp, type AppConfig } from '../src/app.ts';
+import { FetchError } from '../src/ports.ts';
 import type {
-  Advisory, AssistantMessage, ChatRequest, GitHubPort, HookDelivery, ModelInfo, ModelPort, NewReview, PullRequest, ReviewThread,
+  Advisory, AssistantMessage, ChatRequest, GitHubPort, HookDelivery, ModelInfo, ModelPort, NewReview, PullRequest, RegistryPort, ReviewThread,
 } from '../src/ports.ts';
 
 const tmpRoots: string[] = [];
@@ -204,6 +206,72 @@ export class FakeGitHub implements GitHubPort {
   }
 }
 
+/**
+ * A gzipped ustar archive of the given files, as `npm pack` writes one (each path as given, under no prefix). `types`
+ * sets an entry's type flag (`x` for a pax header, `L` for a GNU long name), else it is a regular file.
+ */
+export function tarball(files: Record<string, string>, types: Record<string, string> = {}): Buffer {
+  const blocks: Buffer[] = [];
+  for (const [name, content] of Object.entries(files)) {
+    const data = Buffer.from(content);
+    const h = Buffer.alloc(512);
+    h.write(name, 0, 100);
+    h.write('0000644\0', 100);
+    h.write('0000000\0', 108);
+    h.write('0000000\0', 116);
+    h.write(data.length.toString(8).padStart(11, '0') + '\0', 124);
+    h.write('00000000000\0', 136);
+    h.write(types[name] ?? '0', 156);
+    h.write('ustar\0' + '00', 257);
+    h.write(' '.repeat(8), 148);
+    h.write(h.reduce((n, b) => n + b, 0).toString(8).padStart(6, '0') + '\0 ', 148);
+    blocks.push(h, data, Buffer.alloc((512 - (data.length % 512)) % 512));
+  }
+  return gzipSync(Buffer.concat([...blocks, Buffer.alloc(1024)]));
+}
+
+/** A package's published files under `package/`, with a package.json carrying the given scripts. */
+export const packageTarball = (name: string, version: string, scripts: Record<string, string> = {}, files: Record<string, string> = {}) =>
+  tarball({
+    'package/package.json': JSON.stringify({ name, version, scripts }),
+    ...Object.fromEntries(Object.entries(files).map(([p, c]) => [`package/${p}`, c])),
+  });
+
+/** The lockfile integrity of a tarball, as npm records it; by default the one FakeRegistry serves for a name and version. */
+export const integrityOf = (name: string, version: string, body = packageTarball(name, version)) =>
+  `sha512-${createHash('sha512').update(body).digest('base64')}`;
+
+/**
+ * The npm registry, from memory. A registry tarball URL nobody set serves a plain package (no scripts) of the name and
+ * version it names, so a lockfile change needs no setup to be inspected; `missing` URLs are a 404.
+ */
+export class FakeRegistry implements RegistryPort {
+  tarballs = new Map<string, Buffer>();
+  missing = new Set<string>();
+  /** URLs that never answer: the fetch waits until its signal aborts. */
+  hanging = new Set<string>();
+  /** Every URL fetched, in order. */
+  fetched: string[] = [];
+
+  async tarball(url: string, maxBytes: number, signal?: AbortSignal) {
+    if (!url.startsWith('https://registry.npmjs.org/')) throw new Error(`refused: ${url} is not on the npm registry`);
+    this.fetched.push(url);
+    if (this.hanging.has(url)) {
+      // AbortSignal.timeout doesn't hold the event loop open, as a server's sockets would: this does, until it aborts.
+      const open = setInterval(() => {}, 1000);
+      await new Promise((_, reject) => signal?.addEventListener('abort', () => reject(signal.reason), { once: true }))
+        .finally(() => clearInterval(open));
+    }
+    if (this.missing.has(url)) throw new Error('registry: 404');
+    const m = /^https:\/\/registry\.npmjs\.org\/(.+)\/-\/[^/]+-(\d[^/]*)\.tgz$/.exec(url);
+    const body = this.tarballs.get(url) ?? (m ? packageTarball(m[1]!, m[2]!) : undefined);
+    if (!body) throw new Error('registry: 404');
+    // As the real adapter: it streams up to the limit, then gives up, having received them.
+    if (body.length > maxBytes) throw new FetchError(`registry: over ${maxBytes} bytes`, maxBytes + 1);
+    return body;
+  }
+}
+
 /** A scripted turn, or a callback that can act mid-run (deliver an event, move the PR) before answering. */
 export type Turn = AssistantMessage | (() => AssistantMessage | Promise<AssistantMessage>);
 
@@ -322,11 +390,12 @@ export const openedPayload = (repo: string, pr: PullRequest) => prPayload('opene
 
 /** Pass an earlier app's dataDir to simulate a restart on the same volume. */
 export function testApp(opts: {
-  model: ModelPort; github?: FakeGitHub; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>; time?: Date;
+  model: ModelPort; github?: FakeGitHub; registry?: FakeRegistry; allowlist?: string[]; dataDir?: string; config?: Partial<AppConfig>; time?: Date;
   /** Sees each log entry as it is written, so a test can act mid-run (deliver an event) between steps. */
   onLog?: (entry: Record<string, unknown>) => void;
 }) {
   const github = opts.github ?? new FakeGitHub();
+  const registry = opts.registry ?? new FakeRegistry();
   const dataDir = opts.dataDir ?? tempDir();
   /** Settable: assign clock.time to move the app's clock. */
   const clock = { time: opts.time ?? new Date('2026-01-01T00:00:00Z'), now: () => clock.time };
@@ -344,11 +413,12 @@ export function testApp(opts: {
       ...opts.config,
     },
     github,
+    registry,
     model: opts.model,
     clock,
     sleep: async (ms) => void sleeps.push(ms),
     log: (entry) => { logs.push(entry); opts.onLog?.(entry); },
   });
   after(() => app.close());
-  return { app, github, dataDir, clock, sleeps, logs };
+  return { app, github, registry, dataDir, clock, sleeps, logs };
 }
