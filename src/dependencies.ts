@@ -374,18 +374,19 @@ export async function checkDependencies(
         return Promise.all(['.npmrc', ...(dir === '.npmrc' ? [] : [dir])].map((p) => {
           const key = `${side}:${p}`;
           if (!npmrcs.has(key)) {
+            // Counted in the run's text once read, so big ones can't be fetched for lockfile after lockfile.
             npmrcs.set(key, read(side, p).then((t) => {
-              if (t !== undefined && Buffer.byteLength(t) > MAX_NPMRC) throw new ToolError('.npmrc is too big');
+              text += size(t);
+              if (size(t) > MAX_NPMRC) throw new ToolError('.npmrc is too big');
               return t;
             }));
           }
           return npmrcs.get(key)!;
         }));
       };
-      if (text <= MAX_RUN_TEXT) {
-        changes = compareLockfile(base, head, name, name === 'pnpm-lock.yaml'
-          ? { base: base === undefined ? [] : await npmrc('base', old), head: head === undefined ? [] : await npmrc('head', f.path) } : {});
-      }
+      const pnpm = name === 'pnpm-lock.yaml' && text <= MAX_RUN_TEXT
+        ? { base: base === undefined ? [] : await npmrc('base', old), head: head === undefined ? [] : await npmrc('head', f.path) } : {};
+      if (text <= MAX_RUN_TEXT) changes = compareLockfile(base, head, name, pnpm);
       if (changes && (kept += changes.length) > MAX_RUN_CHANGES) changes = undefined;
     } catch (err) {
       if (!(err instanceof ToolError)) throw err;

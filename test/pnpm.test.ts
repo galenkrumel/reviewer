@@ -331,6 +331,8 @@ test("an integrity-only package resolves from the registry the repo's .npmrc set
     ?.map(([, r]) => r), npm);
   assert.deepEqual(resolved('registry=https://mirror.example/\n[x]', 'registry=https://registry.npmjs.org/')?.map(([, r]) => r), npm);
   assert.match(resolved('[x\nregistry=https://evil.example/')![1]![1]!, /^https:\/\/evil\.example\//);
+  // Nor does an indented one: npm's ini (`/^\[([^\]]*)\]\s*$/`) reads it as a key, so what follows still applies.
+  assert.match(resolved('  [x]\nregistry=https://evil.example/')![1]![1]!, /^https:\/\/evil\.example\//);
   // Another path on npm's own host is another registry, not a malformed npm tarball.
   const sub = compareLockfile(undefined, lock, PNPM, { head: ['registry=https://registry.npmjs.org/sub/'] })!;
   assert.equal(dependencyFindings({ lockfiles: [{ path: PNPM, changes: sub }], unreadable: [], unchecked: [] }).length, 2);
