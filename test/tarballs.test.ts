@@ -1,5 +1,6 @@
 // The Dependency check's tarball fetches, through the harness: install-script Findings and packages not inspected.
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import type { AppConfig } from '../src/app.ts';
@@ -329,6 +330,26 @@ test("a bundled package whose bundler's integrity changed at the same URL is a c
 
   assert.match(review.body, /- `a 1\.0\.0 \(source or integrity changed\)`/);
   assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.0`\n- `host 1\.0\.0`\n\n/);
+});
+
+test("integrity is checked by the strongest algorithm the lockfile records, as npm checks it", async () => {
+  const body = packageTarball('weak', '1.0.1');
+  const sha1 = `sha1-${createHash('sha1').update(body).digest('base64')}`;
+  const s = setup({ 'node_modules/weak': pkg('weak', '1.0.0') },
+    { 'node_modules/weak': pkg('weak', '1.0.1', { integrity: `${sha1} sha512-AAAA` }) });
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `weak 1\.0\.1`\n\n/);
+});
+
+test('a tarball that would unpack past the limit spends the rest of it, so the next is not unpacked that far', async () => {
+  const s = setup({ 'node_modules/bomb': pkg('bomb', '1.0.0'), 'node_modules/next': pkg('next', '1.0.0') },
+    { 'node_modules/bomb': pkg('bomb', '1.0.1'), 'node_modules/next': pkg('next', '1.0.1') }, { registryFetchBytes: 3000 });
+  // Compresses to far under the fetch cap, unpacks past 8 times it.
+  s.registry.tarballs.set(url('bomb', '1.0.1'), packageTarball('bomb', '1.0.1', {}, { 'zeros.bin': '\0'.repeat(100_000) }));
+  const review = await s.opened();
+
+  assert.match(review.body, /- `bomb 1\.0\.1`\n- `next 1\.0\.1`\n\n/);
 });
 
 test('a failed fetch spends the bytes it received, so oversized tarballs can\'t each take the whole budget', async () => {

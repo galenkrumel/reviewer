@@ -297,7 +297,11 @@ export function compareLockfile(base: string | undefined, head: string | undefin
     // `baseInstall` is the install a move or swap replaced, for where the old version resolved.
     const push = (e: Entry, from?: string, to?: string, baseInstall?: Entry) => {
       const pulledBy = dependents(name, to === undefined);
-      if (to !== undefined && e.bundledBy) listed.set(e.bundledBy.bundler, [...(listed.get(e.bundledBy.bundler) ?? []), e.bundledBy.folder.toLowerCase()]);
+      if (to !== undefined && e.bundledBy) {
+        const folders = listed.get(e.bundledBy.bundler) ?? [];
+        folders.push(e.bundledBy.folder.toLowerCase());
+        listed.set(e.bundledBy.bundler, folders);
+      }
       changes.push({
         name, ...(from !== undefined && { from }), ...(to !== undefined && { to }),
         ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
@@ -478,15 +482,23 @@ function paxRecords(data: Buffer): { path?: string; size?: number } {
 
 const INSTALL_SCRIPTS = ['preinstall', 'install', 'postinstall'];
 
+/** The hash algorithms npm (ssri) knows, weakest first. */
+const ALGORITHMS = ['sha1', 'sha256', 'sha384', 'sha512'];
+
 /**
  * Whether a tarball matches a lockfile integrity (Subresource Integrity: one or more `algo-base64` hashes), as npm
- * checks before installing: any one of them, of an algorithm it knows. One with none it knows matches nothing.
+ * checks before installing: by the strongest algorithm it knows among them, any hash of that one. One with none it
+ * knows matches nothing.
  */
 function matchesIntegrity(body: Buffer, integrity: string): boolean {
-  return integrity.trim().split(/\s+/).some((h) => {
+  const hashes = integrity.trim().split(/\s+/).flatMap((h) => {
     const m = /^(sha512|sha384|sha256|sha1)-([A-Za-z0-9+/=]+)$/.exec(h);
-    return !!m && createHash(m[1]!).update(body).digest('base64') === m[2];
+    return m ? [{ algorithm: m[1]!, digest: m[2]! }] : [];
   });
+  const strongest = ALGORITHMS.findLast((a) => hashes.some((h) => h.algorithm === a));
+  if (strongest === undefined) return false;
+  const digest = createHash(strongest).update(body).digest('base64');
+  return hashes.some((h) => h.algorithm === strongest && h.digest === digest);
 }
 // ponytail: unpacked bytes per run are capped at this multiple of the fetch byte cap, against a gzip bomb. Raise it if
 // ordinary packages hit it.
@@ -565,7 +577,14 @@ export async function inspectPackages(check: DependencyCheck, opts: {
         const body = await opts.fetch(url, caps.bytes - bytes);
         bytes += body.length;
         opts.fetched(url, { bytes: body.length });
-        const tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
+        let tar: Buffer;
+        try {
+          tar = gunzipSync(body, { maxOutputLength: Math.max(1, caps.bytes * UNPACKED_PER_FETCHED - unpacked) });
+        } catch (err) {
+          // Past the limit, the rest of the allowance is spent: no later tarball is unpacked that far again.
+          if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') unpacked = caps.bytes * UNPACKED_PER_FETCHED;
+          throw err;
+        }
         unpacked += tar.length;
         byUrl.set(url, { files: new Map([...untar(tar)].map(([k, v]) => [k.toLowerCase(), v])), body });
       } catch (err) {
