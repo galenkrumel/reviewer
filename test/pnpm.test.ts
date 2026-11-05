@@ -324,6 +324,10 @@ test("an integrity-only package resolves from the registry the repo's .npmrc set
   const [mirror, other] = ['registry=https://mirror.example/npm/', 'registry=https://mirror.example/other/'].map((n) => resolved(n)![1]![1]!);
   assert.match(mirror, /^https:\/\/mirror\.example\/…[0-9a-f]{12}\/dompurify\/-\/dompurify-3\.4\.17\.tgz$/);
   assert.notEqual(mirror, other);
+  // So does its query, hashed with the path since it can hold a token too.
+  const [q1, q2] = ['?t=SECRET1', '?t=SECRET2'].map((q) => resolved(`registry=https://mirror.example/${q}`)![1]![1]!);
+  assert.match(q1, /^https:\/\/mirror\.example\/…[0-9a-f]{12}\//);
+  assert.notEqual(q1, q2);
   // npm's default however it is written; the last setting wins; npm ignores settings under a `[section]` header, but
   // only a whole header line starts one, and each file starts outside any.
   const npm = ['https://registry.npmjs.org/@acme/ui/-/ui-1.0.0.tgz', 'https://registry.npmjs.org/dompurify/-/dompurify-3.4.17.tgz'];
@@ -343,7 +347,7 @@ test("an integrity-only package resolves from the registry the repo's .npmrc set
     '//npm.acme.dev/:_authToken=SECRET\n@acme:registry=https://u:SECRET@npm.acme.dev/?t=SECRET\n',
     '@acme:registry=https://npm.acme.dev/SECRET/acme/', '@acme:registry=//u:SECRET@npm.acme.dev/',
   ]) assert.ok(!JSON.stringify(resolved(npmrc)).includes('SECRET'), npmrc);
-  assert.equal(resolved('@acme:registry=https://u:SECRET@npm.acme.dev/?t=SECRET')?.[0]?.[1], 'https://npm.acme.dev/@acme/ui/-/ui-1.0.0.tgz');
+  assert.equal(resolved('@acme:registry=https://u:SECRET@npm.acme.dev/')?.[0]?.[1], 'https://npm.acme.dev/@acme/ui/-/ui-1.0.0.tgz');
   // A registry from the environment is unknowable: off-registry, from an unrecognised source.
   const env = compareLockfile(undefined, lock, PNPM, { head: ['registry=${NPM_REGISTRY}'] })!;
   assert.deepEqual(dependencyFindings({ lockfiles: [{ path: PNPM, changes: env }], unreadable: [], unchecked: [] })

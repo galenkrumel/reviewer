@@ -211,8 +211,8 @@ function npmrcRegistries(files: (string | undefined)[]): Map<string, string> {
       try {
         const url = new URL(value);
         const href = `${url.protocol}//${url.host}${url.pathname.replace(/\/?$/, '/')}`;
-        registry = href === REGISTRY || url.pathname === '/' ? href
-          : `${url.protocol}//${url.host}/…${createHash('sha256').update(href).digest('hex').slice(0, 12)}/`;
+        registry = href === REGISTRY && !url.search ? REGISTRY : url.pathname === '/' && !url.search ? href
+          : `${url.protocol}//${url.host}/…${createHash('sha256').update(href + url.search).digest('hex').slice(0, 12)}/`;
       } catch {
         registry = /^\$\{\w+\}$/.test(value) ? `${value}/` : 'unknown registry/';
       }
