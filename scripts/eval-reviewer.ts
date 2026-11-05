@@ -3,7 +3,8 @@
 // case.json: { "id"?, "url", "baseSha", "headSha", "title", "body", "focus", "exclude"?: [globs] }. url is file:// or
 // https://github.com/…; GITHUB_TOKEN is only needed for the latter. REVIEW_FALLBACK_MODEL is optional, as in the App.
 // A missing argument, malformed case JSON, an unknown focus, an unsupported url or a missing required environment
-// variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
+// variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run, as does
+// a PHOENIX_API_KEY with a Phoenix endpoint that is plain http to anywhere but this machine.
 // The run prints a summary: the result, calls, cost and models, a line per finding, and the Phoenix trace id. With
 // --json it prints { findings | error, score?, transcript, usage } instead, for when Phoenix isn't running or to pipe into jq.
 // A fetching, scoping or reviewer error exits 1.
@@ -70,6 +71,15 @@ const metered = meteredChat(port, { model, fallbackModel, maxTokens: MAX_TOKENS 
 let transcript: ChatMessage[] = [];
 let calls = 0;
 
+const phoenix = (process.env.PHOENIX_COLLECTOR_ENDPOINT ?? 'http://localhost:6006').replace(/\/(v1\/traces\/?)?$/, '');
+const phoenixKey = process.env.PHOENIX_API_KEY;
+// Both the trace exporter and the annotation send PHOENIX_API_KEY to this endpoint, so never in the clear off this machine.
+if (phoenixKey) {
+  const { protocol, hostname } = new URL(phoenix);
+  if (protocol !== 'https:' && !['localhost', '127.0.0.1', '[::1]'].includes(hostname)) {
+    throw new Error('PHOENIX_COLLECTOR_ENDPOINT must be https when PHOENIX_API_KEY is set, unless it is this machine');
+  }
+}
 const projectName = process.env.PHOENIX_PROJECT ?? 'reviewer-eval';
 const provider = register({ projectName });
 const tracer = trace.getTracer('reviewer-eval');
@@ -173,15 +183,13 @@ await provider.shutdown();
 
 // After the flush, so Phoenix has the span to annotate. A failure here only warns: the run and its spans are done.
 if (scored) {
-  const phoenix = (process.env.PHOENIX_COLLECTOR_ENDPOINT ?? 'http://localhost:6006').replace(/\/(v1\/traces\/?)?$/, '');
-  const apiKey = process.env.PHOENIX_API_KEY;
   const result = {
     label: scored.outcome, score: scored.outcome === 'error' ? null : Number(scored.outcome === 'pass'), explanation: explain(scored),
   };
   try {
     const res = await fetch(`${phoenix}/v1/span_annotations`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+      headers: { 'content-type': 'application/json', ...(phoenixKey ? { authorization: `Bearer ${phoenixKey}` } : {}) },
       body: JSON.stringify({ data: [{ span_id: spanId, name: 'answer-key', annotator_kind: 'CODE', result }] }),
     });
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);

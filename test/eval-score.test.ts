@@ -67,6 +67,25 @@ test('a finding only one defect can use is left to that defect, so overlapping w
   assert.deepEqual([s.matched.wide?.title, s.matched.narrow?.title], ['on 3', 'on 10']);
 });
 
+test('matching prefers findings that meet each minimum severity, so a passing assignment is found when one exists', () => {
+  const two: AnswerKey = { expected: [
+    // 'first' can use high A or low; 'second' can use high A or high B. Moving 'first' onto low would fail it.
+    { id: 'first', path: 'a.ts', lines: [1, 12], minSeverity: 'high', defect: 'needs high' },
+    { id: 'second', path: 'a.ts', lines: [10, 20], minSeverity: 'high', defect: 'needs high too' },
+  ] };
+  const s = score(two, [
+    finding({ line: 10, severity: 'high', title: 'high A' }), finding({ line: 3, severity: 'low', title: 'low' }),
+    finding({ line: 15, severity: 'high', title: 'high B' }),
+  ]);
+  assert.equal(s.outcome, 'pass');
+  assert.deepEqual(s.unreviewed, ['low']);
+});
+
+test('a defect with only a too-low finding left is reported as too low, without taking a passing match', () => {
+  const s = score(key, [finding({ severity: 'low', title: 'weak' })]);
+  assert.deepEqual([s.outcome, s.matched.leak?.title, s.matched.leak?.severityOk, s.missed], ['fail', 'weak', false, []]);
+});
+
 test('a run that never reported is an error, not a fail; an empty key with no findings passes', () => {
   assert.equal(score(key, undefined).outcome, 'error');
   assert.equal(score({ expected: [] }, []).outcome, 'pass');

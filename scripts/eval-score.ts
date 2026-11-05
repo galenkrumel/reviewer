@@ -35,14 +35,16 @@ const rank = (s: Severity) => SEVERITIES.indexOf(s);
 export function score(key: AnswerKey, findings: Finding[] | undefined): Score {
   const s: Score = { outcome: 'error', matched: {}, missed: [], ambiguous: [], forbidden: [], acceptable: [], unreviewed: [] };
   if (!findings) return s;
-  // Each finding satisfies at most one defect, and the matching is maximum (augmenting paths), so a finding that only
-  // one defect can use is reassigned to it rather than lost to an overlapping window. Each defect tries its most
-  // severe candidates first.
-  // ponytail: severity is a preference, not optimised; an LLM matcher should decide when a defect has several candidates.
+  // Each finding satisfies at most one defect. First a maximum matching (augmenting paths) over only the findings that
+  // meet each defect's minSeverity, so a passing assignment is found whenever one exists, even with overlapping
+  // windows. Then a defect still unmatched takes an unused finding below its minSeverity, to report it as too low
+  // rather than missed; that never moves a finding off a defect it satisfies.
+  // ponytail: an LLM matcher should decide when a defect has several candidates; here the most severe goes first.
   const bySeverity = (a: Finding, b: Finding) => rank(b.severity) - rank(a.severity);
   const candidates = key.expected.map((e) => findings.filter((f) => on(f, e)).sort(bySeverity));
+  const passing = key.expected.map((e, i) => candidates[i]!.filter((f) => rank(f.severity) >= rank(e.minSeverity)));
   const owner = new Map<Finding, number>();
-  const assign = (i: number, seen: Set<Finding>): boolean => candidates[i]!.some((f) => {
+  const assign = (i: number, seen: Set<Finding>): boolean => passing[i]!.some((f) => {
     if (seen.has(f)) return false;
     seen.add(f);
     const holder = owner.get(f);
@@ -51,6 +53,11 @@ export function score(key: AnswerKey, findings: Finding[] | undefined): Score {
     return true;
   });
   key.expected.forEach((_, i) => assign(i, new Set()));
+  const taken = new Set(owner.values());
+  key.expected.forEach((_, i) => {
+    const weak = taken.has(i) ? undefined : candidates[i]!.find((f) => !owner.has(f));
+    if (weak) owner.set(weak, i);
+  });
   const matchOf = new Map([...owner].map(([f, i]) => [i, f]));
   key.expected.forEach((e, i) => {
     const f = matchOf.get(i);
