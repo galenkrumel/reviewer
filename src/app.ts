@@ -422,7 +422,7 @@ export function createApp(deps: {
   async function reviewJob(job: Job, invocations: RecordedInvocation[]) {
     progress(job, 'run started', { event: job.event, head: job.headSha.slice(0, 7) });
     // A retry builds on the latest run at its SHAs. A published one with failed focuses runs only those again, reusing
-    // the rest; one that failed outright is run again in full, since its findings may never have been posted.
+    // the rest; one that failed outright runs every focus again, since its findings may never have been posted.
     // ponytail: a run that crashed or threw after its reviewers recorded no focuses, so its retry pays for all of them
     // again; record each focus as it finishes if that cost shows up.
     const retried = job.event === RETRY ? store.retryBase(job.repo, job.pr, job.headSha, job.baseSha, job.id) : undefined;

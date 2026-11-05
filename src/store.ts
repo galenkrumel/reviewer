@@ -82,7 +82,7 @@ export interface RecordedInvocation {
 export const isRedecision = (event: string) => !event.startsWith('pull_request.');
 /**
  * A retry runs only the focuses that failed in the latest run at its head and base, reusing the others' findings; a
- * run that failed outright is run again in full.
+ * run that failed outright runs every focus again.
  */
 export const RETRY = 'pull_request.retry';
 const FULL_RUN = `event LIKE 'pull_request.%'`;
