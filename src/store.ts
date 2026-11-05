@@ -264,7 +264,8 @@ export function openStore(dataDir: string, clock: Clock) {
 
     /**
      * Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order.
-     * Returns whether `at` is later than any recorded before.
+     * Returns whether `at` is later than any recorded before. A tie still records: deliveries usually arrive in order,
+     * so a close and a reopen in the same second should show the reopen, though a tie is never trusted to cancel runs.
      */
     recordPrState(repo: string, pr: number, state: PrState, at: Date): boolean {
       const prev = db.prepare('SELECT at FROM pr_states WHERE repo = ? AND pr = ?').get(repo, pr) as any;

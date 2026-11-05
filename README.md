@@ -109,7 +109,8 @@ Open the service's logs in Render. Every webhook GitHub sends logs a `delivery` 
 - **No `delivery` lines:** GitHub isn't reaching the service. Check the App's webhook URL, and look at
   **Advanced → Recent Deliveries** in the App settings. You can redeliver a failed event from there. The service
   also asks GitHub to redeliver the events it never answered in the last 6 hours, a minute after it starts and every
-  15 minutes after that, so a deploy or crash doesn't lose a push. It gives up on an event after 3 attempts.
+  15 minutes after that, so a push made during a deploy or crash is still reviewed (unless the PR is at its run cap).
+  It gives up on an event after 3 attempts.
 - **`delivery` with status 401:** `GITHUB_WEBHOOK_SECRET` doesn't match the App's webhook secret.
 - **`delivery` but no review:** the line's `reason` says why it was skipped, e.g. the repository isn't in
   `REPO_ALLOWLIST`, the PR is a draft, or the author is outside and the PR lacks the label.
