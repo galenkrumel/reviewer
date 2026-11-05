@@ -38,7 +38,11 @@ export function loadCase(path: string) {
   if (!/^[\w.-]+$/.test(caseId) || /^\.+$/.test(caseId)) throw new Error(`${path}: id must be a file name, not ${caseId}`);
   if (!FOCUSES.includes(testCase.focus)) throw new Error(`${path}: focus must be one of ${FOCUSES.join(', ')}`);
   const local = testCase.url.startsWith('file://');
-  if (!local && !testCase.url.startsWith('https://github.com/')) throw new Error(`${path}: url must be file:// or https://github.com/…`);
+  // The GitHub token goes to this url's host, so it must be github.com however the url is read: no credentials or port.
+  const github = (u: URL) => u.protocol === 'https:' && u.host === 'github.com' && !u.username && !u.password;
+  if (!local && !(testCase.url.startsWith('https://github.com/') && github(new URL(testCase.url)))) {
+    throw new Error(`${path}: url must be file:// or https://github.com/…`);
+  }
   if (!local && !env().githubToken) throw new Error('set GITHUB_TOKEN to fetch from GitHub');
   const key: AnswerKey | undefined = testCase.expected && {
     expected: testCase.expected, acceptableExtras: testCase.acceptableExtras, forbidden: testCase.forbidden,

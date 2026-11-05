@@ -31,6 +31,10 @@ checkPhoenixEndpoint(getMergedOptions().baseUrl!);
 
 const cases = readdirSync(CASES).filter((f) => f.endsWith('.json')).sort().map((f) => loadCase(join(CASES, f)));
 const byId = new Map(cases.map((c) => [c.caseId, c]));
+if (byId.size < cases.length) {
+  const dup = cases.find((c, i) => cases.findIndex((d) => d.caseId === c.caseId) !== i)!;
+  throw new Error(`two cases have the id ${dup.caseId}`);
+}
 const { datasetId } = await createDataset({
   name: DATASET,
   description: 'Pinned PRs with answer keys for the reviewer, from cases/ in galenkrumel/reviewer',
