@@ -16,5 +16,15 @@
       "minSeverity": "low",
       "defect": "meteredChat is given no fallbackModel, so an eval runs a different model setup from the App"
     }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "scripts/eval-reviewer.ts",
+      "lines": [
+        36,
+        42
+      ],
+      "title": "Key the eval cache by the full URL"
+    }
   ]
 }
