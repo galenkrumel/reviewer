@@ -7,10 +7,13 @@
 // The run prints a summary: the result, calls, cost and models, a line per finding, and the Phoenix trace id. With
 // --json it prints { findings | error, transcript, usage } instead, for when Phoenix isn't running or to pipe into jq.
 // A fetching, scoping or reviewer error exits 1.
+// A case with "expected" (and optional "acceptableExtras", "forbidden"; see eval-score.ts) is an answer key: the run is
+// scored against it in code, the score is printed (and is "score" in the --json output), and a failed score exits 2.
 // It also traces the run to Phoenix (PHOENIX_COLLECTOR_ENDPOINT, default http://localhost:6006; project reviewer-eval):
 // one AGENT span named after the case id (its file name unless "id" is set), with an LLM span per model call. Its
 // metadata: case, focus, headSha, model (REVIEW_MODEL), servedModels (the models that answered) and fellBack (whether
-// any of them doesn't start with REVIEW_MODEL). Without a Phoenix server the spans are dropped.
+// any of them doesn't start with REVIEW_MODEL). A scored run also gets an "answer-key" annotation: label pass, fail or
+// error, score 1 or 0 (none for error), and what was missed or unreviewed. Without a Phoenix server the spans are dropped.
 import { register, SemanticConventions as SC, SpanStatusCode, trace } from '@arizeai/phoenix-otel';
 import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -21,6 +24,7 @@ import type { ChatMessage, ModelPort } from '../src/ports.ts';
 import { FOCUSES, meteredChat, runReviewer, type Chat, type Focus } from '../src/reviewer.ts';
 import { reviewScope } from '../src/scope.ts';
 import type { Finding, RecordedInvocation } from '../src/store.ts';
+import { score, type AnswerKey, type Score } from './eval-score.ts';
 
 // ponytail: mirrors app.ts's defaults (maxTurns, maxTokens, reviewTokenBudget); make them flags when evals vary them.
 const MAX_TURNS = 20;
@@ -33,6 +37,9 @@ const casePath = args.find((a) => a !== '--json');
 if (!casePath) throw new Error('usage: eval-reviewer.ts case.json [--json]');
 const testCase = JSON.parse(readFileSync(casePath, 'utf8')) as {
   id?: string; url: string; baseSha: string; headSha: string; title: string; body: string; focus: Focus; exclude?: string[];
+} & Partial<AnswerKey>;
+const key: AnswerKey | undefined = testCase.expected && {
+  expected: testCase.expected, acceptableExtras: testCase.acceptableExtras, forbidden: testCase.forbidden,
 };
 // The span name, so every run of a case groups under one name in Phoenix.
 const caseId = testCase.id ?? basename(casePath, '.json');
@@ -94,7 +101,22 @@ const chat: Chat = (messages, tools) => tracer.startActiveSpan('chat', async (sp
   }
 });
 
+/** Why a run scored as it did, in one line: the summary's score line and the annotation's explanation. */
+const explain = (s: Score) => [
+  s.outcome,
+  ...s.missed.map((id) => `missed ${id}`),
+  ...Object.entries(s.matched).filter(([, m]) => !m.severityOk).map(([id, m]) => `${id} only ${m.severity}`),
+  ...s.forbidden.map((t) => `forbidden "${t}"`),
+  ...s.ambiguous.map((id) => `several findings on ${id}`),
+  ...s.unreviewed.map((t) => `unreviewed "${t}"`),
+].join('; ');
+
+// The run span's id and score, for the annotation once the span has been exported.
+let spanId = '';
+let scored: Score | undefined;
+
 await tracer.startActiveSpan(caseId, async (span) => {
+  spanId = span.spanContext().spanId;
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
   const report = (outcome: string, details: string[]) => {
     const served = usage.models.length ? `, served by ${usage.models.join(', ')}` : '';
@@ -126,14 +148,20 @@ await tracer.startActiveSpan(caseId, async (span) => {
       focus: testCase.focus, chat, maxTurns: MAX_TURNS, source, diff, title: testCase.title, body: testCase.body,
     });
     span.setAttributes(json('output', findings));
-    if (asJson) console.log(JSON.stringify({ findings, transcript, usage }, null, 2));
-    else report(plural(findings.length, 'finding'), findings.map((f) => `[${f.severity}] ${f.path}:${f.line} ${f.title}`));
+    scored = key && score(key, findings);
+    if (asJson) console.log(JSON.stringify({ findings, score: scored, transcript, usage }, null, 2));
+    else {
+      const lines = findings.map((f) => `[${f.severity}] ${f.path}:${f.line} ${f.title}`);
+      report(plural(findings.length, 'finding'), scored ? [...lines, `score: ${explain(scored)}`] : lines);
+    }
+    if (scored?.outcome === 'fail') process.exitCode = 2;
   } catch (err) {
     span.recordException(err as Error);
     span.setStatus({ code: SpanStatusCode.ERROR });
     const error = err instanceof Error ? err.message : String(err);
-    if (asJson) console.log(JSON.stringify({ error, transcript, usage }, null, 2));
-    else report('failed', error.trim().split('\n'));
+    scored = key && score(key, undefined);
+    if (asJson) console.log(JSON.stringify({ error, score: scored, transcript, usage }, null, 2));
+    else report('failed', [...error.trim().split('\n'), ...(scored ? [`score: ${explain(scored)}`] : [])]);
     process.exitCode = 1;
   } finally {
     span.setAttributes(metadata(usage.models));
@@ -142,3 +170,22 @@ await tracer.startActiveSpan(caseId, async (span) => {
 });
 // Spans are batched, so flush them before the script exits.
 await provider.shutdown();
+
+// After the flush, so Phoenix has the span to annotate. A failure here only warns: the run and its spans are done.
+if (scored) {
+  const phoenix = (process.env.PHOENIX_COLLECTOR_ENDPOINT ?? 'http://localhost:6006').replace(/\/(v1\/traces\/?)?$/, '');
+  const apiKey = process.env.PHOENIX_API_KEY;
+  const result = {
+    label: scored.outcome, score: scored.outcome === 'error' ? null : Number(scored.outcome === 'pass'), explanation: explain(scored),
+  };
+  try {
+    const res = await fetch(`${phoenix}/v1/span_annotations`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}) },
+      body: JSON.stringify({ data: [{ span_id: spanId, name: 'answer-key', annotator_kind: 'CODE', result }] }),
+    });
+    if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  } catch (err) {
+    console.error(`could not annotate the run in Phoenix: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
