@@ -351,7 +351,7 @@ function byName(list: Entry[]): Map<string, Map<string, Entry[]>> {
   return out;
 }
 
-const source = (e: Entry) => `${e.resolved} ${e.integrity}${e.bundledBy ? ` in ${e.bundledBy.resolved} ${e.bundledBy.integrity} at ${e.bundledBy.folder}` : ''}`;
+const source = (e: Entry) => `${e.resolved} ${e.integrity}${e.bundledBy ? ` in ${e.bundledBy.resolved} ${e.bundledBy.integrity} at ${e.bundledBy.bundler}:${e.bundledBy.folder}` : ''}`;
 
 /**
  * The line of each package key's first `"version"`, as npm writes lockfiles: one key per line, version before any
@@ -508,11 +508,16 @@ export function compareLockfile(
         const there = atKey.get(e.key);
         return there?.name === name && there.version === v ? there : undefined;
       };
-      const swapped = installs.find((e) => {
+      // Every distinct swap: another install from yet another tarball would otherwise go unread.
+      const pushed = new Set<string>();
+      for (const e of installs) {
         const there = here(e);
-        return there ? source(there) !== source(e) : !known.has(source(e));
-      });
-      if (swapped) push(swapped, v, v, here(swapped) ?? was.get(v)?.[0]);
+        const base = there ?? was.get(v)?.[0];
+        const key = `${source(e)}\0${base && source(base)}`;
+        if ((there ? source(there) === source(e) : known.has(source(e))) || pushed.has(key)) continue;
+        pushed.add(key);
+        push(e, v, v, base);
+      }
     }
   }
   for (const [key, c] of bundlers) if (listed.has(key)) c.bundles = listed.get(key);
@@ -612,6 +617,8 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const prefix = posixUstar ? field(h, 345, 155) : '';
     const raw = next?.path ?? (prefix ? `${prefix}/` : '') + field(h, 0, 100);
     next = undefined;
+    // Past Linux's PATH_MAX no filesystem extracts it, and a pax path near the unpack limit would make the checks below slow.
+    if (raw.length > 4096) throw malformed();
     // A link can replace a file when extracted, so it and any other type but a file or directory (devices, GNU or
     // Solaris extensions, unknown) are refused. Directories hold no code, but one can replace a file too.
     const isDir = type === '5';
@@ -628,9 +635,8 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     const fold = path.toLowerCase();
     // A file and a directory at one path, in either order (or a file under a file), are extracted as whichever came
     // last: refused rather than read.
-    const parts = fold.split('/');
-    for (let i = 1; i < parts.length; i++) {
-      const parent = parts.slice(0, i).join('/');
+    for (let i = fold.indexOf('/'); i !== -1; i = fold.indexOf('/', i + 1)) {
+      const parent = fold.slice(0, i);
       if (folded.has(parent)) throw malformed();
       dirs.add(parent);
     }
@@ -736,7 +742,8 @@ function installScripts(lower: Map<string, Buffer>, folder: string, version?: st
 /**
  * Fetch the tarball of every package change the PR moves to or adds, and of the version it moved from, and record each
  * install script the new one adds. Packages go in order of risk (added, then major bumps, then the rest), at most
- * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run; one tarball is fetched
+ * `caps.packages` (by name and version, across lockfiles) and `caps.bytes` downloaded per run (the last chunk a
+ * fetch received before it saw the limit can overshoot it); one tarball is fetched
  * once. A bundled package is read from its bundler's tarball, at its folder and the version the lockfile records, on
  * each side (a bundled install whose bundler changed is a change, though its version didn't move). An install script is
  * new when its name or its command is.

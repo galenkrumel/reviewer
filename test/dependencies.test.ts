@@ -140,7 +140,10 @@ test('two installs of one version swapping sources is reported, though the set o
   const evil = { resolved: 'https://evil.example/a.tgz', integrity: 'sha512-evil' };
   const base = lock({ 'node_modules/a': pkg('1.0.0'), 'node_modules/b/node_modules/a': pkg('1.0.0', evil) });
   const head = lock({ 'node_modules/a': pkg('1.0.0', evil), 'node_modules/b/node_modules/a': pkg('1.0.0') });
-  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.from, c.to, c.resolved]), [['1.0.0', '1.0.0', evil.resolved]]);
+  assert.deepEqual(compareLockfile(base, head)?.map((c) => [c.from, c.to, c.resolved, c.fromResolved]), [
+    ['1.0.0', '1.0.0', evil.resolved, 'https://registry.npmjs.org/a/-/a-1.0.0.tgz'],
+    ['1.0.0', '1.0.0', 'https://registry.npmjs.org/a/-/a-1.0.0.tgz', evil.resolved],
+  ]);
 });
 
 test('an install is only held to the base install at its place when that was the same package', () => {

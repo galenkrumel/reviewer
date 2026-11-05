@@ -299,9 +299,9 @@ test('a bundled copy no change inspects on its own is compared with its bundler:
   assert.match(review.comments.find((c) => c.body.startsWith('**h1'))!.body, /`node_modules\/ghost postinstall`: `node g\.js`/);
   assert.ok(titles.includes('**src adds an install script**'), titles.join());
   assert.ok(!s.registry.fetched.includes(url('src', '1.0.1')), 'read from h3, not fetched on its own');
-  // dup@1.0.0 is one change (its first install, under h1); its copy under h2 is h2's.
-  assert.ok(!titles.includes('**dup adds an install script**'), titles.join());
-  assert.match(review.comments.find((c) => c.body.startsWith('**h2'))!.body, /`node_modules\/dup install`: `node d\.js`/);
+  // Each install of dup@1.0.0 moved bundler, so each is a change of its own: the one under h2 gains a script.
+  assert.match(review.comments.find((c) => c.body.startsWith('**dup'))!.body, /`install`: `node d\.js`/);
+  assert.ok(!titles.includes('**h2 adds an install script**'), titles.join());
 });
 
 test("a tarball that doesn't match the lockfile's integrity is not inspected, so a same-URL swap can't compare a tarball with itself", async () => {
@@ -522,4 +522,38 @@ test('fetches are logged one by one, and a Run superseded mid-fetch stops before
   const first = s.logs.filter((l) => l.msg === 'package fetched' && l.run === 1);
   assert.deepEqual(first.map((l) => l.url), [url('a1', '1.0.1')]);
   assert.deepEqual(s.github.reviews.map((r) => r.review.commit_id), [s.pr.headSha]);
+});
+
+test('every install of one version swapped to another tarball is inspected, not just the first', async () => {
+  // The first install now pins the registry's tarball; the second, an integrity that tarball doesn't match.
+  const s = setup(
+    { 'node_modules/y': pkg('y', '1.0.0'), 'node_modules/x': pkg('x', '1.0.0'), 'node_modules/y/node_modules/x': pkg('x', '1.0.0') },
+    {
+      'node_modules/y': pkg('y', '1.0.0'), 'node_modules/x': pkg('x', '1.0.0', { integrity: integrityOf('x', '1.0.0') }),
+      'node_modules/y/node_modules/x': pkg('x', '1.0.0', { integrity: 'sha512-AAAA' }),
+    },
+  );
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `x 1\.0\.0`\n/);
+});
+
+test('a bundled package moving to another bundler is a change, though neither bundler records a source', async () => {
+  const s = setup(
+    { 'node_modules/h1': { version: '1.0.0' }, 'node_modules/h1/node_modules/a': { version: '1.0.0', inBundle: true } },
+    { 'node_modules/h2': { version: '1.0.0' }, 'node_modules/h2/node_modules/a': { version: '1.0.0', inBundle: true } },
+  );
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `a 1\.0\.0`\n/);
+});
+
+test('a tar path longer than any filesystem extracts is not inspected', async () => {
+  const s = setup({ 'node_modules/deep': pkg('deep', '1.0.0') }, { 'node_modules/deep': pkg('deep', '1.0.1') });
+  s.registry.tarballs.set(url('deep', '1.0.1'), tarball({
+    'package/package.json': JSON.stringify({ name: 'deep' }), 'PaxHeader/x': pax({ path: `package/${'a/'.repeat(3000)}x` }), 'package/x': '',
+  }, { 'PaxHeader/x': 'x' }));
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `deep 1\.0\.1`\n/);
 });
