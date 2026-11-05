@@ -131,6 +131,14 @@ test('"Retry" from someone who isn\'t a maintainer, any other comment, or on a P
   assert.equal(app.runs().length, runs);
 });
 
+test('"Retry" on a PR last reported a draft is ignored', async () => {
+  const { app, pr } = await failedRun();
+  await app.receive(delivery('pull_request', prPayload('converted_to_draft', REPO, { ...pr, draft: true })));
+  const runs = app.runs().length;
+  assert.match((await app.receive(comment('Retry'))).ignored!, /draft/);
+  assert.equal(app.runs().length, runs);
+});
+
 test('"Retry" while the latest run is still queued is ignored, however that run ends', async () => {
   const { app, pr } = await failedRun();
   const runs = app.runs().length;

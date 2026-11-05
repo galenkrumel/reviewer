@@ -277,6 +277,11 @@ export function openStore(dataDir: string, clock: Clock) {
         .run(repo, pr, state, at.toISOString());
     },
 
+    /** The PR's state as GitHub last reported it, if it ever did. */
+    prState(repo: string, pr: number): PrState | undefined {
+      return (db.prepare('SELECT state FROM pr_states WHERE repo = ? AND pr = ?').get(repo, pr) as any)?.state;
+    },
+
     /** Mark every queued or running job for the PR superseded. */
     supersede(repo: string, pr: number) {
       db.prepare(`UPDATE runs SET status = 'superseded', updated_at = ? WHERE repo = ? AND pr = ?
