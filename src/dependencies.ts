@@ -321,8 +321,8 @@ export const onRegistry = (url: string) => url.startsWith(REGISTRY);
  * a path replaces an earlier one. Anything a reader might take another way than node-tar throws instead, so the package
  * is not inspected: truncated input, a header whose checksum is wrong or whose magic is neither POSIX ustar, GNU nor
  * none, anything but zero blocks after the first zero block, a malformed pax record or one holding a newline, meta
- * headers chained, any entry type but a file or directory, a path with an empty, `.` or backslashed segment, and two
- * paths that a case-insensitive filesystem (macOS, Windows) would take for one file.
+ * headers chained, any entry type but a file or directory, a path with an empty, `.` or backslashed segment or any
+ * character but printable ASCII, and two paths that a case-insensitive filesystem (macOS, Windows) would take for one.
  */
 export function untar(archive: Buffer): Map<string, Buffer> {
   const files = new Map<string, Buffer>();
@@ -330,7 +330,7 @@ export function untar(archive: Buffer): Map<string, Buffer> {
   const text = (b: Buffer) => b.toString('utf8').replace(/\0.*$/s, '');
   const field = (h: Buffer, at: number, len: number) => text(h.subarray(at, at + len));
   let next: { path?: string; size?: number } | undefined;
-  /** Each path as a case- and normalization-insensitive filesystem sees it, to the path stored. */
+  /** Each path as a case-insensitive filesystem sees it, to the path stored. */
   const folded = new Map<string, string>();
   for (let at = 0; at + 512 <= archive.length;) {
     const h = archive.subarray(at, at + 512);
@@ -338,15 +338,11 @@ export function untar(archive: Buffer): Map<string, Buffer> {
       if (archive.subarray(at).some((b) => b !== 0)) throw malformed();
       break;
     }
-    // node-tar skips a header whose checksum doesn't match (either sum tar has used): refused rather than read.
+    // node-tar skips a header whose checksum isn't the unsigned sum: refused rather than read.
     const stored = parseInt(field(h, 148, 8).trim(), 8);
-    let [unsigned, signed] = [0, 0];
-    for (let i = 0; i < 512; i++) {
-      const b = i >= 148 && i < 156 ? 0x20 : h[i]!;
-      unsigned += b;
-      signed += b > 127 ? b - 256 : b;
-    }
-    if (stored !== unsigned && stored !== signed) throw malformed();
+    let sum = 0;
+    for (let i = 0; i < 512; i++) sum += i >= 148 && i < 156 ? 0x20 : h[i]!;
+    if (stored !== sum) throw malformed();
     // node-tar reads the prefix field only under POSIX ustar's magic; GNU's puts other fields there.
     const magic = h.subarray(257, 265).toString('latin1');
     const posixUstar = magic === 'ustar\x0000';
@@ -373,7 +369,9 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     if (raw.includes('\\') || segments.some((x) => x === '' || x === '.')) throw malformed();
     if (segments.length < 2) continue;
     const path = segments.slice(1).join('/');
-    const fold = path.normalize('NFC').toLowerCase();
+    // Filesystems fold non-ASCII case and normalization their own ways: such a path is refused, so ASCII case is all.
+    if (/[^\x20-\x7e]/.test(path)) throw malformed();
+    const fold = path.toLowerCase();
     if ((folded.get(fold) ?? path) !== path) throw malformed();
     folded.set(fold, path);
     files.set(path, data);

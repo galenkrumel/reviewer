@@ -229,7 +229,7 @@ test('a failed fetch spends the bytes it received, so oversized tarballs can\'t 
 });
 
 test('tar framing node-tar would read another way (checksum, magic, data after the end) is not inspected', async () => {
-  const names = ['sum', 'magic', 'tail'];
+  const names = ['sum', 'magic', 'tail', 'signed', 'uni'];
   const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
     Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
   const plain = (n: string) => gunzipSync(packageTarball(n, '1.0.1'));
@@ -238,11 +238,19 @@ test('tar framing node-tar would read another way (checksum, magic, data after t
   const magic = plain('magic');
   magic.write('ustar\0' + '01', 257, 'latin1');
   const tail = Buffer.concat([plain('tail'), gunzipSync(packageTarball('tail', '1.0.1', { postinstall: 'x' }))]);
-  for (const [n, body] of [['sum', sum], ['magic', magic], ['tail', tail]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
+  // A checksum only the signed sum matches: node-tar takes only the unsigned one.
+  const signed = plain('signed');
+  signed[265] = 0xff;
+  signed.write(' '.repeat(8), 148, 'latin1');
+  const signedSum = signed.subarray(0, 512).reduce((n, b) => n + (b > 127 ? b - 256 : b), 0);
+  signed.write(signedSum.toString(8).padStart(6, '0') + '\0 ', 148, 'latin1');
+  for (const [n, body] of [['sum', sum], ['magic', magic], ['tail', tail], ['signed', signed]] as const) s.registry.tarballs.set(url(n, '1.0.1'), gzipSync(body));
+  // A filesystem may fold `ſ` (long s) to `s`, or not.
+  s.registry.tarballs.set(url('uni', '1.0.1'), tarball({ 'package/package.json': JSON.stringify({ name: 'uni' }), 'package/ſcript.js': '' }));
   const review = await s.opened();
 
-  assert.match(review.body, /3 packages weren't inspected/);
-  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 3);
+  assert.match(review.body, /5 packages weren't inspected/);
+  assert.equal(s.logs.filter((l) => l.msg === 'package fetch failed' && l.error === 'malformed tar archive').length, 5);
 });
 
 test('on a case-insensitive filesystem two paths are one: such a tarball is not inspected, and any-case manifests count', async () => {
