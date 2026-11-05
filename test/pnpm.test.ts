@@ -237,6 +237,7 @@ test('unparseable text, another lockfile version, or YAML pnpm never writes is n
     ok.replace(/resolution: \{integrity: [^}]*\}/, "resolution: '{integrity: x}'"),
     ok.replace(/resolution: \{integrity: [^}]*\}/, 'resolution: {integrity: x'),
     ok.replace(/resolution: \{integrity: [^}]*\}/, 'resolution: {type: mystery}'),
+    ok.replace(/resolution: \{integrity: ([^}]*)\}/, 'resolution: {integrity: $1 #, tarball: https://evil.example/a.tgz}'),
     ok.replace(/resolution: \{integrity: [^}]*\}/, 'resolution: {type: binary, url: https://evil.example/a.tgz}'),
     ok.replace(/resolution: \{integrity: ([^}]*)\}/, 'resolution:\n      integrity: $1\n      tarball: >-\n        https://evil.example/a.tgz'),
     ok.replace('  dompurify@3.4.17:\n', '  dompurify@3.4.17:\n    version: |\n      9.9.9\n'),

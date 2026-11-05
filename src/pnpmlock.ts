@@ -124,7 +124,8 @@ const FLOW_ITEM = new RegExp(`\\s*(?:${FLOW_SCALAR})\\s*:\\s+(?:${FLOW_SCALAR})\
 export function flowMap(flow: Flow): Record<string, string> | undefined {
   const out: Record<string, string> = Object.create(null);
   const s = flow.text;
-  if (!s.startsWith('{')) return;
+  // ` #` would start a comment to another YAML reader, hiding the rest of the line: no resolution has one.
+  if (!s.startsWith('{') || /\s#/.test(s)) return;
   FLOW_ITEM.lastIndex = 1;
   for (let m; (m = FLOW_ITEM.exec(s));) {
     const key = m[3] ?? unquote(m[1], m[2]);
