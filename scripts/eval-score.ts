@@ -35,22 +35,34 @@ const rank = (s: Severity) => SEVERITIES.indexOf(s);
 export function score(key: AnswerKey, findings: Finding[] | undefined): Score {
   const s: Score = { outcome: 'error', matched: {}, missed: [], ambiguous: [], forbidden: [], acceptable: [], unreviewed: [] };
   if (!findings) return s;
-  const used = new Set<Finding>();
-  for (const e of key.expected) {
-    // A finding already matched to an earlier defect can't count again, so overlapping windows need a finding each.
-    const candidates = findings.filter((f) => !used.has(f) && on(f, e)).sort((a, b) => rank(b.severity) - rank(a.severity));
-    const f = candidates[0];
+  // Each finding satisfies at most one defect, and the matching is maximum (augmenting paths), so a finding that only
+  // one defect can use is reassigned to it rather than lost to an overlapping window. Each defect tries its most
+  // severe candidates first.
+  // ponytail: severity is a preference, not optimised; an LLM matcher should decide when a defect has several candidates.
+  const bySeverity = (a: Finding, b: Finding) => rank(b.severity) - rank(a.severity);
+  const candidates = key.expected.map((e) => findings.filter((f) => on(f, e)).sort(bySeverity));
+  const owner = new Map<Finding, number>();
+  const assign = (i: number, seen: Set<Finding>): boolean => candidates[i]!.some((f) => {
+    if (seen.has(f)) return false;
+    seen.add(f);
+    const holder = owner.get(f);
+    if (holder !== undefined && !assign(holder, seen)) return false;
+    owner.set(f, i);
+    return true;
+  });
+  key.expected.forEach((_, i) => assign(i, new Set()));
+  const matchOf = new Map([...owner].map(([f, i]) => [i, f]));
+  key.expected.forEach((e, i) => {
+    const f = matchOf.get(i);
     if (!f) {
       s.missed.push(e.id);
-      continue;
+      return;
     }
-    // ponytail: takes the most severe candidate; an LLM matcher should decide when there is more than one.
-    if (candidates.length > 1) s.ambiguous.push(e.id);
-    used.add(f);
+    if (candidates[i]!.length > 1) s.ambiguous.push(e.id);
     s.matched[e.id] = { title: f.title, severity: f.severity, severityOk: rank(f.severity) >= rank(e.minSeverity) };
-  }
+  });
   for (const f of findings) {
-    if (used.has(f)) continue;
+    if (owner.has(f)) continue;
     if (key.forbidden?.some((r) => on(f, r))) s.forbidden.push(f.title);
     else if (key.acceptableExtras?.some((r) => on(f, r))) s.acceptable.push(f.title);
     else s.unreviewed.push(f.title);

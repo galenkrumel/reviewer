@@ -5,7 +5,7 @@
 // A missing argument, malformed case JSON, an unknown focus, an unsupported url or a missing required environment
 // variable (OPENROUTER_API_KEY and REVIEW_MODEL always, GITHUB_TOKEN for a GitHub url) throws before the run.
 // The run prints a summary: the result, calls, cost and models, a line per finding, and the Phoenix trace id. With
-// --json it prints { findings | error, transcript, usage } instead, for when Phoenix isn't running or to pipe into jq.
+// --json it prints { findings | error, score?, transcript, usage } instead, for when Phoenix isn't running or to pipe into jq.
 // A fetching, scoping or reviewer error exits 1.
 // A case with "expected" (and optional "acceptableExtras", "forbidden"; see eval-score.ts) is an answer key: the run is
 // scored against it in code, the score is printed (and is "score" in the --json output), and a failed score exits 2.

@@ -56,6 +56,17 @@ test('one finding satisfies at most one expected defect, even when their windows
   assert.deepEqual([Object.keys(s.matched), s.missed], [['leak'], ['retry']]);
 });
 
+test('a finding only one defect can use is left to that defect, so overlapping windows still all match', () => {
+  const two: AnswerKey = { expected: [
+    { id: 'wide', path: 'a.ts', lines: [1, 20], minSeverity: 'low', defect: 'anything in the file' },
+    { id: 'narrow', path: 'a.ts', lines: [10, 10], minSeverity: 'low', defect: 'line 10 exactly' },
+  ] };
+  // Greedy matching would give 'wide' the high finding on line 10 and leave 'narrow' with nothing.
+  const s = score(two, [finding({ line: 10, severity: 'high', title: 'on 10' }), finding({ line: 3, title: 'on 3' })]);
+  assert.equal(s.outcome, 'pass');
+  assert.deepEqual([s.matched.wide?.title, s.matched.narrow?.title], ['on 3', 'on 10']);
+});
+
 test('a run that never reported is an error, not a fail; an empty key with no findings passes', () => {
   assert.equal(score(key, undefined).outcome, 'error');
   assert.equal(score({ expected: [] }, []).outcome, 'pass');
