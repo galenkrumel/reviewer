@@ -26,6 +26,8 @@ export interface PackageChange {
   advisories?: ClassifiedAdvisory[];
   /** What depends on it by name, from the same side as `resolved`: other packages, the root project or workspaces. */
   pulledBy?: string[];
+  /** Set when that side's lockfile had more dependency edges than the check records, so `pulledBy` may miss some. */
+  pulledByPartial?: true;
 }
 
 /**
@@ -79,7 +81,9 @@ const MAX_RUN_LOCKFILES = 200;
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
 /** A lockfile's installed packages, and what depends on each name. */
-interface Lock { list: Entry[]; pulledBy: Map<string, Set<string>> }
+interface Lock { list: Entry[]; pulledBy: Map<string, Set<string>>; partial: boolean }
+// Dependency edges recorded per lockfile, about ten times a big monorepo's: past it a crafted lockfile can't grow the map.
+const MAX_EDGES = 500_000;
 const DEPENDENCY_MAPS = ['dependencies', 'optionalDependencies', 'peerDependencies', 'devDependencies'];
 
 /**
@@ -88,7 +92,7 @@ const DEPENDENCY_MAPS = ['dependencies', 'optionalDependencies', 'peerDependenci
  */
 function entries(text: string | undefined): Lock | undefined {
   const pulledBy = new Map<string, Set<string>>();
-  if (text === undefined) return { list: [], pulledBy };
+  if (text === undefined) return { list: [], pulledBy, partial: false };
   let lock: any;
   try {
     lock = JSON.parse(text);
@@ -101,6 +105,7 @@ function entries(text: string | undefined): Lock | undefined {
   let count = 0;
   for (const _ in packages) if (++count > MAX_ENTRIES) return;
   const out: Entry[] = [];
+  let [edges, partial] = [0, false];
   for (const key in packages) {
     const e = packages[key];
     if (typeof e !== 'object' || e === null) return;
@@ -110,8 +115,9 @@ function entries(text: string | undefined): Lock | undefined {
     const by = typeof e.name === 'string' ? e.name : at < 0 ? key || '(root)' : key.slice(at + 'node_modules/'.length);
     for (const map of DEPENDENCY_MAPS) {
       const deps = e[map];
-      if (typeof deps !== 'object' || deps === null) continue;
+      if (partial || typeof deps !== 'object' || deps === null) continue;
       for (const d in deps) {
+        if (++edges > MAX_EDGES) { partial = true; break; }
         const set = pulledBy.get(d) ?? new Set();
         set.add(by);
         pulledBy.set(d, set);
@@ -135,7 +141,7 @@ function entries(text: string | undefined): Lock | undefined {
     const via = installed === e.name ? undefined : pulledBy.get(installed);
     if (via) pulledBy.set(e.name, new Set([...(pulledBy.get(e.name) ?? []), ...via]));
   }
-  return { list: out, pulledBy };
+  return { list: out, pulledBy, partial };
 }
 
 const str = (v: unknown) => (typeof v === 'string' ? v : undefined);
@@ -250,6 +256,7 @@ export function compareLockfile(base: string | undefined, head: string | undefin
         ...(e.resolved !== undefined && { resolved: e.resolved }), ...(e.integrity !== undefined && { integrity: e.integrity }),
         ...(to !== undefined && lines.has(e.key) && { line: lines.get(e.key) }),
         ...(pulledBy.length && { pulledBy }),
+        ...((to === undefined ? baseLock : headLock).partial && { pulledByPartial: true as const }),
       });
     };
     const removed = [...was.keys()].filter((v) => !is.has(v)).sort(byVersion);
@@ -411,6 +418,7 @@ export function describeCheck(check: DependencyCheck): string {
         c.line !== undefined && `line ${c.line}`,
         c.resolved !== undefined && !c.resolved.startsWith(REGISTRY) && `resolved from ${clip(redact(c.resolved))}`,
         c.pulledBy && `pulled in by ${c.pulledBy.map((d) => clip(d, 100)).join(', ')}`,
+        c.pulledByPartial && 'dependents only partly recorded (the lockfile has more dependency entries than the check reads)',
       ].filter(Boolean);
       const move = describeMove({ ...c, from: c.from && clip(c.from), to: c.to && clip(c.to) });
       line(`- ${clip(c.name)} ${move}${notes.length ? `, ${notes.join('; ')}` : ''}`);

@@ -106,6 +106,16 @@ test('an npm alias keeps the dependents that install it under its alias', async 
   assert.match(block(s.model.requestsFor('security')[0]!, 'dependency-check')!, /- dompurify 3\.4\.11 → 3\.4\.17, line \d+; pulled in by app/);
 });
 
+test('a lockfile with more dependency edges than any real one says its dependents are partial', async () => {
+  const many = Object.fromEntries(Array.from({ length: 500_001 }, (_, i) => [`d${i}`, '*']));
+  const head = lock({ 'node_modules/dompurify': pkg('dompurify', '3.4.17') }, { dependencies: { dompurify: '^3.4.0' }, optionalDependencies: many });
+  const s = setup({ [LOCK]: purify('3.4.11') }, { [LOCK]: head });
+  await s.opened();
+
+  assert.match(block(s.model.requestsFor('security')[0]!, 'dependency-check')!,
+    /- dompurify 3\.4\.11 → 3\.4\.17, line \d+; [^\n]*dependents only partly recorded/);
+});
+
 test("a long package name can't push the check's own notes off its line", async () => {
   const name = 'x'.repeat(5000);
   const s = setup({ [LOCK]: lock({ [`node_modules/${name}`]: { version: '1.0.0' } }) }, { [LOCK]: lock({ [`node_modules/${name}`]: { version: '2.0.0' } }) });
