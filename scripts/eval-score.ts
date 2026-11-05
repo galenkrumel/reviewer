@@ -37,7 +37,8 @@ export function score(key: AnswerKey, findings: Finding[] | undefined): Score {
   if (!findings) return s;
   const used = new Set<Finding>();
   for (const e of key.expected) {
-    const candidates = findings.filter((f) => on(f, e)).sort((a, b) => rank(b.severity) - rank(a.severity));
+    // A finding already matched to an earlier defect can't count again, so overlapping windows need a finding each.
+    const candidates = findings.filter((f) => !used.has(f) && on(f, e)).sort((a, b) => rank(b.severity) - rank(a.severity));
     const f = candidates[0];
     if (!f) {
       s.missed.push(e.id);

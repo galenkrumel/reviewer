@@ -46,6 +46,16 @@ test('several findings on one anchor take the most severe and are flagged ambigu
   assert.deepEqual(s.unreviewed, ['minor']);
 });
 
+test('one finding satisfies at most one expected defect, even when their windows overlap', () => {
+  const two: AnswerKey = { expected: [
+    { id: 'leak', path: 'a.ts', lines: [8, 12], minSeverity: 'low', defect: 'token goes anywhere' },
+    { id: 'retry', path: 'a.ts', lines: [10, 14], minSeverity: 'low', defect: 'no retry' },
+  ] };
+  const s = score(two, [finding({ line: 10 })]);
+  assert.equal(s.outcome, 'fail');
+  assert.deepEqual([Object.keys(s.matched), s.missed], [['leak'], ['retry']]);
+});
+
 test('a run that never reported is an error, not a fail; an empty key with no findings passes', () => {
   assert.equal(score(key, undefined).outcome, 'error');
   assert.equal(score({ expected: [] }, []).outcome, 'pass');
