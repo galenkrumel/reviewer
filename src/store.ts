@@ -264,12 +264,14 @@ export function openStore(dataDir: string, clock: Clock) {
 
     /**
      * Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order.
-     * Returns whether it was recorded.
+     * Returns whether `at` is later than any recorded before.
      */
     recordPrState(repo: string, pr: number, state: PrState, at: Date): boolean {
-      return db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
+      const prev = db.prepare('SELECT at FROM pr_states WHERE repo = ? AND pr = ?').get(repo, pr) as any;
+      db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
         ON CONFLICT (repo, pr) DO UPDATE SET state = excluded.state, at = excluded.at WHERE excluded.at >= pr_states.at`)
-        .run(repo, pr, state, at.toISOString()).changes > 0;
+        .run(repo, pr, state, at.toISOString());
+      return !prev || prev.at < at.toISOString();
     },
 
     /** Whether a run was ever recorded for this `X-GitHub-Delivery`. */

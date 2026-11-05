@@ -10,15 +10,15 @@ test('recovery redelivers what the service never answered, oldest first, and log
   const github = new FakeGitHub();
   github.deliveries = [
     // Newest first, as GitHub lists them; one entry per attempt.
-    { id: 9, guid: 'answered-later', deliveredAt: ago(5), statusCode: 202, event: 'pull_request' },
-    { id: 8, guid: 'down-2', deliveredAt: ago(10), statusCode: 502, event: 'pull_request_review_thread' },
-    { id: 7, guid: 'answered-later', deliveredAt: ago(15), statusCode: 0, event: 'pull_request' },
-    { id: 6, guid: 'down-1', deliveredAt: ago(20), statusCode: 0, event: 'pull_request' },
-    { id: 5, guid: 'rejected', deliveredAt: ago(25), statusCode: 401, event: 'pull_request' },
-    { id: 4, guid: 'gave-up', deliveredAt: ago(30), statusCode: 503, event: 'pull_request' },
-    { id: 3, guid: 'gave-up', deliveredAt: ago(35), statusCode: 503, event: 'pull_request' },
-    { id: 2, guid: 'gave-up', deliveredAt: ago(40), statusCode: 503, event: 'pull_request' },
-    { id: 1, guid: 'too-old', deliveredAt: ago(7 * 60), statusCode: 0, event: 'pull_request' },
+    { id: 9, guid: 'answered-later', deliveredAt: ago(5), statusCode: 202, event: 'pull_request', redelivery: false },
+    { id: 8, guid: 'down-2', deliveredAt: ago(10), statusCode: 502, event: 'pull_request_review_thread', redelivery: false },
+    { id: 7, guid: 'answered-later', deliveredAt: ago(15), statusCode: 0, event: 'pull_request', redelivery: false },
+    { id: 6, guid: 'down-1', deliveredAt: ago(20), statusCode: 0, event: 'pull_request', redelivery: false },
+    { id: 5, guid: 'rejected', deliveredAt: ago(25), statusCode: 401, event: 'pull_request', redelivery: false },
+    { id: 4, guid: 'gave-up', deliveredAt: ago(30), statusCode: 503, event: 'pull_request', redelivery: false },
+    { id: 3, guid: 'gave-up', deliveredAt: ago(35), statusCode: 503, event: 'pull_request', redelivery: false },
+    { id: 2, guid: 'gave-up', deliveredAt: ago(40), statusCode: 503, event: 'pull_request', redelivery: false },
+    { id: 1, guid: 'too-old', deliveredAt: ago(7 * 60), statusCode: 0, event: 'pull_request', redelivery: false },
   ];
   const { app, logs } = testApp({ model: new ScriptedModel([]), github, time: NOW });
 
@@ -33,9 +33,20 @@ test('recovery redelivers what the service never answered, oldest first, and log
 test("a delivery older than the window stays out of it, though a recent redelivery of it failed too", async () => {
   const github = new FakeGitHub();
   github.deliveries = [
-    { id: 2, guid: 'old', deliveredAt: ago(30), statusCode: 502, event: 'pull_request' },
-    { id: 1, guid: 'old', deliveredAt: ago(7 * 60), statusCode: 0, event: 'pull_request' },
+    { id: 2, guid: 'old', deliveredAt: ago(30), statusCode: 502, event: 'pull_request', redelivery: false },
+    { id: 1, guid: 'old', deliveredAt: ago(7 * 60), statusCode: 0, event: 'pull_request', redelivery: false },
   ];
+  const { app } = testApp({ model: new ScriptedModel([]), github, time: NOW });
+
+  await app.recoverDeliveries();
+
+  assert.deepEqual(github.redelivered, []);
+});
+
+test("a delivery whose first attempt is past the listing, behind a recent failed redelivery, is not redelivered", async () => {
+  const github = new FakeGitHub();
+  // Paging stopped before the first attempt: only GitHub's redelivery flag shows it was older.
+  github.deliveries = [{ id: 2, guid: 'old', deliveredAt: ago(30), statusCode: 502, event: 'pull_request', redelivery: true }];
   const { app } = testApp({ model: new ScriptedModel([]), github, time: NOW });
 
   await app.recoverDeliveries();
@@ -46,8 +57,8 @@ test("a delivery older than the window stays out of it, though a recent redelive
 test('a redelivery that fails is logged and the rest still go', async () => {
   const github = new FakeGitHub();
   github.deliveries = [
-    { id: 2, guid: 'b', deliveredAt: ago(5), statusCode: 0, event: 'pull_request' },
-    { id: 1, guid: 'a', deliveredAt: ago(10), statusCode: 0, event: 'pull_request' },
+    { id: 2, guid: 'b', deliveredAt: ago(5), statusCode: 0, event: 'pull_request', redelivery: false },
+    { id: 1, guid: 'a', deliveredAt: ago(10), statusCode: 0, event: 'pull_request', redelivery: false },
   ];
   github.redeliverRefused = new Set([1]);
   const { app, logs } = testApp({ model: new ScriptedModel([]), github, time: NOW });
@@ -90,5 +101,17 @@ test('a close and reopen redelivered in reverse order still gets the PR reviewed
   await app.drain();
 
   // Reviewed (a clean one posts nothing), not cancelled by the older close.
+  assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish']);
+});
+
+test('a close with the same timestamp as the reopen it arrived after cancels nothing', async () => {
+  const { pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([noFindings()]), github });
+  const at = { updated_at: '2026-01-01T00:01:00Z' };
+
+  await app.receive(delivery('pull_request', prPayload('reopened', REPO, pr, {}, at)));
+  await app.receive(delivery('pull_request', prPayload('closed', REPO, pr, {}, { ...at, state: 'closed' })));
+  await app.drain();
+
   assert.deepEqual(app.runs().map((r) => r.status), ['nothing_to_publish']);
 });

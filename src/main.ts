@@ -145,7 +145,11 @@ const server = createServer((req, res) => {
 // Webhooks GitHub couldn't deliver while the service was down (every deploy: the disk means the old instance stops
 // first) are never retried by GitHub, so ask for them again. A minute after startup, once Render routes to this
 // instance, then every 15 minutes for an outage that didn't restart it.
-const recover = () => app.recoverDeliveries().catch((err) => log({ level: 'error', msg: 'delivery recovery failed', error: errorMessage(err) }));
+// One pass at a time: two would both see the same failed deliveries and redeliver them twice.
+let recovering: Promise<void> | undefined;
+const recover = () => recovering ??= app.recoverDeliveries()
+  .catch((err) => log({ level: 'error', msg: 'delivery recovery failed', error: errorMessage(err) }))
+  .finally(() => { recovering = undefined; });
 const firstRecovery = setTimeout(recover, 60_000);
 const recovery = setInterval(recover, 15 * 60_000);
 

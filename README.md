@@ -109,7 +109,7 @@ Open the service's logs in Render. Every webhook GitHub sends logs a `delivery` 
 - **No `delivery` lines:** GitHub isn't reaching the service. Check the App's webhook URL, and look at
   **Advanced → Recent Deliveries** in the App settings. You can redeliver a failed event from there. The service
   also asks GitHub to redeliver the events it never answered in the last 6 hours, a minute after it starts and every
-  15 minutes after that, so a deploy or crash doesn't lose a push.
+  15 minutes after that, so a deploy or crash doesn't lose a push. It gives up on an event after 3 attempts.
 - **`delivery` with status 401:** `GITHUB_WEBHOOK_SECRET` doesn't match the App's webhook secret.
 - **`delivery` but no review:** the line's `reason` says why it was skipped, e.g. the repository isn't in
   `REPO_ALLOWLIST`, the PR is a draft, or the author is outside and the PR lacks the label.
@@ -211,8 +211,8 @@ The parser accepts a strict YAML subset: top-level `key: value`, flow lists `[a,
     No `delivery` lines at all means GitHub isn't reaching the service: check the App's webhook URL and its
     **Advanced → Recent Deliveries**.
   - Each event the service asks GitHub to send again logs `redelivered` with its `delivery` GUID, `event`, the `status`
-    it failed with (0: no answer) and `at`; a refused ask logs `redelivery failed`. A delivery already seen logs
-    `delivery` with the reason `delivery already received` and starts nothing.
+    it failed with (0: no answer) and `at`; a refused ask logs `redelivery failed`. A delivery whose GUID already
+    started a run logs `delivery` with the reason `delivery already received` and starts no other.
   - Every run logs `run finished` with `run`, `repo`, `pr`, `status`, `reviewId`, `error` and `cost` (USD).
   - Failures also carry `step`, `run`, `repo`, `pr` and `error`. `step` is one of:
   - `fetch`: the git fetch of the PR's commits;

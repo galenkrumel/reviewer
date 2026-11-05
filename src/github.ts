@@ -143,7 +143,7 @@ export function gitHubApp(appId: string, privateKey: string): GitHubPort {
         const res = await request(appJwt(), 'GET', path);
         const page: any[] = await res.json();
         for (const d of page) {
-          out.push({ id: d.id, guid: d.guid, deliveredAt: new Date(d.delivered_at), statusCode: d.status_code ?? 0, event: d.event });
+          out.push({ id: d.id, guid: d.guid, deliveredAt: new Date(d.delivered_at), statusCode: d.status_code ?? 0, event: d.event, redelivery: !!d.redelivery });
         }
         if (!page.length || out.at(-1)!.deliveredAt < since) return out;
         path = /<https:\/\/api\.github\.com(\/[^>]*)>;\s*rel="next"/.exec(res.headers.get('link') ?? '')?.[1];

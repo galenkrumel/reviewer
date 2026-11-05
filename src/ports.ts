@@ -90,6 +90,8 @@ export interface HookDelivery {
   /** The HTTP status the service answered with; 0 when it never answered. */
   statusCode: number;
   event: string;
+  /** An attempt asked for after the first. */
+  redelivery: boolean;
 }
 
 export interface Advisory {

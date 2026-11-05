@@ -369,18 +369,21 @@ export function createApp(deps: {
     const pr = payload.pull_request;
     const repo: string | undefined = payload.repository?.full_name;
     // Every pull_request delivery carries the PR's state, whatever its action and whether it starts a run.
-    // Whether this delivery is the latest word on the PR's state: an older close arriving late (a redelivery) is not.
+    // Whether this delivery is newer than anything recorded about the PR's state. An older or same-time close arriving
+    // late (a redelivery) cancels nothing: a run on a closed PR goes stale at its own check anyway.
     let latest = true;
     if (event === 'pull_request' && repo && allowlist.has(repo.toLowerCase()) && Number.isInteger(pr?.number)) {
       const updated = new Date(pr.updated_at);
+      const known = !Number.isNaN(updated.getTime());
+      // Without a time it can't be shown late, so it still cancels.
       latest = store.recordPrState(repo, pr.number,
         pr.merged || pr.merged_at ? 'merged' : pr.state === 'closed' ? 'closed' : pr.draft ? 'draft' : 'open',
-        Number.isNaN(updated.getTime()) ? deps.clock.now() : updated);
+        known ? updated : deps.clock.now()) || !known;
     }
     if (event === 'pull_request' && (payload.action === 'converted_to_draft' || payload.action === 'closed')) {
       if (!repo || !allowlist.has(repo.toLowerCase())) return { status: 202, ignored: `repo ${repo} not in allowlist` };
       if (!Number.isInteger(pr?.number)) return { status: 400 };
-      if (!latest) return { status: 202, ignored: `${payload.action}: older than the PR's recorded state` };
+      if (!latest) return { status: 202, ignored: `${payload.action}: not newer than the PR's recorded state` };
       store.supersede(repo, pr.number);
       return { status: 202, ignored: `${payload.action}: superseded the PR's runs` };
     }
@@ -415,12 +418,14 @@ export function createApp(deps: {
    */
   async function recoverDeliveries() {
     const since = new Date(deps.clock.now().getTime() - LOOKBACK_MS);
-    // Every attempt of a delivery, oldest last: age and order go by its first one, not a recent redelivery.
+    // Every attempt of a delivery, oldest last: age and order go by its first one, not a recent redelivery. When the
+    // oldest listed is a redelivery, the first was past where listing stopped, so before the window and left alone; a
+    // first attempt inside it comes with all its later ones, so the count is whole.
     const byGuid = new Map<string, HookDelivery[]>();
     for (const a of await github.listDeliveries(since)) byGuid.set(a.guid, [...byGuid.get(a.guid) ?? [], a]);
     const lost = [...byGuid.values()]
       .filter((tries) => tries.length < MAX_ATTEMPTS && tries.every((t) => t.statusCode === 0 || t.statusCode >= 500))
-      .map((tries) => tries.at(-1)!).filter((first) => first.deliveredAt >= since)
+      .map((tries) => tries.at(-1)!).filter((first) => !first.redelivery && first.deliveredAt >= since)
       .sort((a, b) => a.deliveredAt.getTime() - b.deliveredAt.getTime());
     for (const a of lost) {
       const entry = { delivery: a.guid, event: a.event, status: a.statusCode, at: a.deliveredAt.toISOString() };
