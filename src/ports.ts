@@ -70,8 +70,28 @@ export interface GitHubPort {
   reviewThreads(token: string, repo: string, number: number): Promise<ReviewThread[]>;
   replyToThread(token: string, threadId: string, body: string): Promise<void>;
   resolveThread(token: string, threadId: string): Promise<void>;
+  /**
+   * The App's webhook delivery attempts back to at least `since`, newest first; each redelivery is an attempt of its
+   * own with the same `guid`. Authenticated as the App, not an installation.
+   */
+  listDeliveries(since: Date): Promise<HookDelivery[]>;
+  /** Ask GitHub to send one delivery attempt again, keeping its GUID. */
+  redeliver(id: number): Promise<void>;
   /** The GitHub Advisory Database's advisories affecting one npm package at one version, withdrawn ones included. */
   advisories(token: string, name: string, version: string): Promise<Advisory[]>;
+}
+
+export interface HookDelivery {
+  /** This attempt's. */
+  id: number;
+  /** The delivery's `X-GitHub-Delivery`, shared by all its attempts. */
+  guid: string;
+  deliveredAt: Date;
+  /** The HTTP status the service answered with; 0 when it never answered. */
+  statusCode: number;
+  event: string;
+  /** An attempt asked for after the first. */
+  redelivery: boolean;
 }
 
 export interface Advisory {

@@ -10,7 +10,7 @@ import { after } from 'node:test';
 import { createApp, type AppConfig } from '../src/app.ts';
 import { FetchError } from '../src/ports.ts';
 import type {
-  Advisory, AssistantMessage, ChatRequest, GitHubPort, ModelInfo, ModelPort, NewReview, PullRequest, RegistryPort, ReviewThread,
+  Advisory, AssistantMessage, ChatRequest, GitHubPort, HookDelivery, ModelInfo, ModelPort, NewReview, PullRequest, RegistryPort, ReviewThread,
 } from '../src/ports.ts';
 
 const tmpRoots: string[] = [];
@@ -78,6 +78,11 @@ export class FakeGitHub implements GitHubPort {
   advisoriesDown = false;
   /** Every advisory lookup, as `name@version`. */
   lookups: string[] = [];
+  /** The App's webhook delivery attempts, newest first, as GitHub lists them. */
+  deliveries: HookDelivery[] = [];
+  /** Every redelivery asked for, by attempt id; those in redeliverRefused throw. */
+  redelivered: number[] = [];
+  redeliverRefused = new Set<number>();
   private nextId = 1;
 
   addPullRequest(repo: string, url: string, pr: PullRequest) {
@@ -180,6 +185,16 @@ export class FakeGitHub implements GitHubPort {
     this.checkToken(token);
     if (this.resolveRefused) throw new Error('GitHub GraphQL: Resource not accessible by integration');
     this.thread(threadId).resolved = true;
+  }
+
+  /** All of them: like the real adapter's last page, older ones can come back too. */
+  async listDeliveries(_since: Date) {
+    return structuredClone(this.deliveries);
+  }
+
+  async redeliver(id: number) {
+    this.redelivered.push(id);
+    if (this.redeliverRefused.has(id)) throw new Error('GitHub POST /app/hook/deliveries: 502');
   }
 
   async advisories(token: string, name: string, version: string) {

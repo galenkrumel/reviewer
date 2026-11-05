@@ -160,6 +160,8 @@ export function openStore(dataDir: string, clock: Clock) {
       run_id INTEGER NOT NULL REFERENCES runs(id),
       data TEXT NOT NULL
     );
+    -- A redelivery keeps its GUID: receive() looks it up.
+    CREATE INDEX IF NOT EXISTS runs_delivery_id ON runs(delivery_id);
     -- The Dashboard sums every listed run's cost.
     CREATE INDEX IF NOT EXISTS invocations_run_id ON invocations(run_id);
     CREATE TABLE IF NOT EXISTS waivers (
@@ -260,11 +262,22 @@ export function openStore(dataDir: string, clock: Clock) {
       return row.n;
     },
 
-    /** Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order. */
-    recordPrState(repo: string, pr: number, state: PrState, at: Date) {
+    /**
+     * Record the PR's state unless a delivery about a later `at` already did; deliveries can arrive out of order.
+     * Returns whether `at` is later than any recorded before. A tie still records: deliveries usually arrive in order,
+     * so a close and a reopen in the same second should show the reopen, though a tie is never trusted to cancel runs.
+     */
+    recordPrState(repo: string, pr: number, state: PrState, at: Date): boolean {
+      const prev = db.prepare('SELECT at FROM pr_states WHERE repo = ? AND pr = ?').get(repo, pr) as any;
       db.prepare(`INSERT INTO pr_states (repo, pr, state, at) VALUES (?, ?, ?, ?)
         ON CONFLICT (repo, pr) DO UPDATE SET state = excluded.state, at = excluded.at WHERE excluded.at >= pr_states.at`)
         .run(repo, pr, state, at.toISOString());
+      return !prev || prev.at < at.toISOString();
+    },
+
+    /** Whether a run was ever recorded for this `X-GitHub-Delivery`. */
+    hasDelivery(deliveryId: string): boolean {
+      return db.prepare('SELECT 1 FROM runs WHERE delivery_id = ? LIMIT 1').get(deliveryId) !== undefined;
     },
 
     /** Mark every queued or running job for the PR superseded. */
