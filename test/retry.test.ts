@@ -131,6 +131,29 @@ test('"Retry" from someone who isn\'t a maintainer, any other comment, or on a P
   assert.equal(app.runs().length, runs);
 });
 
+test('the Dependency check\'s finding is posted once however many retries follow', async () => {
+  const lock = (v: string) => JSON.stringify({ name: 'app', lockfileVersion: 3, requires: true, packages: {
+    '': { name: 'app' }, 'node_modules/dompurify': { version: v, resolved: `https://registry.npmjs.org/dompurify/-/dompurify-${v}.tgz`, integrity: `sha512-${v}` },
+  } }, null, 2) + '\n';
+  const fx = gitFixture({ [PATH]: 'keep\n', 'package-lock.json': lock('3.4.10') }, { [PATH]: 'keep\n' + lines(10), 'package-lock.json': lock('3.4.16') });
+  const pr = { number: 7, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const github = new FakeGitHub();
+  github.addPullRequest(REPO, fx.url, pr);
+  github.advisoryDb.push({ id: 'GHSA-mrv2-3pqr-j5jr', severity: 'high', summary: 'XSS', withdrawn: false, package: 'dompurify', versions: ['3.4.16'] });
+  // Performance never answers.
+  const model = new ScriptedModel({ orchestrator: [select('correctness', 'performance')], correctness: [noFindings()], security: [noFindings()] });
+  const { app } = testApp({ model, github });
+  await app.receive(delivery('pull_request', prPayload('opened', REPO, pr)));
+  await app.drain();
+  assert.deepEqual(github.reviews[0]!.review.comments.map((c) => c.path), ['package-lock.json']);
+  for (const _ of [1, 2]) {
+    await app.receive(comment('Retry'));
+    await app.drain();
+  }
+  assert.equal(github.reviews.length, 3);
+  assert.deepEqual(github.reviews.slice(1).map((r) => r.review.comments), [[], []]);
+});
+
 test('a retry of a run that failed outright runs every focus again, since its findings may never have been posted', async () => {
   const fx = gitFixture({ [PATH]: 'keep\n' }, { [PATH]: 'keep\n' + lines(60) });
   const pr = { number: 7, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
