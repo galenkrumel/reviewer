@@ -81,6 +81,8 @@ const MAX_ENTRIES = 50_000;
 const MAX_RUN_TEXT = 128 * 1024 * 1024;
 const MAX_RUN_CHANGES = 100_000;
 const MAX_RUN_LOCKFILES = 200;
+// Real `.npmrc` files are a few lines: past this one isn't parsed, once for every lockfile that reads it.
+const MAX_NPMRC = 64 * 1024;
 
 /** One installed package as a lockfile records it. */
 interface Entry { name: string; version: string; resolved?: string; integrity?: string; key: string }
@@ -343,6 +345,8 @@ export async function checkDependencies(
 ): Promise<DependencyCheck> {
   const check: DependencyCheck = { lockfiles: [], unreadable: [], unchecked: [] };
   let [text, kept] = [0, 0];
+  // Read once a run, however many lockfiles share one; a rejected read rejects every lockfile that needs it.
+  const npmrcs = new Map<string, Promise<string | undefined>>();
   // A rename that changes the file's name (package-lock.json to yarn.lock, or to some other file) is a deletion and an
   // addition, so each side is checked as the kind of file it is. A move that keeps the name compares like an edit.
   const sides = files.flatMap((f): FileChange[] => f.oldPath && posix.basename(f.oldPath) !== posix.basename(f.path)
@@ -367,7 +371,16 @@ export async function checkDependencies(
       // pnpm doesn't record the registry: each side's `.npmrc`, the lockfile directory's after the root's, says where.
       const npmrc = async (side: 'base' | 'head', lockfile: string) => {
         const dir = posix.join(posix.dirname(lockfile), '.npmrc');
-        return [await read(side, '.npmrc'), dir === '.npmrc' ? undefined : await read(side, dir)];
+        return Promise.all(['.npmrc', ...(dir === '.npmrc' ? [] : [dir])].map((p) => {
+          const key = `${side}:${p}`;
+          if (!npmrcs.has(key)) {
+            npmrcs.set(key, read(side, p).then((t) => {
+              if (t !== undefined && Buffer.byteLength(t) > MAX_NPMRC) throw new ToolError('.npmrc is too big');
+              return t;
+            }));
+          }
+          return npmrcs.get(key)!;
+        }));
       };
       if (text <= MAX_RUN_TEXT) {
         changes = compareLockfile(base, head, name, name === 'pnpm-lock.yaml'
