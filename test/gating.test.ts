@@ -80,7 +80,8 @@ test('removing and re-applying the label produces a new review of the same head'
   await send('labeled', labelled, { label: LABEL });
   await app.drain();
   assert.ok((await send('unlabeled', outsider, { label: LABEL })).ignored);
-  await send('labeled', labelled, { label: LABEL });
+  // A label change bumps the PR's updated_at, so the re-label's body differs from the first.
+  await send('labeled', { ...labelled, updated_at: '2026-01-01T00:05:00Z' }, { label: LABEL });
   await app.drain();
 
   assert.equal(github.reviews.length, 2);

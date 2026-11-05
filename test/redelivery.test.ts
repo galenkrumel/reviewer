@@ -92,6 +92,20 @@ test('a delivery received before, redelivered with its GUID, starts no second ru
   assert.deepEqual(app.runs().map((r) => r.event), ['pull_request.labeled']);
 });
 
+test('a captured delivery replayed under a fresh GUID starts no second run', async () => {
+  const { pr, github } = setup();
+  const { app } = testApp({ model: new ScriptedModel([noFindings()]), github });
+  const labeled = delivery('pull_request', prPayload('labeled', REPO, pr, { label: { name: 'ai-review' } }));
+  // The signature covers only the body, so the replay still verifies.
+  const replay = { ...labeled, headers: { ...labeled.headers, 'x-github-delivery': 'forged' } };
+
+  assert.equal((await app.receive(labeled)).status, 202);
+  assert.deepEqual(await app.receive(replay), { status: 202, ignored: 'delivery already received' });
+  await app.drain();
+
+  assert.deepEqual(app.runs().map((r) => r.event), ['pull_request.labeled']);
+});
+
 test('a close and reopen redelivered in reverse order still gets the PR reviewed', async () => {
   const { pr, github } = setup();
   const { app } = testApp({ model: new ScriptedModel([noFindings()]), github });
