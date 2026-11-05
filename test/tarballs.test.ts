@@ -416,6 +416,38 @@ test('on a case-insensitive filesystem two paths are one: such a tarball is not 
   assert.deepEqual(review.comments.map((c) => c.body.split('\n')[0]), ['**b adds an install script**']);
 });
 
+test("a file path Windows would take for another name (a trailing dot or space, a `:` stream) is not inspected", async () => {
+  const names = ['dot', 'space', 'stream'];
+  const s = setup(Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.0')])),
+    Object.fromEntries(names.map((n) => [`node_modules/${n}`, pkg(n, '1.0.1')])));
+  const evil = JSON.stringify({ scripts: { postinstall: 'node evil.js' } });
+  for (const [n, alias] of [['dot', 'package.json.'], ['space', 'package.json '], ['stream', 'package.json::$DATA']]) {
+    s.registry.tarballs.set(url(n!, '1.0.1'), tarball({ 'package/package.json': JSON.stringify({ name: n }), [`package/${alias}`]: evil }));
+  }
+  const review = await s.opened();
+
+  assert.match(review.body, /Not inspected[^\n]*\n- `dot 1\.0\.1`\n- `space 1\.0\.1`\n- `stream 1\.0\.1`\n\n/);
+});
+
+test('the tarballs a run fetches are capped, old versions and failed fetches included', async () => {
+  // One new version, a different old one in each lockfile: the package cap admits it once, the old versions add up.
+  const olds = ['1.0.0', '1.1.0', '1.2.0'];
+  const fx = gitFixture(Object.fromEntries(olds.map((v, i) => [`w${i}/${LOCK}`, lock({ 'node_modules/x': pkg('x', v) })])),
+    Object.fromEntries(olds.map((_, i) => [`w${i}/${LOCK}`, lock({ 'node_modules/x': pkg('x', '2.0.0') })])));
+  const pr = { number: 9, state: 'open' as const, draft: false, headSha: fx.headSha, baseSha: fx.baseSha };
+  const github = new FakeGitHub();
+  github.addPullRequest(REPO, fx.url, pr);
+  const registry = new FakeRegistry();
+  for (const v of olds) registry.missing.add(url('x', v));
+  const t = testApp({ model: new ScriptedModel([]), github, registry, config: { registryFetchPackages: 1 } });
+  await t.app.receive(delivery('pull_request', openedPayload(REPO, pr)));
+  await t.app.drain();
+
+  // Twice the package cap: the new version and one old one.
+  assert.deepEqual(registry.fetched, [url('x', '2.0.0'), url('x', '1.0.0')]);
+  assert.match(github.reviews.at(-1)!.review.body, /Not inspected[^\n]*\n- `x 2\.0\.0`\n- `x 2\.0\.0`\n- `x 2\.0\.0`\n\n/);
+});
+
 test('a link in a tarball, which npm would extract over a file, is not inspected', async () => {
   const s = setup({ 'node_modules/ln': pkg('ln', '1.0.0') }, { 'node_modules/ln': pkg('ln', '1.0.1') });
   s.registry.tarballs.set(url('ln', '1.0.1'), tarball({

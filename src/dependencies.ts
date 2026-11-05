@@ -441,7 +441,8 @@ export function untar(archive: Buffer): Map<string, Buffer> {
     if (!['0', '', '7'].includes(type)) throw malformed();
     const segments = raw.split('/');
     if (raw.startsWith('/') || segments.includes('..')) continue;
-    if (raw.includes('\\') || segments.some((x) => x === '' || x === '.')) throw malformed();
+    // Windows takes `package.json.`, `package.json ` and `package.json::$DATA` for `package.json`: refused, like `.`.
+    if (raw.includes('\\') || raw.includes(':') || segments.some((x) => x === '' || x === '.' || /[. ]$/.test(x))) throw malformed();
     if (segments.length < 2) continue;
     const path = segments.slice(1).join('/');
     // Filesystems fold non-ASCII case and normalization their own ways: such a path is refused, so ASCII case is all.
@@ -565,7 +566,9 @@ export async function inspectPackages(check: DependencyCheck, opts: {
   /** Each tarball's files by lowercased path and its body (for integrity), or why it couldn't be read. */
   const byUrl = new Map<string, { files: Map<string, Buffer>; body: Buffer } | Error>();
   const parsed = new Map<string, Record<string, string>>();
-  let [bytes, unpacked] = [0, 0];
+  let [bytes, unpacked, tarballs] = [0, 0, 0];
+  // Old versions are fetched too, and a failed fetch spends no bytes: the tarballs a run asks for are capped as well.
+  const maxTarballs = caps.packages * 2;
   /** A tarball's files, fetched once per run; undefined once the run is superseded. */
   const filesAt = async (url: string | undefined, integrity: string | undefined) => {
     if (url === undefined) throw new Error('no source recorded');
@@ -574,6 +577,7 @@ export async function inspectPackages(check: DependencyCheck, opts: {
       if (opts.stopped()) return;
       try {
         if (bytes >= caps.bytes) throw new Error(`over the run's cap of ${caps.bytes} bytes fetched`);
+        if (++tarballs > maxTarballs) throw new Error(`over the run's cap of ${maxTarballs} tarballs fetched`);
         const body = await opts.fetch(url, caps.bytes - bytes);
         bytes += body.length;
         opts.fetched(url, { bytes: body.length });
