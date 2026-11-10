@@ -1,5 +1,5 @@
 // Scores one eval run against its case's answer key, in code alone (#102). A finding counts as an expected defect when
-// it lands on the defect's path and line window; extras a human has ruled on are acceptable or forbidden, and the rest
+// it lands on the defect's path and line window, or on one of its alsoAt anchors; extras a human has ruled on are acceptable or forbidden, and the rest
 // wait in the unreviewed queue. An LLM matcher is only needed where several findings sit on one defect's anchor.
 import { SEVERITIES } from '../src/findings.ts';
 import type { Finding } from '../src/store.ts';
