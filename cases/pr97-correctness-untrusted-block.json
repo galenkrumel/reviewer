@@ -14,7 +14,16 @@
         155
       ],
       "minSeverity": "low",
-      "defect": "A package name containing `</untrusted_data>` closes the dependency-check block early, letting the rest of that lockfile line appear outside the untrusted block to the model."
+      "defect": "A package name containing `</untrusted_data>` closes the dependency-check block early, letting the rest of that lockfile line appear outside the untrusted block to the model.",
+      "alsoAt": [
+        {
+          "path": "src/dependencies.ts",
+          "lines": [
+            381,
+            387
+          ]
+        }
+      ]
     }
   ]
 }

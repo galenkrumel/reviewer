@@ -16,5 +16,15 @@
       "minSeverity": "low",
       "defect": "A large backlog can trigger duplicate redelivery requests and waste GitHub API quota."
     }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "src/github.ts",
+      "lines": [
+        145,
+        151
+      ],
+      "title": "Old deliveries can bypass the lookback and attempt cap"
+    }
   ]
 }

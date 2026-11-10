@@ -16,5 +16,23 @@
       "minSeverity": "low",
       "defect": "A delayed `closed` delivery can still cancel a newer reopen when both PR updates have the same `updated_at` timestamp."
     }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "src/app.ts",
+      "lines": [
+        420,
+        423
+      ],
+      "title": "Old deliveries can bypass the lookback and attempt cap"
+    },
+    {
+      "path": "src/github.ts",
+      "lines": [
+        145,
+        151
+      ],
+      "title": "Old deliveries can bypass the lookback and attempt cap"
+    }
   ]
 }
