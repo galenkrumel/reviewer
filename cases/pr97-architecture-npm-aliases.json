@@ -16,5 +16,23 @@
       "minSeverity": "low",
       "defect": "The security focus can see an aliased package as having no dependents, so it may miss that the application installs it directly."
     }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "src/reviewer.ts",
+      "lines": [
+        149,
+        155
+      ],
+      "title": "Lockfile data can close its untrusted block"
+    },
+    {
+      "path": "src/dependencies.ts",
+      "lines": [
+        381,
+        387
+      ],
+      "title": "Lockfile data can close its untrusted block"
+    }
   ]
 }

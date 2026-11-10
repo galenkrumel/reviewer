@@ -16,5 +16,31 @@
       "minSeverity": "medium",
       "defect": "A PR author can make the review worker spend quadratic time and memory, potentially terminating the process."
     }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "src/app.ts",
+      "lines": [
+        814,
+        820
+      ],
+      "title": "Package text in the review summary is uncapped"
+    },
+    {
+      "path": "src/dashboard.ts",
+      "lines": [
+        326,
+        330
+      ],
+      "title": "The dashboard renders every package change"
+    },
+    {
+      "path": "src/dependencies.ts",
+      "lines": [
+        111,
+        117
+      ],
+      "title": "Every changed lockfile is read and compared"
+    }
   ]
 }

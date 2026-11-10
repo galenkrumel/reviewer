@@ -21,6 +21,13 @@ test('a finding whose start_line..line range overlaps the window counts', () => 
   assert.equal(score(key, [finding({ start_line: 4, line: 8 })]).outcome, 'pass');
 });
 
+test('a defect with another anchor matches a finding on either one', () => {
+  const twoPlaces: AnswerKey = { expected: [{ ...key.expected[0]!, alsoAt: [{ path: 'b.ts', lines: [20, 24] }] }] };
+  assert.equal(score(twoPlaces, [finding({ path: 'b.ts', line: 22 })]).outcome, 'pass');
+  assert.equal(score(twoPlaces, [finding({ line: 10 })]).outcome, 'pass');
+  assert.deepEqual(score(twoPlaces, [finding({ path: 'b.ts', line: 10 })]).missed, ['leak']);
+});
+
 test('no finding on the anchor, or one below the minimum severity, fails', () => {
   assert.deepEqual(score(key, [finding({ line: 13 })]).missed, ['leak']);
   assert.equal(score(key, [finding({ path: 'other.ts' })]).outcome, 'fail');

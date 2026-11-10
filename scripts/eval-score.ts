@@ -10,8 +10,11 @@ type Severity = Finding['severity'];
  * line numbers point. Not the current tree: the same code may sit on other lines there.
  */
 export interface Anchor { path: string; lines: [number, number] }
-/** A defect the reviewer must report; `defect` is what an LLM matcher would compare a finding against. */
-export interface Expected extends Anchor { id: string; minSeverity: Severity; defect: string }
+/**
+ * A defect the reviewer must report; `defect` is what an LLM matcher would compare a finding against. `alsoAt` lists
+ * other places the same defect can fairly be reported, such as where bad data is built as well as where it is used.
+ */
+export interface Expected extends Anchor { id: string; minSeverity: Severity; defect: string; alsoAt?: Anchor[] }
 /** An extra finding a human has already ruled on, so later runs don't need a human again. */
 export interface Ruled extends Anchor { title: string }
 export interface AnswerKey { expected: Expected[]; acceptableExtras?: Ruled[]; forbidden?: Ruled[] }
@@ -44,7 +47,8 @@ export function score(key: AnswerKey, findings: Finding[] | undefined): Score {
   // rather than missed; that never moves a finding off a defect it satisfies.
   // ponytail: an LLM matcher should decide when a defect has several candidates; here the most severe goes first.
   const bySeverity = (a: Finding, b: Finding) => rank(b.severity) - rank(a.severity);
-  const candidates = key.expected.map((e) => findings.filter((f) => on(f, e)).sort(bySeverity));
+  const candidates = key.expected
+    .map((e) => findings.filter((f) => [e, ...e.alsoAt ?? []].some((a) => on(f, a))).sort(bySeverity));
   const passing = key.expected.map((e, i) => candidates[i]!.filter((f) => rank(f.severity) >= rank(e.minSeverity)));
   const owner = new Map<Finding, number>();
   const assign = (i: number, seen: Set<Finding>): boolean => passing[i]!.some((f) => {

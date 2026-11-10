@@ -16,5 +16,15 @@
       "minSeverity": "low",
       "defect": "A maintainer can waive one package finding and unintentionally suppress a different package's finding."
     }
+  ],
+  "acceptableExtras": [
+    {
+      "path": "src/dependencies.ts",
+      "lines": [
+        245,
+        276
+      ],
+      "title": "A push can make up to 1,000 advisory lookups"
+    }
   ]
 }
